@@ -111,6 +111,19 @@ func parseGraphExcludeCIDRs(s string) []net.IPNet {
 
 /* ---------------- Utility ---------------- */
 
+// graphStrikesFromScore converts a graph signal score (0-100) to FSM strike credits.
+// Higher confidence violations escalate the FSM faster.
+func graphStrikesFromScore(score int) int {
+	switch {
+	case score >= 90:
+		return 3
+	case score >= 75:
+		return 2
+	default:
+		return 1
+	}
+}
+
 func minInt(a, b, c int) int {
 	m := a
 	if b < m {

@@ -38,6 +38,9 @@ const (
 	ModeLearn Mode = "learn"
 	// ModeFrozenObserve: new edges after freeze emit a signal; no enforcement.
 	ModeFrozenObserve Mode = "frozen-observe"
+	// ModeFrozenEnforce: new edges after freeze emit a high-score signal that
+	// causes the decision engine to enforce immediately via the PEP adapter.
+	ModeFrozenEnforce Mode = "frozen-enforce"
 )
 
 // Store is the interface the adapter needs from a graph edge store.
@@ -345,16 +348,26 @@ func (a *Adapter) handleObservation(ctx context.Context, bus adapterruntime.Even
 		return
 	}
 
-	// In frozen-observe mode, signal any edge that is not already known.
-	if a.cfg.Mode == ModeFrozenObserve &&
-		current.State == graph.EdgeCandidate &&
-		current.SeenCount == 1 {
-		a.emitNewEdgeSignal(ctx, bus, current)
+	// In frozen modes, signal any edge that is not frozen/approved.
+	// Candidate edges (seen during learning but never promoted) are treated as
+	// unknown — they were never part of the frozen baseline.
+	// frozen-observe: score=70 → FSM strikes only.
+	// frozen-enforce: score=95 → decision engine calls PEP directly.
+	if (a.cfg.Mode == ModeFrozenObserve || a.cfg.Mode == ModeFrozenEnforce) &&
+		current.State != graph.EdgeFrozen &&
+		current.State != graph.EdgeApproved {
+		a.emitNewEdgeSignal(ctx, bus, current, a.cfg.Mode == ModeFrozenEnforce)
 	}
 }
 
 // emitNewEdgeSignal publishes a graph.new_edge_after_freeze signal onto the bus.
-func (a *Adapter) emitNewEdgeSignal(ctx context.Context, bus adapterruntime.EventBus, e *graph.Edge) {
+// enforce=true sets score=95 so the decision engine enforces via PEP directly;
+// enforce=false sets score=70 which only injects FSM strikes.
+func (a *Adapter) emitNewEdgeSignal(ctx context.Context, bus adapterruntime.EventBus, e *graph.Edge, enforce bool) {
+	score := 70
+	if enforce {
+		score = 95
+	}
 	sig := signal.NewSignal(
 		signal.ProducerKLIQ,
 		signal.ScopeLocal,
@@ -362,7 +375,7 @@ func (a *Adapter) emitNewEdgeSignal(ctx context.Context, bus adapterruntime.Even
 		e.Source,
 	).
 		SetObject(e.Destination).
-		SetScore(70).
+		SetScore(score).
 		SetConfidence(80).
 		SetTTL(30*time.Minute).
 		AddReasonCode("graph_new_edge_after_freeze").

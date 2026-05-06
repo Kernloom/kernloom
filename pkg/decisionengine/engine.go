@@ -8,7 +8,6 @@ package decisionengine
 
 import (
 	"context"
-	"fmt"
 	"log"
 	"os"
 	"sync"
@@ -82,10 +81,14 @@ func New(policy LocalPolicy, pep PEPAdapter) *Engine {
 
 // EvaluateSignal handles a signal from the event bus.
 //
-// For graph.new_edge_after_freeze signals: the engine produces a Decision and
-// enforces it if the policy permits. Returns nil, nil, nil for signal types the
-// engine does not handle.
-func (e *Engine) EvaluateSignal(ctx context.Context, sig signal.Signal) (*decision.Decision, *decision.EnforcementReceipt, error) {
+// For graph.new_edge_after_freeze signals the engine produces an audit Decision.
+// Enforcement is always handled by the main tick loop via FSM strike injection
+// (graphStrikeCh). The FSM is the single enforcement authority for both modes:
+//   - frozen-observe (score=70): normal strike accumulation → gradual escalation.
+//   - frozen-enforce (score=95): forceBlock flag set → FSM jumps to BLOCK in next tick.
+//
+// Returns nil, nil, nil for unhandled signal types.
+func (e *Engine) EvaluateSignal(_ context.Context, sig signal.Signal) (*decision.Decision, *decision.EnforcementReceipt, error) {
 	if sig.Type != signal.SignalGraphNewEdgeAfterFreeze {
 		return nil, nil, nil
 	}
@@ -96,18 +99,9 @@ func (e *Engine) EvaluateSignal(ctx context.Context, sig signal.Signal) (*decisi
 
 	action := capAction(pol.GraphFreezeAction, pol)
 
-	// Signal-only: no enforcement needed from the engine side.
-	if action == decision.ActionSignal || action == decision.ActionObserve {
-		logger.Printf("SIGNAL-HANDLED type=%s subject=%s score=%d → no enforcement (action=%s, max=%s)",
-			sig.Type, sig.Subject.ID, sig.Score, action, pol.MaxAction)
-		return nil, nil, nil
-	}
-
-	// MinSeverityForBlock gate.
-	if action == decision.ActionBlock && sig.Score < pol.MinSeverityForBlock {
-		logger.Printf("SIGNAL-HANDLED type=%s subject=%s score=%d → block suppressed (score < min_severity=%d)",
-			sig.Type, sig.Subject.ID, sig.Score, pol.MinSeverityForBlock)
-		return nil, nil, nil
+	enfVia := "fsm_strikes"
+	if sig.Score >= pol.MinSeverityForBlock && pol.MinSeverityForBlock > 0 {
+		enfVia = "fsm_force_block"
 	}
 
 	dec := decision.NewDecision(
@@ -119,29 +113,21 @@ func (e *Engine) EvaluateSignal(ctx context.Context, sig signal.Signal) (*decisi
 			Capability: capabilityFor(action),
 			Params: map[string]string{
 				"source": sig.Subject.ID,
-				"ttl":    pol.GraphFreezeTTL.String(),
 			},
 		},
 	)
 	dec.SetSeverity(sig.Score).
 		AddReasonCode(reason.GraphNewEdgeAfterFreeze).
-		SetExpiryDuration(pol.GraphFreezeTTL).
-		SetDryRun(pol.DryRun)
+		SetDryRun(pol.DryRun).
+		SetAttribute("enforcement_via", enfVia)
 	for _, rc := range sig.ReasonCodes {
 		dec.AddReasonCode(rc)
 	}
 
-	receipt, err := e.pep.EnforceDecision(ctx, dec)
-	if err != nil {
-		logger.Printf("DECISION id=%s action=%s subject=%s severity=%d dry_run=%v receipt=ERROR reasons=%v err=%v",
-			dec.ID, dec.Action.Type, dec.Subject.ID, dec.Severity, dec.DryRun, dec.ReasonCodes, err)
-		return dec, nil, fmt.Errorf("enforce decision %s: %w", dec.ID, err)
-	}
+	logger.Printf("GRAPH-DECISION id=%s subject=%s score=%d action=%s dry_run=%v → %s",
+		dec.ID, sig.Subject.ID, sig.Score, action, pol.DryRun, enfVia)
 
-	logger.Printf("DECISION id=%s action=%s subject=%s severity=%d dry_run=%v receipt=%s reasons=%v",
-		dec.ID, dec.Action.Type, dec.Subject.ID, dec.Severity, dec.DryRun, receipt.Status, dec.ReasonCodes)
-
-	return dec, receipt, nil
+	return dec, nil, nil
 }
 
 // RecordFSMTransition produces a Decision for audit purposes when the FSM changes level.

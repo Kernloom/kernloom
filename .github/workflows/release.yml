@@ -44,29 +44,40 @@ jobs:
             -X 'github.com/${{ github.repository }}/pkg/version.Commit=${COMMIT}' \
             -X 'github.com/${{ github.repository }}/pkg/version.Date=${DATE}'"
 
-          # Build matrix manually (linux only makes sense for XDP/eBPF)
-          for arch in amd64 arm64; do
+          # Build matrix.
+          # arm/v7 targets Synology DS218+ (Marvell Armada 385, ARMv7 Cortex-A9).
+          #   kliq:    pure Go — runs natively on DSM 7.x with the `nas` profile.
+          #   klshield: cross-compiles fine; XDP enforcement requires kernel XDP support
+          #             (limited on DSM 7.x — check with `ip link show` for xdpgeneric/xdpdrv).
+          #   BPF obj: architecture-independent BPF bytecode — same .o works on all arches.
+          for arch in amd64 arm64 arm; do
+            goarm_env=""
+            suffix="${arch}"
+            if [ "${arch}" = "arm" ]; then
+              goarm_env="GOARM=7"
+              suffix="arm_v7"  # Synology DS218+ / ARMv7
+            fi
+
             # klshield
-            CGO_ENABLED=0 GOOS=linux GOARCH=$arch \
+            env CGO_ENABLED=0 GOOS=linux GOARCH=${arch} ${goarm_env} \
               go build -trimpath -ldflags="${ldflags}" \
-              -o "dist/klshield_linux_${arch}" ./shield/cmd/klshield
+              -o "dist/klshield_linux_${suffix}" ./shield/cmd/klshield
 
             # kliq
-            CGO_ENABLED=0 GOOS=linux GOARCH=$arch \
+            env CGO_ENABLED=0 GOOS=linux GOARCH=${arch} ${goarm_env} \
               go build -trimpath -ldflags="${ldflags}" \
-              -o "dist/kliq_linux_${arch}" ./iq/cmd/kliq
+              -o "dist/kliq_linux_${suffix}" ./iq/cmd/kliq
 
-            # package: klshield bundle includes BPF obj
-            mkdir -p "dist/pkg_klshield_linux_${arch}/bpf"
-            cp "dist/klshield_linux_${arch}" "dist/pkg_klshield_linux_${arch}/klshield"
-            cp "shield/bpf/out/xdp_kernloom_shield.bpf.o" "dist/pkg_klshield_linux_${arch}/bpf/"
-
-            tar -C "dist/pkg_klshield_linux_${arch}" -czf "dist/klshield_${VERSION}_linux_${arch}.tar.gz" .
+            # package: klshield bundle includes BPF obj (arch-independent bytecode)
+            mkdir -p "dist/pkg_klshield_linux_${suffix}/bpf"
+            cp "dist/klshield_linux_${suffix}" "dist/pkg_klshield_linux_${suffix}/klshield"
+            cp "shield/bpf/out/xdp_kernloom_shield.bpf.o" "dist/pkg_klshield_linux_${suffix}/bpf/"
+            tar -C "dist/pkg_klshield_linux_${suffix}" -czf "dist/klshield_${VERSION}_linux_${suffix}.tar.gz" .
 
             # package: kliq bundle
-            mkdir -p "dist/pkg_kliq_linux_${arch}"
-            cp "dist/kliq_linux_${arch}" "dist/pkg_kliq_linux_${arch}/kliq"
-            tar -C "dist/pkg_kliq_linux_${arch}" -czf "dist/kliq_${VERSION}_linux_${arch}.tar.gz" .
+            mkdir -p "dist/pkg_kliq_linux_${suffix}"
+            cp "dist/kliq_linux_${suffix}" "dist/pkg_kliq_linux_${suffix}/kliq"
+            tar -C "dist/pkg_kliq_linux_${suffix}" -czf "dist/kliq_${VERSION}_linux_${suffix}.tar.gz" .
           done
 
           # checksums

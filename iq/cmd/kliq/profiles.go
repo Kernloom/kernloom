@@ -202,6 +202,43 @@ func profileByName(name string) profile {
 			NonCompAt: 999, NonCompDrop: 999, NonCompSev: 999, NonCompReset: 0.30,
 		}
 
+	// =========================
+	// NAS / Storage
+	// =========================
+
+	case "nas":
+		// NAS (Synology, QNAP, TrueNAS). Few trusted LAN clients; burst-tolerant for SMB/NFS
+		// file transfers but strict on SYN spikes and port scans (brute-force, ransomware).
+		// Long block TTL: if something scans your NAS it should stay blocked.
+		return profile{
+			Name:    "nas",
+			TrigPPS: 1500, TrigSyn: 30, TrigScan: 8,
+			WPPS: 0.30, WSyn: 0.35, WScan: 0.35, SevCap: 3.0,
+			SoftAt: 2, HardAt: 5, BlockAt: 14,
+			SoftRate: 600, SoftBurst: 1500, SoftTTL: 2 * time.Minute,
+			HardRate: 150, HardBurst: 300, HardTTL: 15 * time.Minute,
+			BlockTTL: 24 * time.Hour, Cooldown: 30 * time.Second,
+			BlockMinSev: 2.5, BlockMinDur: 30 * time.Second,
+			UpNeed: 2, DownNeed: 8, MinHoldSoft: 60 * time.Second, MinHoldHard: 5 * time.Minute,
+			NonCompAt: 10, NonCompDrop: 2.0, NonCompSev: 1.8, NonCompReset: 0.30,
+		}
+
+	case "nas-bootstrap":
+		// NAS initial learning phase: tolerant to avoid blocking legitimate clients before
+		// the graph is learned. Blocking disabled; rate-limiting only.
+		return profile{
+			Name:    "nas-bootstrap",
+			TrigPPS: 4000, TrigSyn: 100, TrigScan: 30,
+			WPPS: 0.30, WSyn: 0.40, WScan: 0.30, SevCap: 3.0,
+			SoftAt: 3, HardAt: 7, BlockAt: 999,
+			SoftRate: 1500, SoftBurst: 4000, SoftTTL: 3 * time.Minute,
+			HardRate: 400, HardBurst: 800, HardTTL: 20 * time.Minute,
+			BlockTTL: 24 * time.Hour, Cooldown: 30 * time.Second,
+			BlockMinSev: 0, BlockMinDur: 0,
+			UpNeed: 3, DownNeed: 10, MinHoldSoft: 2 * time.Minute, MinHoldHard: 10 * time.Minute,
+			NonCompAt: 999, NonCompDrop: 999, NonCompSev: 999, NonCompReset: 0.30,
+		}
+
 	case "ssh-bastion":
 		// Protect SSH/bastion: low normal PPS, suspicious SYN/scan. Blocking ok but gated.
 		return profile{

@@ -37,6 +37,7 @@ import (
 	"fmt"
 	"log"
 	"math"
+	"net"
 	"os"
 	"sort"
 	"time"
@@ -49,6 +50,7 @@ import (
 	"github.com/adrianenderlin/kernloom/pkg/core/fsm"
 	"github.com/adrianenderlin/kernloom/pkg/core/graph"
 	"github.com/adrianenderlin/kernloom/pkg/core/observation"
+	"github.com/adrianenderlin/kernloom/pkg/core/signal"
 	"github.com/adrianenderlin/kernloom/pkg/decisionengine"
 	gstore "github.com/adrianenderlin/kernloom/pkg/graphstore/sqlite"
 	"github.com/adrianenderlin/kernloom/pkg/shieldclient"
@@ -56,6 +58,18 @@ import (
 )
 
 var kliqLog = log.New(os.Stderr, "[kliq] ", log.LstdFlags)
+
+// graphStrikeMsg carries FSM strike credits from a graph.new_edge_after_freeze signal
+// to the main tick loop where state4/state6 are owned.
+// forceBlock=true overrides n and sets strikes to BlockAt+1 so the FSM
+// transitions directly to BLOCK in the next tick (frozen-enforce mode).
+type graphStrikeMsg struct {
+	ip4        [4]byte
+	ip6        [16]byte
+	isV6       bool
+	n          int  // strike credits to add
+	forceBlock bool // frozen-enforce: skip FSM accumulation, go straight to BLOCK
+}
 
 // prevV4 stores the previous tick's counters for an IPv4 source.
 type prevV4 struct {
@@ -228,7 +242,12 @@ func main() {
 	// Main signal bus — shared by heuristic engine, graph learner and future adapters.
 	mainBus := adapterruntime.NewBus(512)
 
-	// Signal consumer: logs all signals emitted by engine and graph learner.
+	// graphStrikeCh bridges graph.new_edge_after_freeze signals to the main tick loop.
+	// The signal consumer goroutine writes credits; the tick loop drains and applies them
+	// to state4/state6 so the FSM is the single enforcement authority.
+	graphStrikeCh := make(chan graphStrikeMsg, 512)
+
+	// Signal consumer: logs signals, injects graph strikes into FSM state.
 	sigCtx, sigCancel := context.WithCancel(context.Background())
 	defer sigCancel()
 	go func() {
@@ -242,8 +261,36 @@ func main() {
 				}
 				kliqLog.Printf("SIGNAL type=%s subject=%s score=%d confidence=%d ttl=%s reasons=%v",
 					sig.Type, sig.Subject.ID, sig.Score, sig.Confidence, sig.TTL, sig.ReasonCodes)
+
 				if _, _, err := decisionEng.EvaluateSignal(sigCtx, sig); err != nil {
 					kliqLog.Printf("SIGNAL decision error: %v", err)
+				}
+
+				// Graph freeze violation: translate score → FSM strike credits.
+				// score >= 90 (frozen-enforce): forceBlock=true forces the FSM
+				// directly to BLOCK level in the next tick, bypassing accumulation.
+				// score < 90 (frozen-observe): normal strike accumulation.
+				// The FSM is the single enforcement authority for both paths.
+				if sig.Type == signal.SignalGraphNewEdgeAfterFreeze && sig.Subject.ID != "" {
+					n := graphStrikesFromScore(sig.Score)
+					forceBlock := sig.Score >= 90
+					ip := net.ParseIP(sig.Subject.ID)
+					if ip != nil {
+						var msg graphStrikeMsg
+						msg.n = n
+						msg.forceBlock = forceBlock
+						if ip4 := ip.To4(); ip4 != nil {
+							copy(msg.ip4[:], ip4)
+						} else {
+							msg.isV6 = true
+							copy(msg.ip6[:], ip.To16())
+						}
+						select {
+						case graphStrikeCh <- msg:
+						default:
+							kliqLog.Printf("GRAPH-STRIKE dropped (channel full) subject=%s", sig.Subject.ID)
+						}
+					}
 				}
 			}
 		}
@@ -269,8 +316,19 @@ func main() {
 		}, maps)
 
 		mode := graphlearner.ModeLearn
-		if c.GraphMode == "frozen-observe" {
+		switch c.GraphMode {
+		case "frozen-observe":
 			mode = graphlearner.ModeFrozenObserve
+		case "frozen-enforce":
+			mode = graphlearner.ModeFrozenEnforce
+			// frozen-enforce: override decision engine policy so graph signals
+			// trigger immediate PEP enforcement (score=95 meets this threshold).
+			decPolicy.GraphFreezeAction = decision.ActionBlock
+			decPolicy.AllowLocalBlock = true
+			decPolicy.MaxAction = decision.ActionBlock
+			decPolicy.MinSeverityForBlock = 90
+			decisionEng.UpdatePolicy(decPolicy)
+			kliqLog.Printf("Graph: frozen-enforce active — unknown edges will be blocked via PEP directly")
 		}
 
 		excludeCIDRs := parseGraphExcludeCIDRs(c.GraphExcludeSourceCIDR)
@@ -517,6 +575,75 @@ func main() {
 		})
 		if c.TopN < len(cands) {
 			cands = cands[:c.TopN]
+		}
+
+		// Drain graph strike credits from frozen-observe/enforce signals.
+		// Applied after TopN cap so graph-violated IPs are always evaluated.
+		// UpStreak is set to UpNeed to bypass the anti-flap guard — a behavioral
+		// violation is deliberate, not metric noise.
+		// forceBlock=true (frozen-enforce): set strikes to BlockAt+1 so the FSM
+		// transitions to BLOCK immediately. The FSM then owns the deny-map entry
+		// and its TTL, preventing conflicts with FSM-level downgrades.
+	drainGraphStrikes:
+		for {
+			select {
+			case gs := <-graphStrikeCh:
+				if gs.isV6 {
+					st := state6[gs.ip6]
+					if gs.forceBlock {
+						st.Strikes = c.BlockAt + 1
+						st.ForceBlock = true
+					} else {
+						st.Strikes += gs.n
+					}
+					if st.UpStreak < c.UpNeed {
+						st.UpStreak = c.UpNeed
+					}
+					if st.HighSevSince.IsZero() {
+						st.HighSevSince = nowWall
+					}
+					st.LastTrigger = nowWall
+					state6[gs.ip6] = st
+					alreadyIn := false
+					for _, m := range cands {
+						if m.IPVer == 6 && m.IP6 == gs.ip6 {
+							alreadyIn = true
+							break
+						}
+					}
+					if !alreadyIn {
+						cands = append(cands, metrics{IPVer: 6, IP6: gs.ip6})
+					}
+				} else {
+					st := state4[gs.ip4]
+					if gs.forceBlock {
+						st.Strikes = c.BlockAt + 1
+						st.ForceBlock = true
+					} else {
+						st.Strikes += gs.n
+					}
+					if st.UpStreak < c.UpNeed {
+						st.UpStreak = c.UpNeed
+					}
+					if st.HighSevSince.IsZero() {
+						st.HighSevSince = nowWall
+					}
+					st.LastTrigger = nowWall
+					state4[gs.ip4] = st
+					alreadyIn := false
+					for _, m := range cands {
+						if m.IPVer == 4 && m.IP4 == gs.ip4 {
+							alreadyIn = true
+							break
+						}
+					}
+					if !alreadyIn {
+						cands = append(cands, metrics{IPVer: 4, IP4: gs.ip4})
+					}
+				}
+			default:
+				break drainGraphStrikes
+			}
 		}
 
 		// Count active blocks for clean-tick decision.

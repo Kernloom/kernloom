@@ -266,9 +266,29 @@ func handleGraphSubcommand(storePath, frozenPath, nodeID string) bool {
 		runGraphFreeze(getArg(2, storePath), getArg(3, nodeID), getArg(4, frozenPath))
 		return true
 
+	case "approve-ip":
+		// approve-ip <ip> [store] [node-id]
+		// Marks all edges from <ip> as approved so frozen-enforce stops signalling them.
+		if len(args) < 3 {
+			fmt.Fprintln(os.Stderr, "usage: kliq graph approve-ip <ip> [store] [node-id]")
+			os.Exit(1)
+		}
+		runGraphApproveIP(args[2], getArg(3, storePath), getArg(4, nodeID))
+		return true
+
+	case "deny-ip":
+		// deny-ip <ip> [store] [node-id]
+		// Marks all edges from <ip> as denied.
+		if len(args) < 3 {
+			fmt.Fprintln(os.Stderr, "usage: kliq graph deny-ip <ip> [store] [node-id]")
+			os.Exit(1)
+		}
+		runGraphSetIPState(args[2], getArg(3, storePath), getArg(4, nodeID), graph.EdgeDenied, "denied")
+		return true
+
 	default:
 		fmt.Fprintf(os.Stderr, "unknown graph subcommand: %s\n", args[1])
-		fmt.Fprintln(os.Stderr, "usage: kliq graph {status|export|freeze} [store] [node-id] [frozen-out]")
+		fmt.Fprintln(os.Stderr, "usage: kliq graph {status|export|freeze|approve-ip|deny-ip} [args]")
 		os.Exit(1)
 	}
 	return false
@@ -348,6 +368,49 @@ func runGraphExportToFile(storePath, nodeID, path string) {
 	if err := os.Rename(tmp, path); err != nil {
 		fmt.Fprintf(os.Stderr, "error: rename to %s: %v\n", path, err)
 		os.Exit(1)
+	}
+}
+
+// runGraphApproveIP marks all edges from sourceIP as approved so the graph
+// learner stops emitting new_edge_after_freeze signals for them.
+func runGraphApproveIP(sourceIP, storePath, nodeID string) {
+	runGraphSetIPState(sourceIP, storePath, nodeID, graph.EdgeApproved, "approved")
+}
+
+// runGraphSetIPState updates all edges from sourceIP to the given state.
+func runGraphSetIPState(sourceIP, storePath, nodeID string, state graph.EdgeState, label string) {
+	s, err := gstore.Open(storePath)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: open graph store: %v\n", err)
+		os.Exit(1)
+	}
+	defer s.Close()
+
+	edges, err := s.ListByNode(nodeID, "")
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: list edges: %v\n", err)
+		os.Exit(1)
+	}
+
+	updated := 0
+	for _, e := range edges {
+		if e.Source.ID != sourceIP {
+			continue
+		}
+		if e.State == state {
+			continue
+		}
+		if err := s.UpdateState(e.ID, state, graph.LearnedByAdmin); err != nil {
+			fmt.Fprintf(os.Stderr, "error: update edge %s: %v\n", e.ID, err)
+			os.Exit(1)
+		}
+		updated++
+	}
+
+	if updated == 0 {
+		fmt.Printf("No edges found for source %s on node %s.\n", sourceIP, nodeID)
+	} else {
+		fmt.Printf("Marked %d edge(s) from %s as %s.\n", updated, sourceIP, label)
 	}
 }
 

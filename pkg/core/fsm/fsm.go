@@ -55,6 +55,10 @@ type State struct {
 	DownStreak int
 
 	NonCompTicks int
+
+	// ForceBlock bypasses the BlockMinSev/BlockMinDur gate for one transition.
+	// Set by frozen-enforce graph signals; cleared after the BLOCK transition fires.
+	ForceBlock bool
 }
 
 // Metrics contains the normalised numeric values derived from raw telemetry for
@@ -188,6 +192,13 @@ func Advance(m Metrics, st State, now time.Time, cfg Config, doTransition Transi
 		st.NonCompTicks = 0
 	}
 
+	// TTL stepdown: Block -> Hard when TTL elapsed + quiet streak + min hold + cooldown.
+	if st.Level == LevelBlock && !st.ExpiresAt.IsZero() && now.After(st.ExpiresAt) &&
+		st.DownStreak >= cfg.DownNeed && now.Sub(st.LastTrigger) >= cfg.MinHoldHard &&
+		now.After(st.CooldownUntil) {
+		st = doTransition(st, LevelHard)
+	}
+
 	// TTL stepdown: Soft -> Observe when TTL elapsed + quiet streak + min hold + cooldown.
 	if st.Level == LevelSoft && !st.ExpiresAt.IsZero() && now.After(st.ExpiresAt) &&
 		st.DownStreak >= cfg.DownNeed && now.Sub(st.LastTrigger) >= cfg.MinHoldSoft &&
@@ -218,13 +229,27 @@ func Advance(m Metrics, st State, now time.Time, cfg Config, doTransition Transi
 			target = LevelObserve
 		}
 		// Anti-flap: require UpNeed consecutive high ticks before escalating.
-		if target > st.Level && st.UpStreak < cfg.UpNeed {
+		// ForceBlock bypasses this — a graph freeze violation is a deliberate
+		// behavioral signal, not metric noise that anti-flap is designed to filter.
+		if target > st.Level && st.UpStreak < cfg.UpNeed && !st.ForceBlock {
 			target = st.Level
 		}
 	}
 
-	// Block gating: require sustained high severity before committing to BLOCK.
-	if target == LevelBlock && cfg.BlockMinSev > 0 {
+	// While BLOCK TTL is still active, suppress any strike-based downgrade.
+	// Without this, a source generating no traffic (sev=0) would decay its
+	// strikes below BlockAt within seconds and escape the block early.
+	if st.Level == LevelBlock && !st.ExpiresAt.IsZero() && now.Before(st.ExpiresAt) &&
+		target < st.Level {
+		target = st.Level
+	}
+
+	// Block gating: require sustained high severity before escalating TO BLOCK.
+	// Only applies when target > current level (i.e. escalating, not maintaining).
+	// Once in BLOCK the gate does not fire — otherwise a successful block (which
+	// drops traffic to sev=0) would immediately undo itself via the gate.
+	// ForceBlock bypasses the gate for frozen-enforce graph violations.
+	if target == LevelBlock && target > st.Level && cfg.BlockMinSev > 0 && !st.ForceBlock {
 		if st.HighSevSince.IsZero() ||
 			(cfg.BlockMinDur > 0 && now.Sub(st.HighSevSince) < cfg.BlockMinDur) {
 			target = LevelHard
@@ -236,6 +261,7 @@ func Advance(m Metrics, st State, now time.Time, cfg Config, doTransition Transi
 	if target != st.Level && now.After(st.CooldownUntil) {
 		st = doTransition(st, target)
 		transitioned = true
+		st.ForceBlock = false // consumed; normal gate applies on subsequent ticks
 	}
 
 	return st, transitioned
