@@ -5,11 +5,11 @@ package main
 
 import (
 	"flag"
-	"log"
 	"math"
 	"time"
 
-	"github.com/cilium/ebpf"
+	"github.com/adrianenderlin/kernloom/pkg/adapters/shieldpep"
+	"github.com/adrianenderlin/kernloom/pkg/core/fsm"
 )
 
 /* ---------------- CLI configuration ---------------- */
@@ -134,6 +134,54 @@ type cfg struct {
 	PrevTTL  time.Duration
 	StateTTL time.Duration
 	DryRun   bool
+
+	// BPF filesystem root (default /sys/fs/bpf)
+	BPFfsRoot string
+}
+
+// toFSMConfig converts the relevant cfg fields to an fsm.Config.
+func (c cfg) toFSMConfig() fsm.Config {
+	return fsm.Config{
+		SevStep1:          c.SevStep1,
+		SevStep2:          c.SevStep2,
+		SevStep3:          c.SevStep3,
+		SevDelta1:         c.SevDelta1,
+		SevDelta2:         c.SevDelta2,
+		SevDelta3:         c.SevDelta3,
+		SevDecayBelow:     c.SevDecayBelow,
+		SoftAt:            c.SoftAt,
+		HardAt:            c.HardAt,
+		BlockAt:           c.BlockAt,
+		UpNeed:            c.UpNeed,
+		DownNeed:          c.DownNeed,
+		MinHoldSoft:       c.MinHoldSoft,
+		MinHoldHard:       c.MinHoldHard,
+		BlockMinSev:       c.BlockMinSev,
+		BlockMinDur:       c.BlockMinDur,
+		Cooldown:          c.Cooldown,
+		SoftTTL:           c.SoftTTL,
+		HardTTL:           c.HardTTL,
+		BlockTTL:          c.BlockTTL,
+		NonCompAt:         c.NonCompAt,
+		NonCompDrop:       c.NonCompDrop,
+		NonCompSev:        c.NonCompSev,
+		NonCompResetBelow: c.NonCompResetBelow,
+		LearnMaxSev:       c.LearnMaxSev,
+	}
+}
+
+// toPEPParams converts the relevant cfg fields to shieldpep.EnforcementParams.
+func (c cfg) toPEPParams() shieldpep.EnforcementParams {
+	return shieldpep.EnforcementParams{
+		SoftRate:  c.SoftRate,
+		SoftBurst: c.SoftBurst,
+		SoftTTL:   c.SoftTTL,
+		HardRate:  c.HardRate,
+		HardBurst: c.HardBurst,
+		HardTTL:   c.HardTTL,
+		BlockTTL:  c.BlockTTL,
+		Cooldown:  c.Cooldown,
+	}
 }
 
 func parseFlags() cfg {
@@ -245,6 +293,7 @@ func parseFlags() cfg {
 	flag.DurationVar(&c.PrevTTL, "prev-ttl", 10*time.Minute, "forget prev entries if not seen (bounds mem)")
 	flag.DurationVar(&c.StateTTL, "state-ttl", 60*time.Minute, "forget OBSERVE-only state if not seen for this long")
 	flag.BoolVar(&c.DryRun, "dry-run", true, "if true: no enforcement, only logs")
+	flag.StringVar(&c.BPFfsRoot, "bpffs-root", "/sys/fs/bpf", "bpffs mount root")
 
 	flag.Parse()
 	return c
@@ -336,77 +385,4 @@ func applyProfileDefaults(c *cfg, p profile) {
 	if c.NonCompResetBelow == 0 {
 		c.NonCompResetBelow = p.NonCompReset
 	}
-}
-
-/* ---------------- eBPF map handles ---------------- */
-
-type bpfMaps struct {
-	src4   *ebpf.Map
-	src6   *ebpf.Map
-	deny4  *ebpf.Map
-	rl4    *ebpf.Map
-	deny6  *ebpf.Map
-	rl6    *ebpf.Map
-	totals *ebpf.Map
-}
-
-func (m *bpfMaps) closeAll() {
-	for _, mp := range []*ebpf.Map{m.src4, m.src6, m.deny4, m.rl4, m.deny6, m.rl6, m.totals} {
-		if mp != nil {
-			mp.Close()
-		}
-	}
-}
-
-func openBPFMaps(dryRun bool) (*bpfMaps, error) {
-	m := &bpfMaps{}
-
-	src4, err := openPinnedMap(mapPinSrc4)
-	if err != nil {
-		return nil, err
-	}
-	m.src4 = src4
-
-	if m6, err := openPinnedMap(mapPinSrc6); err == nil {
-		m.src6 = m6
-	} else {
-		log.Printf("IPv6 telemetry map not available (optional): open %s: %v", mapPinSrc6, err)
-	}
-
-	if tm, err := openPinnedMap(mapPinTotals); err == nil {
-		m.totals = tm
-	} else {
-		log.Printf("Totals map not available (optional): %v", err)
-	}
-
-	if dryRun {
-		return m, nil
-	}
-
-	deny4, err := openPinnedMap(mapPinDeny4)
-	if err != nil {
-		m.closeAll()
-		return nil, err
-	}
-	m.deny4 = deny4
-
-	rl4, err := openPinnedMap(mapPinRLPolicy4)
-	if err != nil {
-		m.closeAll()
-		return nil, err
-	}
-	m.rl4 = rl4
-
-	if m6, err := openPinnedMap(mapPinDeny6); err == nil {
-		m.deny6 = m6
-	} else {
-		log.Printf("IPv6 deny map not available (optional): open %s: %v", mapPinDeny6, err)
-	}
-	if m6, err := openPinnedMap(mapPinRLPolicy6); err == nil {
-		m.rl6 = m6
-	} else {
-		log.Printf("IPv6 rl policy map not available (optional): open %s: %v", mapPinRLPolicy6, err)
-	}
-
-	return m, nil
 }

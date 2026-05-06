@@ -4,42 +4,14 @@
 package main
 
 import (
-	"fmt"
 	"net"
 	"time"
-
-	"github.com/cilium/ebpf"
 )
 
 /* ---------------- misc helpers ---------------- */
 
-func openPinnedMap(path string) (*ebpf.Map, error) { return ebpf.LoadPinnedMap(path, nil) }
-
 func ip4String(k [4]byte) string  { return net.IPv4(k[0], k[1], k[2], k[3]).String() }
 func ip6String(k [16]byte) string { return net.IP(k[:]).String() }
-
-func minf(a, b float64) float64 {
-	if a < b {
-		return a
-	}
-	return b
-}
-
-func calcSeverity(pps, synps, scanps float64, trigPPS, trigSyn, trigScan float64, wPPS, wSyn, wScan float64, cap float64) float64 {
-	nPPS := 0.0
-	if trigPPS > 0 {
-		nPPS = minf(pps/trigPPS, cap)
-	}
-	nSyn := 0.0
-	if trigSyn > 0 {
-		nSyn = minf(synps/trigSyn, cap)
-	}
-	nScan := 0.0
-	if trigScan > 0 {
-		nScan = minf(scanps/trigScan, cap)
-	}
-	return wPPS*nPPS + wSyn*nSyn + wScan*nScan
-}
 
 func capChange(old, target, maxRel float64) float64 {
 	if maxRel <= 0 {
@@ -111,28 +83,6 @@ func bootstrapEffective(now time.Time, info bootstrapInfo, window, p1End, p2End 
 		return bootstrapPolicy{Active: true, Phase: "bootstrap-3", Every: every3, K: k, MaxUp: maxUp3, MaxDown: maxDown3, Alpha: alpha3}
 	}
 	return bootstrapPolicy{Active: false, Phase: "steady", Every: steadyEvery, K: steadyK, MaxUp: steadyUp, MaxDown: steadyDown, Alpha: steadyAlpha}
-}
-
-/* ---------------- totals helper (optional) ---------------- */
-
-func readTotalsSum(m *ebpf.Map) (xdpTotals, error) {
-	var out xdpTotals
-	if m == nil {
-		return out, fmt.Errorf("nil totals map")
-	}
-	var k uint32 = 0
-	var perCPU []xdpTotals
-	if err := m.Lookup(&k, &perCPU); err != nil {
-		return out, err
-	}
-	for _, v := range perCPU {
-		out.Pkts += v.Pkts
-		out.Pass += v.Pass
-		out.DropAllow += v.DropAllow
-		out.DropDeny += v.DropDeny
-		out.DropRL += v.DropRL
-	}
-	return out, nil
 }
 
 /* ---------------- Utility ---------------- */

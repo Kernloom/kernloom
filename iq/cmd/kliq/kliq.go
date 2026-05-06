@@ -36,10 +36,27 @@ import (
 	"fmt"
 	"log"
 	"math"
+	"net"
 	"os"
 	"sort"
 	"time"
+
+	"github.com/adrianenderlin/kernloom/pkg/adapters/shieldpep"
+	"github.com/adrianenderlin/kernloom/pkg/core/fsm"
+	"github.com/adrianenderlin/kernloom/pkg/shieldclient"
 )
+
+// prevV4 stores the previous tick's counters for an IPv4 source.
+type prevV4 struct {
+	Pkts, Bytes, Syn, Scan, DropRL uint64
+	LastWall                       time.Time
+}
+
+// prevV6 stores the previous tick's counters for an IPv6 source.
+type prevV6 struct {
+	Pkts, Bytes, Syn, Scan, DropRL uint64
+	LastWall                       time.Time
+}
 
 func main() {
 	c := parseFlags()
@@ -131,17 +148,26 @@ func main() {
 		}
 	}
 
-	// Open eBPF maps
-	maps, err := openBPFMaps(c.DryRun)
+	// Open Shield eBPF maps via shieldclient.
+	maps, err := shieldclient.Open(c.BPFfsRoot, c.DryRun)
 	if err != nil {
 		log.Fatalf("open BPF maps: %v", err)
 	}
-	defer maps.closeAll()
+	defer maps.Close()
 
+	// Create the Shield PEP adapter (synchronous enforcement).
+	pep := shieldpep.New(maps, c.DryRun)
+	if err := pep.Init(nil, nil); err != nil {
+		log.Fatalf("init shield pep: %v", err)
+	}
+
+	// Per-tick previous-snapshot maps (live here in kliq; not in the adapter).
 	prev4 := make(map[[4]byte]prevV4, 64_000)
 	prev6 := make(map[[16]byte]prevV6, 64_000)
-	state4 := make(map[[4]byte]ipState, 64_000)
-	state6 := make(map[[16]byte]ipState, 64_000)
+
+	// FSM state maps.
+	state4 := make(map[[4]byte]fsm.State, 64_000)
+	state6 := make(map[[16]byte]fsm.State, 64_000)
 
 	resPPS := newReservoir(50_000)
 	resSyn := newReservoir(50_000)
@@ -154,11 +180,11 @@ func main() {
 	totalLearnTicks := 0
 	cleanLearnTicks := 0
 
-	// Baseline totals for drop-ratio gating
-	var prevTotals xdpTotals
+	// Baseline totals for drop-ratio gating.
+	var prevTotals shieldclient.Totals
 	var prevTotalsWall time.Time
-	if maps.totals != nil {
-		if t, err := readTotalsSum(maps.totals); err == nil {
+	if maps.Totals != nil {
+		if t, err := shieldclient.ReadTotalsSum(maps.Totals); err == nil {
 			prevTotals = t
 			prevTotalsWall = time.Now()
 		}
@@ -168,7 +194,7 @@ func main() {
 	defer ticker.Stop()
 
 	log.Printf("Kernloom IQ started profile=%s interval=%s dry_run=%v top=%d trig{pps=%.1f syn=%.1f scan=%.1f} weights{pps=%.2f syn=%.2f scan=%.2f} cap=%.1f (ipv6=%v)",
-		p.Name, c.Interval.String(), c.DryRun, c.TopN, c.TrigPPS, c.TrigSyn, c.TrigScan, c.WPPS, c.WSyn, c.WScan, c.SevCap, maps.src6 != nil)
+		p.Name, c.Interval.String(), c.DryRun, c.TopN, c.TrigPPS, c.TrigSyn, c.TrigScan, c.WPPS, c.WSyn, c.WScan, c.SevCap, maps.Src6 != nil)
 
 	for range ticker.C {
 		nowWall := time.Now()
@@ -176,17 +202,17 @@ func main() {
 		wl.maybeReload(c.WhitelistReload)
 		fb.maybeReload(c.FeedbackReload)
 
-		fb.applyV4(nowWall, maps.deny4, maps.rl4, state4, c.DryRun)
-		fb.applyV6(nowWall, maps.deny6, maps.rl6, state6, c.DryRun)
+		fb.applyV4(nowWall, maps.Deny4, maps.RL4, state4, c.DryRun)
+		fb.applyV6(nowWall, maps.Deny6, maps.RL6, state6, c.DryRun)
 
 		if c.FeedbackCIDRDeenforce {
-			fb.applyCIDRsIfDue(nowWall, maps.deny4, maps.rl4, state4, maps.deny6, maps.rl6, state6, c.DryRun, c.FeedbackCIDREvery, c.FeedbackCIDRMax)
+			fb.applyCIDRsIfDue(nowWall, maps.Deny4, maps.RL4, state4, maps.Deny6, maps.RL6, state6, c.DryRun, c.FeedbackCIDREvery, c.FeedbackCIDRMax)
 		}
 
-		// Compute drop ratio for learn gating
+		// Compute drop ratio for learn gating.
 		dropRatio := 0.0
-		if maps.totals != nil && !prevTotalsWall.IsZero() {
-			if t, err := readTotalsSum(maps.totals); err == nil {
+		if maps.Totals != nil && !prevTotalsWall.IsZero() {
+			if t, err := shieldclient.ReadTotalsSum(maps.Totals); err == nil {
 				sec := nowWall.Sub(prevTotalsWall).Seconds()
 				if sec > 0 {
 					dPass := float64(t.Pass - prevTotals.Pass)
@@ -205,9 +231,9 @@ func main() {
 		highSevCount := 0
 
 		// ----- Iterate v4 sources -----
-		it4 := maps.src4.Iterate()
+		it4 := maps.Src4.Iterate()
 		var k4 [4]byte
-		var v4 xdpSrcStatsV4
+		var v4 shieldclient.SrcStatsV4
 
 		for it4.Next(&k4, &v4) {
 			pv, ok := prev4[k4]
@@ -236,7 +262,7 @@ func main() {
 			scanRate := float64(dScan) / sec
 			dropRLRate := float64(dDropRL) / sec
 
-			sev := calcSeverity(pps, synRate, scanRate, c.TrigPPS, c.TrigSyn, c.TrigScan, c.WPPS, c.WSyn, c.WScan, c.SevCap)
+			sev := fsm.CalcSeverity(pps, synRate, scanRate, c.TrigPPS, c.TrigSyn, c.TrigScan, c.WPPS, c.WSyn, c.WScan, c.SevCap)
 
 			if dPkts > 0 || dSyn > 0 || dScan > 0 {
 				seenForLearn++
@@ -262,10 +288,10 @@ func main() {
 		}
 
 		// ----- Iterate v6 sources -----
-		if maps.src6 != nil {
-			it6 := maps.src6.Iterate()
-			var k6 src6Key
-			var v6 xdpSrcStatsV6
+		if maps.Src6 != nil {
+			it6 := maps.Src6.Iterate()
+			var k6 shieldclient.Src6Key
+			var v6 shieldclient.SrcStatsV6
 
 			for it6.Next(&k6, &v6) {
 				ip6 := k6.IP
@@ -295,7 +321,7 @@ func main() {
 				scanRate := float64(dScan) / sec
 				dropRLRate := float64(dDropRL) / sec
 
-				sev := calcSeverity(pps, synRate, scanRate, c.TrigPPS, c.TrigSyn, c.TrigScan, c.WPPS, c.WSyn, c.WScan, c.SevCap)
+				sev := fsm.CalcSeverity(pps, synRate, scanRate, c.TrigPPS, c.TrigSyn, c.TrigScan, c.WPPS, c.WSyn, c.WScan, c.SevCap)
 
 				if dPkts > 0 || dSyn > 0 || dScan > 0 {
 					seenForLearn++
@@ -330,15 +356,15 @@ func main() {
 			cands = cands[:c.TopN]
 		}
 
-		// Count active blocks for clean-tick decision
+		// Count active blocks for clean-tick decision.
 		blocksActive := 0
 		for _, st := range state4 {
-			if st.Level == LBlock {
+			if st.Level == fsm.LevelBlock {
 				blocksActive++
 			}
 		}
 		for _, st := range state6 {
-			if st.Level == LBlock {
+			if st.Level == fsm.LevelBlock {
 				blocksActive++
 			}
 		}
@@ -360,13 +386,13 @@ func main() {
 
 		for _, m := range cands {
 			if m.IPVer == 4 {
-				state4[m.IP4] = processCandidate4(m, state4[m.IP4], nowWall, c, wl, fb, maps, resPPS, resSyn, resScan, clean)
+				state4[m.IP4] = processCandidate4(m, state4[m.IP4], nowWall, c, wl, fb, pep, resPPS, resSyn, resScan, clean)
 			} else {
-				state6[m.IP6] = processCandidate6(m, state6[m.IP6], nowWall, c, wl, fb, maps, resPPS, resSyn, resScan, clean)
+				state6[m.IP6] = processCandidate6(m, state6[m.IP6], nowWall, c, wl, fb, pep, resPPS, resSyn, resScan, clean)
 			}
 		}
 
-		// Housekeeping: bound memory
+		// Housekeeping: bound memory.
 		for ip, pv := range prev4 {
 			if nowWall.Sub(pv.LastWall) > c.PrevTTL {
 				delete(prev4, ip)
@@ -378,17 +404,17 @@ func main() {
 			}
 		}
 		for ip, st := range state4 {
-			if st.Level == LObserve && st.Strikes == 0 && !st.LastSeenWallTime.IsZero() && nowWall.Sub(st.LastSeenWallTime) > c.StateTTL {
+			if st.Level == fsm.LevelObserve && st.Strikes == 0 && !st.LastSeenWallTime.IsZero() && nowWall.Sub(st.LastSeenWallTime) > c.StateTTL {
 				delete(state4, ip)
 			}
 		}
 		for ip, st := range state6 {
-			if st.Level == LObserve && st.Strikes == 0 && !st.LastSeenWallTime.IsZero() && nowWall.Sub(st.LastSeenWallTime) > c.StateTTL {
+			if st.Level == fsm.LevelObserve && st.Strikes == 0 && !st.LastSeenWallTime.IsZero() && nowWall.Sub(st.LastSeenWallTime) > c.StateTTL {
 				delete(state6, ip)
 			}
 		}
 
-		// Autotune schedule
+		// Autotune schedule.
 		steadyEveryEff := c.AutoEvery
 		if c.Bootstrap {
 			steadyEveryEff = c.SteadyEvery
@@ -502,4 +528,45 @@ func main() {
 				c.TrigPPS, c.TrigSyn, c.TrigScan, clean, dropRatio, topWL, pol.Phase)
 		}
 	}
+}
+
+// obsToMetrics converts a shield observation (published on the bus) back to a
+// kliq metrics struct for use in the FSM pipeline.
+// It parses the subject IP, extracts the known metric keys, and returns
+// (metrics, true) on success or a zero metrics and false on failure.
+// NOTE: Severity is NOT set here; the caller computes it via fsm.CalcSeverity.
+func obsToMetrics(subjectID string, obs map[string]float64, attrs map[string]string) (metrics, bool) {
+	m := metrics{}
+	ipVer, ok := attrs["ip_version"]
+	if !ok {
+		ipVer = "4"
+	}
+
+	ip := net.ParseIP(subjectID)
+	if ip == nil {
+		return metrics{}, false
+	}
+
+	if ipVer == "6" {
+		v6 := ip.To16()
+		if v6 == nil {
+			return metrics{}, false
+		}
+		copy(m.IP6[:], v6)
+		m.IPVer = 6
+	} else {
+		v4 := ip.To4()
+		if v4 == nil {
+			return metrics{}, false
+		}
+		copy(m.IP4[:], v4)
+		m.IPVer = 4
+	}
+
+	m.PPS = obs["pps"]
+	m.Bps = obs["bps"]
+	m.SynRate = obs["syn_rate"]
+	m.ScanRate = obs["scan_rate"]
+	m.DropRLRate = obs["drop_rl_rate"]
+	return m, true
 }

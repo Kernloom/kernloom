@@ -11,6 +11,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/adrianenderlin/kernloom/pkg/core/fsm"
+	"github.com/adrianenderlin/kernloom/pkg/shieldclient"
 	"github.com/cilium/ebpf"
 )
 
@@ -249,7 +251,7 @@ func (fm *feedbackManager) matchV6(ip6 [16]byte) bool {
 }
 
 // applyV4 best-effort de-enforcement for exact feedback IPs (v4).
-func (fm *feedbackManager) applyV4(now time.Time, denyMap4, rlPolicyMap4 *ebpf.Map, state4 map[[4]byte]ipState, dry bool) {
+func (fm *feedbackManager) applyV4(now time.Time, denyMap4, rlPolicyMap4 *ebpf.Map, state4 map[[4]byte]fsm.State, dry bool) {
 	if fm.path == "" {
 		return
 	}
@@ -268,8 +270,8 @@ func (fm *feedbackManager) applyV4(now time.Time, denyMap4, rlPolicyMap4 *ebpf.M
 			_ = denyMap4.Delete(&ip)
 		}
 		if st, ok := state4[ip]; ok {
-			if st.Level != LObserve {
-				st.Level = LObserve
+			if st.Level != fsm.LevelObserve {
+				st.Level = fsm.LevelObserve
 			}
 			st.Strikes = 0
 			st.NonCompTicks = 0
@@ -283,7 +285,7 @@ func (fm *feedbackManager) applyV4(now time.Time, denyMap4, rlPolicyMap4 *ebpf.M
 }
 
 // applyV6 best-effort de-enforcement for exact feedback IPs (v6).
-func (fm *feedbackManager) applyV6(now time.Time, denyMap6, rlPolicyMap6 *ebpf.Map, state6 map[[16]byte]ipState, dry bool) {
+func (fm *feedbackManager) applyV6(now time.Time, denyMap6, rlPolicyMap6 *ebpf.Map, state6 map[[16]byte]fsm.State, dry bool) {
 	if fm.path == "" {
 		return
 	}
@@ -296,16 +298,16 @@ func (fm *feedbackManager) applyV6(now time.Time, denyMap6, rlPolicyMap6 *ebpf.M
 			continue
 		}
 		if rlPolicyMap6 != nil {
-			krl := src6Key{IP: ip}
+			krl := shieldclient.Src6Key{IP: ip}
 			_ = rlPolicyMap6.Delete(&krl)
 		}
 		if denyMap6 != nil {
-			kd := key6Bytes{IP: ip}
+			kd := shieldclient.Key6Bytes{IP: ip}
 			_ = denyMap6.Delete(&kd)
 		}
 		if st, ok := state6[ip]; ok {
-			if st.Level != LObserve {
-				st.Level = LObserve
+			if st.Level != fsm.LevelObserve {
+				st.Level = fsm.LevelObserve
 			}
 			st.Strikes = 0
 			st.NonCompTicks = 0
@@ -324,8 +326,8 @@ func (fm *feedbackManager) applyV6(now time.Time, denyMap6, rlPolicyMap6 *ebpf.M
 // WARNING: iterating large maps can be expensive. Use a reasonable interval and a maxDeletes cap.
 func (fm *feedbackManager) applyCIDRsIfDue(
 	now time.Time,
-	denyMap4, rlPolicyMap4 *ebpf.Map, state4 map[[4]byte]ipState,
-	denyMap6, rlPolicyMap6 *ebpf.Map, state6 map[[16]byte]ipState,
+	denyMap4, rlPolicyMap4 *ebpf.Map, state4 map[[4]byte]fsm.State,
+	denyMap6, rlPolicyMap6 *ebpf.Map, state6 map[[16]byte]fsm.State,
 	dry bool, every time.Duration, maxDeletes int,
 ) {
 	if fm.path == "" || dry || every <= 0 || maxDeletes <= 0 {
@@ -390,7 +392,7 @@ func (fm *feedbackManager) applyCIDRsIfDue(
 		return false
 	}
 
-	// v4 delete from RL policy map (value rlCfg)
+	// v4 delete from RL policy map (value shieldclient.RLConfig)
 	deleteRL4 := func(m *ebpf.Map, budget *int) int {
 		if m == nil || *budget <= 0 || len(active4) == 0 {
 			return 0
@@ -398,7 +400,7 @@ func (fm *feedbackManager) applyCIDRsIfDue(
 		delKeys := make([][4]byte, 0, 1024)
 		it := m.Iterate()
 		var k [4]byte
-		var v rlCfg
+		var v shieldclient.RLConfig
 		for it.Next(&k, &v) {
 			if !matchAny4(k) {
 				continue
@@ -417,7 +419,7 @@ func (fm *feedbackManager) applyCIDRsIfDue(
 			nDel++
 			*budget--
 			if st, ok := state4[kk]; ok {
-				st.Level = LObserve
+				st.Level = fsm.LevelObserve
 				st.Strikes = 0
 				st.NonCompTicks = 0
 				st.UpStreak = 0
@@ -461,7 +463,7 @@ func (fm *feedbackManager) applyCIDRsIfDue(
 			nDel++
 			*budget--
 			if st, ok := state4[kk]; ok {
-				st.Level = LObserve
+				st.Level = fsm.LevelObserve
 				st.Strikes = 0
 				st.NonCompTicks = 0
 				st.UpStreak = 0
@@ -478,15 +480,15 @@ func (fm *feedbackManager) applyCIDRsIfDue(
 		return nDel
 	}
 
-	// v6 delete from RL policy map (key src6Key, value rlCfg)
+	// v6 delete from RL policy map (key shieldclient.Src6Key, value shieldclient.RLConfig)
 	deleteRL6 := func(m *ebpf.Map, budget *int) int {
 		if m == nil || *budget <= 0 || len(active6) == 0 {
 			return 0
 		}
 		delKeys := make([][16]byte, 0, 512)
 		it := m.Iterate()
-		var k src6Key
-		var v rlCfg
+		var k shieldclient.Src6Key
+		var v shieldclient.RLConfig
 		for it.Next(&k, &v) {
 			ip := k.IP
 			if !matchAny6(ip) {
@@ -502,12 +504,12 @@ func (fm *feedbackManager) applyCIDRsIfDue(
 			if *budget <= 0 {
 				break
 			}
-			kk := src6Key{IP: ip}
+			kk := shieldclient.Src6Key{IP: ip}
 			_ = m.Delete(&kk)
 			nDel++
 			*budget--
 			if st, ok := state6[ip]; ok {
-				st.Level = LObserve
+				st.Level = fsm.LevelObserve
 				st.Strikes = 0
 				st.NonCompTicks = 0
 				st.UpStreak = 0
@@ -524,14 +526,14 @@ func (fm *feedbackManager) applyCIDRsIfDue(
 		return nDel
 	}
 
-	// v6 delete from deny map (key key6Bytes, value u8)
+	// v6 delete from deny map (key shieldclient.Key6Bytes, value u8)
 	deleteDeny6 := func(m *ebpf.Map, budget *int) int {
 		if m == nil || *budget <= 0 || len(active6) == 0 {
 			return 0
 		}
 		delKeys := make([][16]byte, 0, 512)
 		it := m.Iterate()
-		var k key6Bytes
+		var k shieldclient.Key6Bytes
 		var v uint8
 		for it.Next(&k, &v) {
 			ip := k.IP
@@ -548,12 +550,12 @@ func (fm *feedbackManager) applyCIDRsIfDue(
 			if *budget <= 0 {
 				break
 			}
-			kk := key6Bytes{IP: ip}
+			kk := shieldclient.Key6Bytes{IP: ip}
 			_ = m.Delete(&kk)
 			nDel++
 			*budget--
 			if st, ok := state6[ip]; ok {
-				st.Level = LObserve
+				st.Level = fsm.LevelObserve
 				st.Strikes = 0
 				st.NonCompTicks = 0
 				st.UpStreak = 0

@@ -1,0 +1,203 @@
+// SPDX-License-Identifier: MPL-2.0
+// Copyright (c) 2026 Adrian Enderlin
+
+// Package shieldpep implements the Shield PEP (Policy Enforcement Point) adapter.
+// It applies L3/L4 enforcement decisions by writing into the pinned eBPF maps
+// exposed by Kernloom Shield.
+package shieldpep
+
+import (
+	"context"
+	"sync/atomic"
+	"time"
+
+	"github.com/adrianenderlin/kernloom/pkg/adapterruntime"
+	"github.com/adrianenderlin/kernloom/pkg/core/capability"
+	"github.com/adrianenderlin/kernloom/pkg/core/fsm"
+	"github.com/adrianenderlin/kernloom/pkg/shieldclient"
+	"github.com/cilium/ebpf"
+)
+
+// EnforcementParams carries the per-level rate-limit and timing configuration
+// needed by the PEP adapter when transitioning a source to a new level.
+type EnforcementParams struct {
+	SoftRate  uint64
+	SoftBurst uint64
+	SoftTTL   time.Duration
+
+	HardRate  uint64
+	HardBurst uint64
+	HardTTL   time.Duration
+
+	BlockTTL time.Duration
+	Cooldown time.Duration
+}
+
+// Adapter is the Shield PEP adapter.
+// It is intentionally synchronous: enforcement calls are made inline from the
+// KLIQ tick loop (via TransitionV4/TransitionV6), not via the event bus.
+type Adapter struct {
+	maps   *shieldclient.Maps
+	dryRun bool
+
+	healthy uint32 // 1 = healthy, 0 = unhealthy (atomic)
+}
+
+// New creates a new Shield PEP adapter.
+func New(maps *shieldclient.Maps, dryRun bool) *Adapter {
+	return &Adapter{maps: maps, dryRun: dryRun}
+}
+
+/* ---------------- adapterruntime.Adapter interface ----------------------- */
+
+// ID returns the unique adapter identifier.
+func (a *Adapter) ID() string { return "shield-pep" }
+
+// Kind returns AdapterPEP.
+func (a *Adapter) Kind() adapterruntime.AdapterKind { return adapterruntime.AdapterPEP }
+
+// Capabilities returns the capabilities provided by this adapter.
+func (a *Adapter) Capabilities() []*capability.Capability {
+	return []*capability.Capability{
+		adapterruntime.WellKnownNetworkBlockSource(),
+		adapterruntime.WellKnownNetworkRateLimitSource(),
+		adapterruntime.WellKnownNetworkAllowSource(),
+		adapterruntime.WellKnownNetworkEnforceAllowlist(),
+	}
+}
+
+// Init validates that the required maps are present when not in dry-run mode.
+func (a *Adapter) Init(_ context.Context, _ adapterruntime.AdapterConfig) error {
+	atomic.StoreUint32(&a.healthy, 1)
+	return nil
+}
+
+// Start is a no-op for the PEP adapter; enforcement is synchronous via Transition*.
+func (a *Adapter) Start(_ context.Context, _ adapterruntime.EventBus) error {
+	return nil
+}
+
+// Health reports whether the adapter is operating normally.
+func (a *Adapter) Health(_ context.Context) adapterruntime.HealthStatus {
+	if atomic.LoadUint32(&a.healthy) == 1 {
+		return adapterruntime.HealthStatus{Healthy: true}
+	}
+	return adapterruntime.HealthStatus{Healthy: false, Message: "shield-pep: maps not available"}
+}
+
+// Stop is a no-op; map lifecycle is managed by the caller.
+func (a *Adapter) Stop(_ context.Context) error {
+	return nil
+}
+
+/* ---------------- Enforcement transitions --------------------------------- */
+
+// TransitionV4 applies the enforcement action for an IPv4 source.
+// It writes into the Shield deny / rl-policy maps (unless dryRun is set) and
+// returns the updated fsm.State with Level, ExpiresAt and CooldownUntil set.
+func (a *Adapter) TransitionV4(
+	ip [4]byte, st fsm.State, target fsm.Level,
+	now time.Time, p EnforcementParams,
+) fsm.State {
+	if !a.dryRun && a.maps != nil {
+		switch target {
+		case fsm.LevelObserve:
+			if a.maps.RL4 != nil {
+				_ = a.maps.RL4.Delete(&ip)
+			}
+			if a.maps.Deny4 != nil {
+				_ = a.maps.Deny4.Delete(&ip)
+			}
+		case fsm.LevelSoft:
+			if a.maps.Deny4 != nil {
+				_ = a.maps.Deny4.Delete(&ip)
+			}
+			if a.maps.RL4 != nil {
+				val := shieldclient.RLConfig{RatePPS: p.SoftRate, Burst: p.SoftBurst}
+				_ = a.maps.RL4.Update(&ip, &val, ebpf.UpdateAny)
+			}
+		case fsm.LevelHard:
+			if a.maps.Deny4 != nil {
+				_ = a.maps.Deny4.Delete(&ip)
+			}
+			if a.maps.RL4 != nil {
+				val := shieldclient.RLConfig{RatePPS: p.HardRate, Burst: p.HardBurst}
+				_ = a.maps.RL4.Update(&ip, &val, ebpf.UpdateAny)
+			}
+		case fsm.LevelBlock:
+			if a.maps.RL4 != nil {
+				_ = a.maps.RL4.Delete(&ip)
+			}
+			if a.maps.Deny4 != nil {
+				v := uint8(1)
+				_ = a.maps.Deny4.Update(&ip, &v, ebpf.UpdateAny)
+			}
+		}
+	}
+
+	return applyStateFields(st, target, now, p)
+}
+
+// TransitionV6 applies the enforcement action for an IPv6 source.
+func (a *Adapter) TransitionV6(
+	ip [16]byte, st fsm.State, target fsm.Level,
+	now time.Time, p EnforcementParams,
+) fsm.State {
+	if !a.dryRun && a.maps != nil {
+		krl := shieldclient.Src6Key{IP: ip}
+		kd := shieldclient.Key6Bytes{IP: ip}
+
+		switch target {
+		case fsm.LevelObserve:
+			if a.maps.RL6 != nil {
+				_ = a.maps.RL6.Delete(&krl)
+			}
+			if a.maps.Deny6 != nil {
+				_ = a.maps.Deny6.Delete(&kd)
+			}
+		case fsm.LevelSoft:
+			if a.maps.Deny6 != nil {
+				_ = a.maps.Deny6.Delete(&kd)
+			}
+			if a.maps.RL6 != nil {
+				val := shieldclient.RLConfig{RatePPS: p.SoftRate, Burst: p.SoftBurst}
+				_ = a.maps.RL6.Update(&krl, &val, ebpf.UpdateAny)
+			}
+		case fsm.LevelHard:
+			if a.maps.Deny6 != nil {
+				_ = a.maps.Deny6.Delete(&kd)
+			}
+			if a.maps.RL6 != nil {
+				val := shieldclient.RLConfig{RatePPS: p.HardRate, Burst: p.HardBurst}
+				_ = a.maps.RL6.Update(&krl, &val, ebpf.UpdateAny)
+			}
+		case fsm.LevelBlock:
+			if a.maps.RL6 != nil {
+				_ = a.maps.RL6.Delete(&krl)
+			}
+			if a.maps.Deny6 != nil {
+				v := uint8(1)
+				_ = a.maps.Deny6.Update(&kd, &v, ebpf.UpdateAny)
+			}
+		}
+	}
+
+	return applyStateFields(st, target, now, p)
+}
+
+// applyStateFields sets Level, CooldownUntil and ExpiresAt on the state after a transition.
+func applyStateFields(st fsm.State, target fsm.Level, now time.Time, p EnforcementParams) fsm.State {
+	st.Level = target
+	st.CooldownUntil = now.Add(p.Cooldown)
+	switch target {
+	case fsm.LevelObserve:
+		st.ExpiresAt = time.Time{}
+	case fsm.LevelSoft:
+		st.ExpiresAt = now.Add(p.SoftTTL)
+	case fsm.LevelHard:
+		st.ExpiresAt = now.Add(p.HardTTL)
+	case fsm.LevelBlock:
+		st.ExpiresAt = now.Add(p.BlockTTL)
+	}
+	return st
+}
