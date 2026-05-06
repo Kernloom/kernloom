@@ -37,7 +37,6 @@ import (
 	"fmt"
 	"log"
 	"math"
-	"net"
 	"os"
 	"sort"
 	"time"
@@ -48,13 +47,11 @@ import (
 	"github.com/adrianenderlin/kernloom/pkg/adapters/shieldtelemetry"
 	"github.com/adrianenderlin/kernloom/pkg/core/fsm"
 	"github.com/adrianenderlin/kernloom/pkg/core/graph"
+	"github.com/adrianenderlin/kernloom/pkg/core/observation"
 	gstore "github.com/adrianenderlin/kernloom/pkg/graphstore/sqlite"
 	"github.com/adrianenderlin/kernloom/pkg/shieldclient"
+	"github.com/adrianenderlin/kernloom/pkg/signalengine/shieldheuristic"
 )
-
-// graphBus is declared at package level so the telemetry adapter and learner
-// can share it; nil when --graph is not enabled.
-var graphBus *adapterruntime.Bus
 
 // prevV4 stores the previous tick's counters for an IPv4 source.
 type prevV4 struct {
@@ -175,27 +172,62 @@ func main() {
 	}
 	defer maps.Close()
 
+	// Resolve node ID (shared by heuristic engine and graph learner).
+	nodeID := c.GraphNodeID
+	if nodeID == "" {
+		if h, err := os.Hostname(); err == nil {
+			nodeID = h
+		} else {
+			nodeID = "local"
+		}
+	}
+
 	// Create the Shield PEP adapter (synchronous enforcement).
 	pep := shieldpep.New(maps, c.DryRun)
-	if err := pep.Init(nil, nil); err != nil {
+	if err := pep.Init(context.Background(), nil); err != nil {
 		log.Fatalf("init shield pep: %v", err)
 	}
 
+	// Heuristic signal engine: converts per-source metrics → Signals + fsm.Metrics.
+	// Replaces inline fsm.CalcSeverity calls throughout the main loop.
+	engine := shieldheuristic.New(shieldheuristic.Config{
+		NodeID:    nodeID,
+		TrigPPS:   c.TrigPPS,
+		TrigSyn:   c.TrigSyn,
+		TrigScan:  c.TrigScan,
+		WPPS:      c.WPPS,
+		WSyn:      c.WSyn,
+		WScan:     c.WScan,
+		SevCap:    c.SevCap,
+		SignalTTL: 2 * time.Minute,
+	})
+
+	// Main signal bus — shared by heuristic engine, graph learner and future adapters.
+	mainBus := adapterruntime.NewBus(512)
+
+	// Signal consumer: logs all signals emitted by engine and graph learner.
+	sigCtx, sigCancel := context.WithCancel(context.Background())
+	defer sigCancel()
+	go func() {
+		for {
+			select {
+			case <-sigCtx.Done():
+				return
+			case sig, ok := <-mainBus.Signals():
+				if !ok {
+					return
+				}
+				log.Printf("SIGNAL type=%s subject=%s score=%d confidence=%d ttl=%s reasons=%v",
+					sig.Type, sig.Subject.ID, sig.Score, sig.Confidence, sig.TTL, sig.ReasonCodes)
+			}
+		}
+	}()
+
 	// Graph learner (optional).
 	var graphStore *gstore.Store
-	var graphBus *adapterruntime.Bus
 	var graphCtxCancel context.CancelFunc
 
 	if c.GraphEnabled {
-		nodeID := c.GraphNodeID
-		if nodeID == "" {
-			if h, err := os.Hostname(); err == nil {
-				nodeID = h
-			} else {
-				nodeID = "local"
-			}
-		}
-
 		gs, err := gstore.Open(c.GraphStorePath)
 		if err != nil {
 			log.Fatalf("open graph store %s: %v", c.GraphStorePath, err)
@@ -203,9 +235,7 @@ func main() {
 		defer gs.Close()
 		graphStore = gs
 
-		graphBus = adapterruntime.NewBus(512)
-
-		// Shield telemetry adapter feeds ALL flows (no PPS filter) into the graph bus.
+		// Shield telemetry adapter publishes flow observations onto the shared mainBus.
 		telAdapter := shieldtelemetry.NewFromMaps(shieldtelemetry.Config{
 			Interval: c.Interval,
 			NodeID:   nodeID,
@@ -235,11 +265,11 @@ func main() {
 
 		gctx, cancel := context.WithCancel(context.Background())
 		graphCtxCancel = cancel
-		if err := telAdapter.Start(gctx, graphBus); err != nil {
+		if err := telAdapter.Start(gctx, mainBus); err != nil {
 			cancel()
 			log.Fatalf("start graph telemetry adapter: %v", err)
 		}
-		if err := learner.Start(gctx, graphBus); err != nil {
+		if err := learner.Start(gctx, mainBus); err != nil {
 			cancel()
 			log.Fatalf("start graph learner: %v", err)
 		}
@@ -354,24 +384,28 @@ func main() {
 			scanRate := float64(dScan) / sec
 			dropRLRate := float64(dDropRL) / sec
 
-			sev := fsm.CalcSeverity(pps, synRate, scanRate, c.TrigPPS, c.TrigSyn, c.TrigScan, c.WPPS, c.WSyn, c.WScan, c.SevCap)
+			subject4 := observation.EntityRef{Kind: observation.KindIP, ID: ip4String(k4)}
+			fsmM4, sigs4 := engine.Evaluate(subject4, pps, bps, synRate, scanRate, dropRLRate)
+			for _, sig := range sigs4 {
+				_ = mainBus.PublishSignal(context.Background(), sig)
+			}
 
 			if dPkts > 0 || dSyn > 0 || dScan > 0 {
 				seenForLearn++
-				if sev >= c.LearnSevGT {
+				if fsmM4.Severity >= c.LearnSevGT {
 					highSevCount++
 				}
 			}
 
 			prev4[k4] = prevV4{Pkts: v4.Pkts, Bytes: v4.Bytes, Syn: v4.Syn, Scan: v4.DportChanges, DropRL: v4.DropRL, LastWall: nowWall}
 
-			if pps < c.MinPPS && sev < c.MinSev && dropRLRate == 0 {
+			if pps < c.MinPPS && fsmM4.Severity < c.MinSev && dropRLRate == 0 {
 				continue
 			}
 
 			cands = append(cands, metrics{
 				IPVer: 4, IP4: k4,
-				PPS: pps, Bps: bps, SynRate: synRate, ScanRate: scanRate, DropRLRate: dropRLRate, Severity: sev,
+				PPS: fsmM4.PPS, Bps: fsmM4.Bps, SynRate: fsmM4.SynRate, ScanRate: fsmM4.ScanRate, DropRLRate: fsmM4.DropRLRate, Severity: fsmM4.Severity,
 			})
 		}
 		if err := it4.Err(); err != nil {
@@ -413,24 +447,28 @@ func main() {
 				scanRate := float64(dScan) / sec
 				dropRLRate := float64(dDropRL) / sec
 
-				sev := fsm.CalcSeverity(pps, synRate, scanRate, c.TrigPPS, c.TrigSyn, c.TrigScan, c.WPPS, c.WSyn, c.WScan, c.SevCap)
+				subject6 := observation.EntityRef{Kind: observation.KindIP, ID: ip6String(ip6)}
+				fsmM6, sigs6 := engine.Evaluate(subject6, pps, bps, synRate, scanRate, dropRLRate)
+				for _, sig := range sigs6 {
+					_ = mainBus.PublishSignal(context.Background(), sig)
+				}
 
 				if dPkts > 0 || dSyn > 0 || dScan > 0 {
 					seenForLearn++
-					if sev >= c.LearnSevGT {
+					if fsmM6.Severity >= c.LearnSevGT {
 						highSevCount++
 					}
 				}
 
 				prev6[ip6] = prevV6{Pkts: v6.Pkts, Bytes: v6.Bytes, Syn: v6.Syn, Scan: v6.DportChanges, DropRL: v6.DropRL, LastWall: nowWall}
 
-				if pps < c.MinPPS && sev < c.MinSev && dropRLRate == 0 {
+				if pps < c.MinPPS && fsmM6.Severity < c.MinSev && dropRLRate == 0 {
 					continue
 				}
 
 				cands = append(cands, metrics{
 					IPVer: 6, IP6: ip6,
-					PPS: pps, Bps: bps, SynRate: synRate, ScanRate: scanRate, DropRLRate: dropRLRate, Severity: sev,
+					PPS: fsmM6.PPS, Bps: fsmM6.Bps, SynRate: fsmM6.SynRate, ScanRate: fsmM6.ScanRate, DropRLRate: fsmM6.DropRLRate, Severity: fsmM6.Severity,
 				})
 			}
 			if err := it6.Err(); err != nil {
@@ -564,6 +602,11 @@ func main() {
 			c.TrigPPS, c.TrigSyn, c.TrigScan = targetPPS, targetSyn, targetScan
 			lastTune = time.Now()
 
+			engine.UpdateConfig(shieldheuristic.Config{
+				NodeID: nodeID, TrigPPS: c.TrigPPS, TrigSyn: c.TrigSyn, TrigScan: c.TrigScan,
+				WPPS: c.WPPS, WSyn: c.WSyn, WScan: c.WScan, SevCap: c.SevCap,
+			})
+
 			log.Printf("AUTOTUNE applied: trig_pps %.1f->%.1f trig_syn %.1f->%.1f trig_scan %.1f->%.1f (median+MAD k=%.2f) samples=%d cleanRatio=%.4f clean=%v dropRatio=%.4f phase=%s",
 				oldPPS, c.TrigPPS, oldSyn, c.TrigSyn, oldScan, c.TrigScan, pol.K, n, cleanRatio, clean, dropRatio, pol.Phase)
 
@@ -622,43 +665,3 @@ func main() {
 	}
 }
 
-// obsToMetrics converts a shield observation (published on the bus) back to a
-// kliq metrics struct for use in the FSM pipeline.
-// It parses the subject IP, extracts the known metric keys, and returns
-// (metrics, true) on success or a zero metrics and false on failure.
-// NOTE: Severity is NOT set here; the caller computes it via fsm.CalcSeverity.
-func obsToMetrics(subjectID string, obs map[string]float64, attrs map[string]string) (metrics, bool) {
-	m := metrics{}
-	ipVer, ok := attrs["ip_version"]
-	if !ok {
-		ipVer = "4"
-	}
-
-	ip := net.ParseIP(subjectID)
-	if ip == nil {
-		return metrics{}, false
-	}
-
-	if ipVer == "6" {
-		v6 := ip.To16()
-		if v6 == nil {
-			return metrics{}, false
-		}
-		copy(m.IP6[:], v6)
-		m.IPVer = 6
-	} else {
-		v4 := ip.To4()
-		if v4 == nil {
-			return metrics{}, false
-		}
-		copy(m.IP4[:], v4)
-		m.IPVer = 4
-	}
-
-	m.PPS = obs["pps"]
-	m.Bps = obs["bps"]
-	m.SynRate = obs["syn_rate"]
-	m.ScanRate = obs["scan_rate"]
-	m.DropRLRate = obs["drop_rl_rate"]
-	return m, true
-}

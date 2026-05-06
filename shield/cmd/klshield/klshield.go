@@ -26,8 +26,9 @@ const (
 
 	// pinned maps (per Kernloom docs)
 	pinTotals    = "/sys/fs/bpf/kernloom_totals"
-	pinSrc4Stats = "/sys/fs/bpf/kernloom_src4_stats"
-	pinSrc6Stats = "/sys/fs/bpf/kernloom_src6_stats"
+	pinSrc4Stats  = "/sys/fs/bpf/kernloom_src4_stats"
+	pinSrc6Stats  = "/sys/fs/bpf/kernloom_src6_stats"
+	pinFlow4Stats = "/sys/fs/bpf/kernloom_flow4_stats"
 
 	pinAllow4LPM = "/sys/fs/bpf/kernloom_allow4_lpm"
 	pinDeny4Hash = "/sys/fs/bpf/kernloom_deny4_hash"
@@ -145,9 +146,10 @@ type bpfObjects struct {
 	// - old: xdp_netguard
 	XdpProgram *ebpf.Program
 
-	XdpTotals    *ebpf.Map
-	XdpSrc4Stats *ebpf.Map
-	XdpSrc6Stats *ebpf.Map
+	XdpTotals     *ebpf.Map
+	XdpSrc4Stats  *ebpf.Map
+	XdpSrc6Stats  *ebpf.Map
+	XdpFlow4Stats *ebpf.Map
 
 	XdpAllowLpm  *ebpf.Map
 	XdpDenyHash4 *ebpf.Map
@@ -249,8 +251,9 @@ func loadBPFWithReplacements(objPath string) (*bpfObjects, error) {
 	repl := map[string]*ebpf.Map{}
 	for name, pin := range map[string]string{
 		"xdp_totals":     pinTotals,
-		"xdp_src4_stats": pinSrc4Stats,
-		"xdp_src6_stats": pinSrc6Stats,
+		"xdp_src4_stats":  pinSrc4Stats,
+		"xdp_src6_stats":  pinSrc6Stats,
+		"xdp_flow4_stats": pinFlow4Stats,
 
 		"xdp_allow_lpm":  pinAllow4LPM,
 		"xdp_deny_hash":  pinDeny4Hash,
@@ -311,6 +314,10 @@ func loadBPFWithReplacements(objPath string) (*bpfObjects, error) {
 		objs.Close()
 		return nil, err2
 	}
+	if objs.XdpFlow4Stats, err2 = getMap("xdp_flow4_stats"); err2 != nil {
+		objs.Close()
+		return nil, err2
+	}
 	if objs.XdpAllowLpm, err2 = getMap("xdp_allow_lpm"); err2 != nil {
 		objs.Close()
 		return nil, err2
@@ -354,6 +361,10 @@ func loadBPFWithReplacements(objPath string) (*bpfObjects, error) {
 		return nil, err
 	}
 	if err := pinIfMissing(objs.XdpSrc4Stats, pinSrc4Stats); err != nil {
+		objs.Close()
+		return nil, err
+	}
+	if err := pinIfMissing(objs.XdpFlow4Stats, pinFlow4Stats); err != nil {
 		objs.Close()
 		return nil, err
 	}

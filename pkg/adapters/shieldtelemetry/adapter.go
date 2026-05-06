@@ -50,9 +50,10 @@ type Adapter struct {
 	maps   *shieldclient.Maps
 	cancel context.CancelFunc
 
-	mu    sync.Mutex
-	prev4 map[[4]byte]prevSnapshot
-	prev6 map[[16]byte]prevSnapshot
+	mu             sync.Mutex
+	prev4          map[[4]byte]prevSnapshot
+	prev6          map[[16]byte]prevSnapshot
+	lastFlow4Clear time.Time // Option B: time of last flow4 map read+clear
 
 	healthy uint32 // atomic: 1 = ok
 	initErr error
@@ -328,9 +329,90 @@ func (a *Adapter) poll(ctx context.Context, bus adapterruntime.EventBus, nowWall
 			delete(a.prev6, ip)
 		}
 	}
+
+	// ----- Option B: per-flow (src, dport, proto) telemetry -----
+	if a.maps.Flow4 != nil {
+		a.pollFlow4(ctx, bus, nowWall)
+	}
+}
+
+// pollFlow4 reads all entries from the flow4 LRU map, publishes one TypeFlow
+// Observation per entry, then deletes each entry (Option B read-and-clear).
+// The elapsed window is the time since the previous clear.
+func (a *Adapter) pollFlow4(ctx context.Context, bus adapterruntime.EventBus, nowWall time.Time) {
+	if a.lastFlow4Clear.IsZero() {
+		a.lastFlow4Clear = nowWall
+	}
+	elapsed := nowWall.Sub(a.lastFlow4Clear).Seconds()
+	if elapsed <= 0 {
+		elapsed = a.cfg.Interval.Seconds()
+	}
+	if elapsed <= 0 {
+		elapsed = 1
+	}
+
+	type entry struct {
+		k shieldclient.Flow4Key
+		v shieldclient.Flow4Stats
+	}
+	var batch []entry
+
+	it := a.maps.Flow4.Iterate()
+	var k shieldclient.Flow4Key
+	var v shieldclient.Flow4Stats
+	for it.Next(&k, &v) {
+		batch = append(batch, entry{k, v})
+	}
+	if err := it.Err(); err != nil {
+		log.Printf("shield-telemetry: iterate flow4: %v", err)
+		return
+	}
+
+	// Delete all entries before publishing so the map is cleared atomically
+	// from KLIQ's perspective (Option B: totals since last clear).
+	for _, e := range batch {
+		kCopy := e.k
+		_ = a.maps.Flow4.Delete(&kCopy)
+	}
+	a.lastFlow4Clear = nowWall
+
+	for _, e := range batch {
+		srcIP := net.IPv4(e.k.SrcIP[0], e.k.SrcIP[1], e.k.SrcIP[2], e.k.SrcIP[3]).String()
+		obs := observation.NewObservation(
+			observation.SourceShield,
+			observation.TypeFlow,
+			a.cfg.NodeID,
+			observation.EntityRef{Kind: observation.KindIP, ID: srcIP},
+		)
+		obs.SetMetric("packets", float64(e.v.Pkts))
+		obs.SetMetric("bytes", float64(e.v.Bytes))
+		obs.SetMetric("pps", float64(e.v.Pkts)/elapsed)
+		obs.SetMetric("bps", float64(e.v.Bytes)/elapsed)
+		obs.SetMetric("syn_rate", float64(e.v.Syn)/elapsed)
+		obs.SetAttribute("ip_version", "4")
+		obs.SetAttribute("protocol", protoName(e.k.Proto))
+		obs.SetAttribute("destination_port", fmt.Sprintf("%d", e.k.DstPort))
+
+		if err := bus.PublishObservation(ctx, *obs); err != nil {
+			log.Printf("shield-telemetry: publish flow4 obs: %v", err)
+		}
+	}
 }
 
 /* ---------------- helpers ------------------------------------------------ */
 
 func ip4String(k [4]byte) string  { return net.IPv4(k[0], k[1], k[2], k[3]).String() }
 func ip6String(k [16]byte) string { return net.IP(k[:]).String() }
+
+func protoName(proto uint8) string {
+	switch proto {
+	case 6:
+		return "tcp"
+	case 17:
+		return "udp"
+	case 1:
+		return "icmp"
+	default:
+		return fmt.Sprintf("%d", proto)
+	}
+}

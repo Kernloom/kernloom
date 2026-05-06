@@ -170,6 +170,29 @@ struct {
     __type(value, struct xdp_src_stats_v6_t);
 } xdp_src6_stats SEC(".maps");
 
+/* ==================== Telemetry: per-flow v4 (src_ip + dst_port + proto) ==================== */
+/* KLIQ reads this map periodically, publishes flow observations, then clears all entries.       */
+/* Values are totals since the last clear — no rolling delta needed in the kernel.               */
+struct flow4_key {
+    __u32 src_ip;    /* network byte order (as loaded from packet)  */
+    __u16 dst_port;  /* host byte order — converted by bpf_ntohs()  */
+    __u8  proto;     /* IPPROTO_TCP=6, IPPROTO_UDP=17, IPPROTO_ICMP=1 */
+    __u8  pad;
+};
+
+struct flow4_stats {
+    __u64 pkts;
+    __u64 bytes;
+    __u64 syn;
+};
+
+struct {
+    __uint(type, BPF_MAP_TYPE_LRU_HASH);
+    __uint(max_entries, 32768);
+    __type(key, struct flow4_key);
+    __type(value, struct flow4_stats);
+} xdp_flow4_stats SEC(".maps");
+
 /* ==================== Allow/Deny maps ==================== */
 struct lpm_key_v4 {
     __u32 prefixlen;
@@ -674,6 +697,29 @@ static __always_inline int src6_update(const __u8 *saddr16, __u64 len, __u64 now
     return ret;
 }
 
+/* flow4_update accumulates per-flow counters for graph learning.
+ * dport_net is in network byte order; stored as host byte order in the key.
+ */
+static __always_inline void flow4_update(__be32 saddr, __u16 dport_net, __u8 proto,
+                                          __u64 len, bool syn)
+{
+    struct flow4_key fk = {
+        .src_ip   = saddr,
+        .dst_port = bpf_ntohs(dport_net),
+        .proto    = proto,
+        .pad      = 0,
+    };
+    struct flow4_stats *fv = bpf_map_lookup_elem(&xdp_flow4_stats, &fk);
+    if (fv) {
+        fv->pkts++;
+        fv->bytes += len;
+        if (syn) fv->syn++;
+    } else {
+        struct flow4_stats init = { .pkts = 1, .bytes = len, .syn = syn ? 1 : 0 };
+        bpf_map_update_elem(&xdp_flow4_stats, &fk, &init, BPF_NOEXIST);
+    }
+}
+
 /* ==================== XDP program ==================== */
 SEC("xdp")
 int xdp_klshield(struct xdp_md *ctx)
@@ -831,6 +877,9 @@ int xdp_klshield(struct xdp_md *ctx)
             t->dport_changes++;
             maybe_emit_event_v4(EV_SCAN_HINT, sample_mask, (__u32)saddr, l4proto, dport, (__u32)pkt_len, 1);
         }
+
+        /* flow4: per-(src,dport,proto) telemetry for graph learning */
+        flow4_update(saddr, dport, l4proto, pkt_len, syn);
 
         if (drop_allow)
             maybe_emit_event_v4(EV_DROP_ALLOW, sample_mask, (__u32)saddr, l4proto, dport, (__u32)pkt_len, 0);

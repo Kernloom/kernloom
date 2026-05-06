@@ -80,6 +80,11 @@ type Config struct {
 	ExcludeLoopback bool
 }
 
+// suspiciousEntry tracks an IP flagged by the heuristic signal engine.
+type suspiciousEntry struct {
+	expiresAt time.Time
+}
+
 // Adapter is the graph learner adapter.
 type Adapter struct {
 	cfg     Config
@@ -87,11 +92,18 @@ type Adapter struct {
 	healthy atomic.Bool
 	cancel  context.CancelFunc
 	wg      sync.WaitGroup
+
+	suspMu      sync.Mutex
+	suspicious  map[string]suspiciousEntry // key: IP string
 }
 
 // New creates a new graph learner adapter.
 func New(cfg Config, store Store) *Adapter {
-	a := &Adapter{cfg: cfg, store: store}
+	a := &Adapter{
+		cfg:        cfg,
+		store:      store,
+		suspicious: make(map[string]suspiciousEntry),
+	}
 	a.healthy.Store(false)
 	return a
 }
@@ -110,7 +122,7 @@ func (a *Adapter) Init(_ context.Context, _ adapterruntime.AdapterConfig) error 
 	return nil
 }
 
-// Start begins consuming observations from the bus and maintaining the graph.
+// Start begins consuming observations and signals from the bus.
 func (a *Adapter) Start(ctx context.Context, bus adapterruntime.EventBus) error {
 	ctx, cancel := context.WithCancel(ctx)
 	a.cancel = cancel
@@ -118,6 +130,9 @@ func (a *Adapter) Start(ctx context.Context, bus adapterruntime.EventBus) error 
 
 	a.wg.Add(1)
 	go a.observationLoop(ctx, bus)
+
+	a.wg.Add(1)
+	go a.signalLoop(ctx, bus)
 
 	if a.cfg.PromoteInterval > 0 {
 		a.wg.Add(1)
@@ -138,6 +153,62 @@ func (a *Adapter) Stop(_ context.Context) error {
 	a.wg.Wait()
 	a.healthy.Store(false)
 	return nil
+}
+
+// signalLoop watches for heuristic signals and marks sources as suspicious.
+// Observations from suspicious sources are skipped by handleObservation so that
+// traffic seen during an attack is not learned as normal baseline behaviour.
+func (a *Adapter) signalLoop(ctx context.Context, bus adapterruntime.EventBus) {
+	defer a.wg.Done()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case sig, ok := <-bus.Signals():
+			if !ok {
+				return
+			}
+			a.handleSignal(sig)
+		}
+	}
+}
+
+// handleSignal records the signal subject as suspicious for the signal's TTL.
+func (a *Adapter) handleSignal(sig signal.Signal) {
+	switch sig.Type {
+	case signal.SignalPPSHigh,
+		signal.SignalSYNRateHigh,
+		signal.SignalScanSuspected,
+		signal.SignalRateLimitDropsSustained:
+	default:
+		return
+	}
+	if sig.Subject.ID == "" {
+		return
+	}
+	ttl := sig.TTL
+	if ttl <= 0 {
+		ttl = 5 * time.Minute
+	}
+	a.suspMu.Lock()
+	a.suspicious[sig.Subject.ID] = suspiciousEntry{expiresAt: time.Now().Add(ttl)}
+	a.suspMu.Unlock()
+}
+
+// isSuspicious returns true when the given IP is currently flagged.
+// Expired entries are evicted lazily on access.
+func (a *Adapter) isSuspicious(ip string) bool {
+	a.suspMu.Lock()
+	defer a.suspMu.Unlock()
+	e, ok := a.suspicious[ip]
+	if !ok {
+		return false
+	}
+	if time.Now().After(e.expiresAt) {
+		delete(a.suspicious, ip)
+		return false
+	}
+	return true
 }
 
 // observationLoop drains flow observations from the bus and updates the graph.
@@ -177,6 +248,20 @@ func (a *Adapter) handleObservation(ctx context.Context, bus adapterruntime.Even
 		}
 	}
 
+	// Skip sources currently flagged by the heuristic signal engine (pps_high,
+	// syn_rate_high, scan_suspected, rate_limit_drops). Traffic seen during an
+	// active attack must not be learned as normal baseline behaviour.
+	if a.isSuspicious(obs.Subject.ID) {
+		return
+	}
+
+	// Drop observations without destination_port — these come from the src4
+	// aggregate map which has no L4 info. Only flow4 observations (with protocol
+	// and destination_port set) produce meaningful graph edges.
+	if obs.Attributes["destination_port"] == "" {
+		return
+	}
+
 	// Relevance filters — drop flows that pollute the graph with noise.
 	if a.cfg.ExcludeLoopback {
 		if isLoopback(obs.Subject.ID) || isLoopback(obs.Object.ID) {
@@ -207,6 +292,13 @@ func (a *Adapter) handleObservation(ctx context.Context, bus adapterruntime.Even
 	var dstPort uint16
 	if p, err := strconv.ParseUint(obs.Attributes["destination_port"], 10, 16); err == nil {
 		dstPort = uint16(p)
+	}
+	// Collapse ephemeral destination ports (>= 32768) to 0.
+	// These are local ports assigned to outgoing connections whose responses
+	// arrive back here (e.g. NTP, DNS). The ephemeral port changes every
+	// request, so we track the peer by IP+proto only, not by the transient port.
+	if dstPort >= 32768 {
+		dstPort = 0
 	}
 
 	now := obs.Time

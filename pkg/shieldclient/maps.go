@@ -21,6 +21,7 @@ import (
 const (
 	MapPinSrc4      = "kernloom_src4_stats"
 	MapPinSrc6      = "kernloom_src6_stats"
+	MapPinFlow4     = "kernloom_flow4_stats"
 	MapPinTotals    = "kernloom_totals"
 	MapPinDeny4     = "kernloom_deny4_hash"
 	MapPinDeny6     = "kernloom_deny6_hash"
@@ -130,6 +131,24 @@ type RLConfig struct {
 	Burst   uint64
 }
 
+// Flow4Key matches flow4_key in the Shield BPF program.
+// DstPort is in host byte order (converted by bpf_ntohs in XDP).
+// SrcIP is in network byte order (as loaded from the packet).
+type Flow4Key struct {
+	SrcIP   [4]byte
+	DstPort uint16
+	Proto   uint8
+	Pad     uint8
+}
+
+// Flow4Stats matches flow4_stats in the Shield BPF program.
+// Values are totals since the last map clear by KLIQ (Option B pattern).
+type Flow4Stats struct {
+	Pkts  uint64
+	Bytes uint64
+	Syn   uint64
+}
+
 // Src6Key is the map key for kernloom_rl_policy6.
 type Src6Key struct{ IP [16]byte }
 
@@ -139,10 +158,11 @@ type Key6Bytes struct{ IP [16]byte }
 /* ---------------- Maps struct --------------------------------------------- */
 
 // Maps holds handles to all Shield pinned eBPF maps.
-// Optional maps (Src6, Totals, Deny6, RL6) may be nil when not available.
+// Optional maps (Src6, Flow4, Totals, Deny6, RL6) may be nil when not available.
 type Maps struct {
 	Src4   *ebpf.Map // mandatory telemetry map (IPv4)
 	Src6   *ebpf.Map // optional telemetry map (IPv6)
+	Flow4  *ebpf.Map // optional per-flow telemetry map (Option B, LRU_HASH)
 	Deny4  *ebpf.Map // mandatory enforcement map (IPv4 deny) when !dryRun
 	RL4    *ebpf.Map // mandatory enforcement map (IPv4 rate-limit) when !dryRun
 	Deny6  *ebpf.Map // optional enforcement map (IPv6 deny)
@@ -152,7 +172,7 @@ type Maps struct {
 
 // Close closes all non-nil map handles.
 func (m *Maps) Close() {
-	for _, mp := range []*ebpf.Map{m.Src4, m.Src6, m.Deny4, m.RL4, m.Deny6, m.RL6, m.Totals} {
+	for _, mp := range []*ebpf.Map{m.Src4, m.Src6, m.Flow4, m.Deny4, m.RL4, m.Deny6, m.RL6, m.Totals} {
 		if mp != nil {
 			mp.Close()
 		}
@@ -174,6 +194,12 @@ func Open(root string, dryRun bool) (*Maps, error) {
 		m.Src6 = m6
 	} else {
 		log.Printf("shieldclient: IPv6 telemetry map not available (optional): %v", err)
+	}
+
+	if f4, err := OpenPinnedMap(filepath.Join(root, MapPinFlow4)); err == nil {
+		m.Flow4 = f4
+	} else {
+		log.Printf("shieldclient: flow4 map not available (optional): %v", err)
 	}
 
 	if tm, err := OpenPinnedMap(filepath.Join(root, MapPinTotals)); err == nil {
