@@ -149,6 +149,10 @@ type cfg struct {
 	GraphMinWindows      int
 	GraphMinAge          time.Duration
 	GraphExpireTTL       time.Duration
+	GraphMinPackets      uint64
+	GraphMinBytes        uint64
+	GraphExcludeBcast    bool
+	GraphExcludeLoopback bool
 }
 
 // toFSMConfig converts the relevant cfg fields to an fsm.Config.
@@ -314,7 +318,7 @@ func parseFlags() cfg {
 	// Runtime state — SQLite DB updated every tick, not under IMA.
 	flag.StringVar(&c.GraphStorePath, "graph-store", "/var/lib/kernloom/iq/graph.db", "graph SQLite database (runtime, not IMA-attested)")
 	// IMA-attested: written once by 'kliq graph freeze', then static until next freeze.
-	flag.StringVar(&c.GraphFrozenPath, "graph-frozen", "/opt/kernloom/attested/etc/frozen-graph.yaml", "frozen graph baseline written by 'kliq graph freeze' (IMA-attested)")
+	flag.StringVar(&c.GraphFrozenPath, "graph-frozen", "/opt/kernloom/attested/etc/frozen-graph.yaml", "frozen graph baseline written by 'kliq graph freeze' (IMA-attested if activated)")
 	flag.StringVar(&c.GraphMode, "graph-mode", "learn", "graph mode: learn or frozen-observe")
 	flag.StringVar(&c.GraphNodeID, "graph-node-id", "", "node ID for graph edges (defaults to hostname)")
 	flag.DurationVar(&c.GraphPromoteInterval, "graph-promote-interval", 5*time.Minute, "how often to promote candidate edges to learned")
@@ -322,6 +326,10 @@ func parseFlags() cfg {
 	flag.IntVar(&c.GraphMinWindows, "graph-min-windows", 3, "min distinct tick windows before promotion")
 	flag.DurationVar(&c.GraphMinAge, "graph-min-age", 10*time.Minute, "min edge age before promotion")
 	flag.DurationVar(&c.GraphExpireTTL, "graph-expire-ttl", 30*24*time.Hour, "mark edges expired after this idle time (0 disables)")
+	flag.Uint64Var(&c.GraphMinPackets, "graph-min-packets", 0, "min packets per tick to record a graph edge (0 disables)")
+	flag.Uint64Var(&c.GraphMinBytes, "graph-min-bytes", 0, "min bytes per tick to record a graph edge (0 disables)")
+	flag.BoolVar(&c.GraphExcludeBcast, "graph-exclude-broadcast", true, "exclude broadcast/multicast destination addresses from graph")
+	flag.BoolVar(&c.GraphExcludeLoopback, "graph-exclude-loopback", true, "exclude loopback addresses from graph")
 
 	flag.Parse()
 	return c

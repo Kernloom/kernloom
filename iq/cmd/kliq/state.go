@@ -80,9 +80,10 @@ func computeSHA256NoIntegrity(b []byte) string {
 }
 
 func writeStateAtomic(path string, st *stateFile) error {
+	st.Generated = time.Now() // must be set on st before hashing
+
 	tmp := *st
 	tmp.Integrity = integrity{}
-	tmp.Generated = time.Now()
 
 	rawNoInt, err := json.MarshalIndent(&tmp, "", "  ")
 	if err != nil {

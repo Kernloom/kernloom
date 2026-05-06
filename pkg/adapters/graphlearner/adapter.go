@@ -13,6 +13,7 @@ package graphlearner
 
 import (
 	"context"
+	"log"
 	"net"
 	"strconv"
 	"sync"
@@ -61,6 +62,22 @@ type Config struct {
 	// ExpireTTL is how long an unseen edge is kept before being marked expired.
 	// 0 disables expiry.
 	ExpireTTL time.Duration
+
+	// MinPacketsPerTick skips recording an edge if the flow had fewer packets
+	// in this tick. Useful to ignore isolated SYN probes (default: 0 = off).
+	MinPacketsPerTick uint64
+
+	// MinBytesPerTick skips recording an edge if the flow carried fewer bytes
+	// in this tick (default: 0 = off).
+	MinBytesPerTick uint64
+
+	// ExcludeBroadcast drops flows whose destination is a broadcast or
+	// multicast address (224.0.0.0/4, 255.255.255.255, ff00::/8).
+	ExcludeBroadcast bool
+
+	// ExcludeLoopback drops flows whose source or destination is a loopback
+	// address (127.0.0.0/8, ::1).
+	ExcludeLoopback bool
 }
 
 // Adapter is the graph learner adapter.
@@ -144,8 +161,42 @@ func (a *Adapter) observationLoop(ctx context.Context, bus adapterruntime.EventB
 
 // handleObservation converts a flow observation into a graph edge upsert.
 func (a *Adapter) handleObservation(ctx context.Context, bus adapterruntime.EventBus, obs observation.Observation) {
-	if obs.Subject.ID == "" || obs.Object.ID == "" {
+	if obs.Subject.ID == "" {
 		return
+	}
+
+	// Shield src maps only record the source IP; the destination is implicitly
+	// this node. Fill in the node as object so graph edges can be recorded.
+	if obs.Object.ID == "" {
+		obs.Object = observation.EntityRef{
+			Kind: observation.KindNode,
+			ID:   obs.NodeID,
+		}
+		if obs.Object.ID == "" {
+			obs.Object.ID = a.cfg.NodeID
+		}
+	}
+
+	// Relevance filters — drop flows that pollute the graph with noise.
+	if a.cfg.ExcludeLoopback {
+		if isLoopback(obs.Subject.ID) || isLoopback(obs.Object.ID) {
+			return
+		}
+	}
+	if a.cfg.ExcludeBroadcast {
+		if isBroadcastOrMulticast(obs.Object.ID) {
+			return
+		}
+	}
+	if a.cfg.MinPacketsPerTick > 0 {
+		if pkts := uint64(obs.Metrics["packets"]); pkts < a.cfg.MinPacketsPerTick {
+			return
+		}
+	}
+	if a.cfg.MinBytesPerTick > 0 {
+		if byt := uint64(obs.Metrics["bytes"]); byt < a.cfg.MinBytesPerTick {
+			return
+		}
 	}
 
 	dir := directionFor(obs)
@@ -214,9 +265,18 @@ func (a *Adapter) maintenanceLoop(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case now := <-ticker.C:
-			_, _ = a.store.PromoteCandidates(a.cfg.NodeID, a.cfg.Promotion, now)
+			n, err := a.store.PromoteCandidates(a.cfg.NodeID, a.cfg.Promotion, now)
+			if err != nil {
+				log.Printf("graph-learner: promote candidates: %v", err)
+			} else if n > 0 {
+				log.Printf("graph-learner: promoted %d candidate(s) to learned", n)
+			}
 			if a.cfg.ExpireTTL > 0 {
-				_, _ = a.store.MarkExpired(a.cfg.NodeID, now.Add(-a.cfg.ExpireTTL))
+				if n, err := a.store.MarkExpired(a.cfg.NodeID, now.Add(-a.cfg.ExpireTTL)); err != nil {
+					log.Printf("graph-learner: mark expired: %v", err)
+				} else if n > 0 {
+					log.Printf("graph-learner: marked %d edge(s) as expired", n)
+				}
 			}
 		}
 	}
@@ -233,4 +293,17 @@ func directionFor(obs observation.Observation) graph.Direction {
 		return graph.DirectionEgress
 	}
 	return graph.DirectionIngress
+}
+
+func isLoopback(addr string) bool {
+	ip := net.ParseIP(addr)
+	return ip != nil && ip.IsLoopback()
+}
+
+func isBroadcastOrMulticast(addr string) bool {
+	ip := net.ParseIP(addr)
+	if ip == nil {
+		return false
+	}
+	return ip.IsMulticast() || ip.Equal(net.IPv4bcast)
 }

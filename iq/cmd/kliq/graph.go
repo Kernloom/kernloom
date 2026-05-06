@@ -254,7 +254,7 @@ func handleGraphSubcommand(storePath, frozenPath, nodeID string) bool {
 
 	case "export":
 		format := "yaml"
-		for _, a := range args[4:] {
+		for _, a := range args[2:] {
 			if a == "--format=json" || a == "-json" {
 				format = "json"
 			}

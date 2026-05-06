@@ -225,8 +225,12 @@ func main() {
 				MinDistinctWindows: c.GraphMinWindows,
 				MinFirstSeenAge:    c.GraphMinAge,
 			},
-			PromoteInterval: c.GraphPromoteInterval,
-			ExpireTTL:       c.GraphExpireTTL,
+			PromoteInterval:   c.GraphPromoteInterval,
+			ExpireTTL:         c.GraphExpireTTL,
+			MinPacketsPerTick: c.GraphMinPackets,
+			MinBytesPerTick:   c.GraphMinBytes,
+			ExcludeBroadcast:  c.GraphExcludeBcast,
+			ExcludeLoopback:   c.GraphExcludeLoopback,
 		}, graphStore)
 
 		gctx, cancel := context.WithCancel(context.Background())
