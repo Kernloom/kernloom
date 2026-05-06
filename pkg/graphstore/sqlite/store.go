@@ -102,8 +102,6 @@ func (s *Store) Upsert(e *graph.Edge) (*graph.Edge, error) {
 			packets_total    = packets_total + excluded.packets_total,
 			bytes_total      = bytes_total + excluded.bytes_total,
 			confidence       = excluded.confidence,
-			state            = excluded.state,
-			learned_by       = excluded.learned_by,
 			attributes_json  = excluded.attributes_json
 	`,
 		e.ID, e.NodeID,
