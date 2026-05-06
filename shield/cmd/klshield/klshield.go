@@ -25,7 +25,7 @@ const (
 	pinXdpLink = "/sys/fs/bpf/kernloom_shield_xdp_link"
 
 	// pinned maps (per Kernloom docs)
-	pinTotals    = "/sys/fs/bpf/kernloom_totals"
+	pinTotals     = "/sys/fs/bpf/kernloom_totals"
 	pinSrc4Stats  = "/sys/fs/bpf/kernloom_src4_stats"
 	pinSrc6Stats  = "/sys/fs/bpf/kernloom_src6_stats"
 	pinFlow4Stats = "/sys/fs/bpf/kernloom_flow4_stats"
@@ -250,7 +250,7 @@ func loadBPFWithReplacements(objPath string) (*bpfObjects, error) {
 	// Reuse pinned maps if they exist.
 	repl := map[string]*ebpf.Map{}
 	for name, pin := range map[string]string{
-		"xdp_totals":     pinTotals,
+		"xdp_totals":      pinTotals,
 		"xdp_src4_stats":  pinSrc4Stats,
 		"xdp_src6_stats":  pinSrc6Stats,
 		"xdp_flow4_stats": pinFlow4Stats,

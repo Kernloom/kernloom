@@ -93,8 +93,8 @@ type Adapter struct {
 	cancel  context.CancelFunc
 	wg      sync.WaitGroup
 
-	suspMu      sync.Mutex
-	suspicious  map[string]suspiciousEntry // key: IP string
+	suspMu     sync.Mutex
+	suspicious map[string]suspiciousEntry // key: IP string
 }
 
 // New creates a new graph learner adapter.
