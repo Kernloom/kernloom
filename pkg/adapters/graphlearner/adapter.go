@@ -15,6 +15,7 @@ import (
 	"context"
 	"log"
 	"net"
+	"os"
 	"strconv"
 	"sync"
 	"sync/atomic"
@@ -26,6 +27,8 @@ import (
 	"github.com/adrianenderlin/kernloom/pkg/core/observation"
 	"github.com/adrianenderlin/kernloom/pkg/core/signal"
 )
+
+var logger = log.New(os.Stderr, "[graph-learner] ", log.LstdFlags)
 
 // Mode controls how the learner behaves.
 type Mode string
@@ -82,6 +85,11 @@ type Config struct {
 	// ExcludeLoopback drops flows whose source or destination is a loopback
 	// address (127.0.0.0/8, ::1).
 	ExcludeLoopback bool
+
+	// ExcludeSourceCIDRs drops flows whose source IP matches any of these CIDRs.
+	// Useful to exclude NAT gateways, local routers or WSL host IPs that funnel
+	// all external traffic and would otherwise dominate the graph.
+	ExcludeSourceCIDRs []net.IPNet
 }
 
 // suspiciousEntry tracks an IP flagged by the heuristic signal engine.
@@ -91,11 +99,12 @@ type suspiciousEntry struct {
 
 // Adapter is the graph learner adapter.
 type Adapter struct {
-	cfg     Config
-	store   Store
-	healthy atomic.Bool
-	cancel  context.CancelFunc
-	wg      sync.WaitGroup
+	cfg          Config
+	store        Store
+	excludeCIDRs []net.IPNet // parsed once from cfg.ExcludeSourceCIDRs
+	healthy      atomic.Bool
+	cancel       context.CancelFunc
+	wg           sync.WaitGroup
 
 	suspMu     sync.Mutex
 	suspicious map[string]suspiciousEntry // key: IP string
@@ -104,9 +113,10 @@ type Adapter struct {
 // New creates a new graph learner adapter.
 func New(cfg Config, store Store) *Adapter {
 	a := &Adapter{
-		cfg:        cfg,
-		store:      store,
-		suspicious: make(map[string]suspiciousEntry),
+		cfg:          cfg,
+		store:        store,
+		excludeCIDRs: cfg.ExcludeSourceCIDRs,
+		suspicious:   make(map[string]suspiciousEntry),
 	}
 	a.healthy.Store(false)
 	return a
@@ -202,9 +212,9 @@ func (a *Adapter) handleSignal(sig signal.Signal) {
 
 	// Expire any candidate edges that snuck through before this signal fired.
 	if n, err := a.store.ExpireCandidatesBySource(a.cfg.NodeID, sig.Subject.ID); err != nil {
-		log.Printf("graph-learner: expire candidates for %s: %v", sig.Subject.ID, err)
+		logger.Printf("expire candidates for %s: %v", sig.Subject.ID, err)
 	} else if n > 0 {
-		log.Printf("graph-learner: expired %d candidate(s) for suspicious source %s", n, sig.Subject.ID)
+		logger.Printf("expired %d candidate(s) for suspicious source %s", n, sig.Subject.ID)
 	}
 }
 
@@ -285,6 +295,9 @@ func (a *Adapter) handleObservation(ctx context.Context, bus adapterruntime.Even
 		if isBroadcastOrMulticast(obs.Object.ID) {
 			return
 		}
+	}
+	if len(a.excludeCIDRs) > 0 && isInCIDRs(obs.Subject.ID, a.excludeCIDRs) {
+		return
 	}
 	if a.cfg.MinPacketsPerTick > 0 {
 		if pkts := uint64(obs.Metrics["packets"]); pkts < a.cfg.MinPacketsPerTick {
@@ -372,15 +385,15 @@ func (a *Adapter) maintenanceLoop(ctx context.Context) {
 		case now := <-ticker.C:
 			n, err := a.store.PromoteCandidates(a.cfg.NodeID, a.cfg.Promotion, now)
 			if err != nil {
-				log.Printf("graph-learner: promote candidates: %v", err)
+				logger.Printf("promote candidates: %v", err)
 			} else if n > 0 {
-				log.Printf("graph-learner: promoted %d candidate(s) to learned", n)
+				logger.Printf("promoted %d candidate(s) to learned", n)
 			}
 			if a.cfg.ExpireTTL > 0 {
 				if n, err := a.store.MarkExpired(a.cfg.NodeID, now.Add(-a.cfg.ExpireTTL)); err != nil {
-					log.Printf("graph-learner: mark expired: %v", err)
+					logger.Printf("mark expired: %v", err)
 				} else if n > 0 {
-					log.Printf("graph-learner: marked %d edge(s) as expired", n)
+					logger.Printf("marked %d edge(s) as expired", n)
 				}
 			}
 		}
@@ -403,6 +416,19 @@ func directionFor(obs observation.Observation) graph.Direction {
 func isLoopback(addr string) bool {
 	ip := net.ParseIP(addr)
 	return ip != nil && ip.IsLoopback()
+}
+
+func isInCIDRs(addr string, cidrs []net.IPNet) bool {
+	ip := net.ParseIP(addr)
+	if ip == nil {
+		return false
+	}
+	for i := range cidrs {
+		if cidrs[i].Contains(ip) {
+			return true
+		}
+	}
+	return false
 }
 
 func isBroadcastOrMulticast(addr string) bool {

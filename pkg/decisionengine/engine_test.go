@@ -1,0 +1,374 @@
+// SPDX-License-Identifier: MPL-2.0
+// Copyright (c) 2026 Adrian Enderlin
+
+package decisionengine_test
+
+import (
+	"context"
+	"testing"
+	"time"
+
+	"github.com/adrianenderlin/kernloom/pkg/core/decision"
+	"github.com/adrianenderlin/kernloom/pkg/core/fsm"
+	"github.com/adrianenderlin/kernloom/pkg/core/observation"
+	"github.com/adrianenderlin/kernloom/pkg/core/reason"
+	"github.com/adrianenderlin/kernloom/pkg/core/signal"
+	"github.com/adrianenderlin/kernloom/pkg/decisionengine"
+)
+
+/* ---- stub PEP adapter ---- */
+
+type stubPEP struct {
+	called   int
+	lastDec  *decision.Decision
+	returnErr error
+}
+
+func (s *stubPEP) EnforceDecision(_ context.Context, dec *decision.Decision) (*decision.EnforcementReceipt, error) {
+	s.called++
+	s.lastDec = dec
+	if s.returnErr != nil {
+		return nil, s.returnErr
+	}
+	return decision.NewEnforcementReceipt(dec.ID, "test-node", "stub-pep", decision.StatusApplied), nil
+}
+
+/* ---- helpers ---- */
+
+func basePolicy() decisionengine.LocalPolicy {
+	return decisionengine.LocalPolicy{
+		NodeID:              "test-node",
+		DryRun:              false,
+		MaxAction:           decision.ActionBlock,
+		AllowLocalBlock:     true,
+		GraphFreezeAction:   decision.ActionRateLimit,
+		GraphFreezeTTL:      5 * time.Minute,
+		LevelSoft:           decision.ActionRateLimit,
+		LevelHard:           decision.ActionRateLimit,
+		LevelBlock:          decision.ActionBlock,
+		SoftTTL:             2 * time.Minute,
+		HardTTL:             5 * time.Minute,
+		BlockTTL:            10 * time.Minute,
+		MinSeverityForBlock: 70,
+	}
+}
+
+func graphSignal(subjectID string, score int) signal.Signal {
+	return signal.Signal{
+		ID:          "sig-test-1",
+		Time:        time.Now().UTC(),
+		Producer:    signal.ProducerKLIQ,
+		Scope:       signal.ScopeLocal,
+		Type:        signal.SignalGraphNewEdgeAfterFreeze,
+		Subject:     observation.EntityRef{Kind: observation.KindIP, ID: subjectID},
+		Score:       score,
+		Confidence:  80,
+		TTL:         10 * time.Minute,
+		ReasonCodes: []string{reason.GraphNewEdgeAfterFreeze},
+	}
+}
+
+/* ---- EvaluateSignal tests ---- */
+
+func TestEvaluateSignal_GraphFreezeRateLimit(t *testing.T) {
+	pep := &stubPEP{}
+	pol := basePolicy()
+	pol.GraphFreezeAction = decision.ActionRateLimit
+	eng := decisionengine.New(pol, pep)
+
+	sig := graphSignal("203.0.113.1", 80)
+	dec, receipt, err := eng.EvaluateSignal(context.Background(), sig)
+
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if dec == nil {
+		t.Fatal("expected a decision, got nil")
+	}
+	if receipt == nil {
+		t.Fatal("expected a receipt, got nil")
+	}
+	if dec.Action.Type != decision.ActionRateLimit {
+		t.Errorf("expected action rate_limit, got %s", dec.Action.Type)
+	}
+	if pep.called != 1 {
+		t.Errorf("expected PEP called once, got %d", pep.called)
+	}
+	if receipt.Status != decision.StatusApplied {
+		t.Errorf("expected status applied, got %s", receipt.Status)
+	}
+}
+
+func TestEvaluateSignal_GraphFreezeSignalOnly(t *testing.T) {
+	pep := &stubPEP{}
+	pol := basePolicy()
+	pol.GraphFreezeAction = decision.ActionSignal
+	eng := decisionengine.New(pol, pep)
+
+	sig := graphSignal("203.0.113.2", 75)
+	dec, receipt, err := eng.EvaluateSignal(context.Background(), sig)
+
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	// Signal-only means no enforcement; engine returns nil, nil, nil.
+	if dec != nil {
+		t.Errorf("expected no decision for signal-only action, got %+v", dec)
+	}
+	if receipt != nil {
+		t.Errorf("expected no receipt for signal-only action, got %+v", receipt)
+	}
+	if pep.called != 0 {
+		t.Errorf("expected PEP not called, got %d", pep.called)
+	}
+}
+
+func TestEvaluateSignal_BlockBelowMinSeverity(t *testing.T) {
+	pep := &stubPEP{}
+	pol := basePolicy()
+	pol.GraphFreezeAction = decision.ActionBlock
+	pol.AllowLocalBlock = true
+	pol.MaxAction = decision.ActionBlock
+	pol.MinSeverityForBlock = 80
+	eng := decisionengine.New(pol, pep)
+
+	// Score 60 is below MinSeverityForBlock=80.
+	sig := graphSignal("203.0.113.3", 60)
+	dec, _, err := eng.EvaluateSignal(context.Background(), sig)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	// Block gated; engine should return nil.
+	if dec != nil {
+		t.Errorf("expected no decision when score below min-severity-for-block, got action %s", dec.Action.Type)
+	}
+	if pep.called != 0 {
+		t.Errorf("expected PEP not called, got %d", pep.called)
+	}
+}
+
+func TestEvaluateSignal_BlockAboveMinSeverity(t *testing.T) {
+	pep := &stubPEP{}
+	pol := basePolicy()
+	pol.GraphFreezeAction = decision.ActionBlock
+	pol.AllowLocalBlock = true
+	pol.MaxAction = decision.ActionBlock
+	pol.MinSeverityForBlock = 80
+	eng := decisionengine.New(pol, pep)
+
+	// Score 85 >= MinSeverityForBlock=80: enforcement allowed.
+	sig := graphSignal("203.0.113.4", 85)
+	dec, receipt, err := eng.EvaluateSignal(context.Background(), sig)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if dec == nil {
+		t.Fatal("expected a decision, got nil")
+	}
+	if dec.Action.Type != decision.ActionBlock {
+		t.Errorf("expected action block, got %s", dec.Action.Type)
+	}
+	if receipt == nil || receipt.Status != decision.StatusApplied {
+		t.Errorf("expected applied receipt")
+	}
+}
+
+func TestEvaluateSignal_AllowLocalBlockFalse_CapsToRateLimit(t *testing.T) {
+	pep := &stubPEP{}
+	pol := basePolicy()
+	pol.GraphFreezeAction = decision.ActionBlock
+	pol.AllowLocalBlock = false
+	pol.MaxAction = decision.ActionBlock
+	eng := decisionengine.New(pol, pep)
+
+	sig := graphSignal("203.0.113.5", 90)
+	dec, _, err := eng.EvaluateSignal(context.Background(), sig)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if dec == nil {
+		t.Fatal("expected a decision, got nil")
+	}
+	// AllowLocalBlock=false caps block -> rate_limit.
+	if dec.Action.Type != decision.ActionRateLimit {
+		t.Errorf("expected action rate_limit (capped), got %s", dec.Action.Type)
+	}
+}
+
+func TestEvaluateSignal_MaxActionCap(t *testing.T) {
+	pep := &stubPEP{}
+	pol := basePolicy()
+	pol.GraphFreezeAction = decision.ActionBlock
+	pol.AllowLocalBlock = true
+	pol.MaxAction = decision.ActionRateLimit // global cap
+	eng := decisionengine.New(pol, pep)
+
+	sig := graphSignal("203.0.113.6", 90)
+	dec, _, err := eng.EvaluateSignal(context.Background(), sig)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if dec == nil {
+		t.Fatal("expected a decision, got nil")
+	}
+	if dec.Action.Type != decision.ActionRateLimit {
+		t.Errorf("expected rate_limit (MaxAction cap), got %s", dec.Action.Type)
+	}
+}
+
+func TestEvaluateSignal_NonGraphSignal_ReturnsNil(t *testing.T) {
+	pep := &stubPEP{}
+	eng := decisionengine.New(basePolicy(), pep)
+
+	sig := signal.Signal{
+		Type:    signal.SignalCampaignDistributedScan,
+		Subject: observation.EntityRef{Kind: observation.KindIP, ID: "203.0.113.7"},
+		Score:   90,
+	}
+	dec, receipt, err := eng.EvaluateSignal(context.Background(), sig)
+	if err != nil || dec != nil || receipt != nil {
+		t.Errorf("expected nil, nil, nil for non-graph signal; got dec=%v receipt=%v err=%v", dec, receipt, err)
+	}
+}
+
+func TestEvaluateSignal_DryRun(t *testing.T) {
+	pep := &stubPEP{}
+	pol := basePolicy()
+	pol.DryRun = true
+	pol.GraphFreezeAction = decision.ActionRateLimit
+	eng := decisionengine.New(pol, pep)
+
+	sig := graphSignal("203.0.113.8", 80)
+	dec, _, err := eng.EvaluateSignal(context.Background(), sig)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if dec == nil {
+		t.Fatal("expected decision in dry-run mode")
+	}
+	if !dec.DryRun {
+		t.Error("expected DryRun=true on decision")
+	}
+}
+
+func TestEvaluateSignal_ReasonCodePropagated(t *testing.T) {
+	pep := &stubPEP{}
+	pol := basePolicy()
+	pol.GraphFreezeAction = decision.ActionRateLimit
+	eng := decisionengine.New(pol, pep)
+
+	sig := graphSignal("203.0.113.9", 80)
+	sig.ReasonCodes = []string{reason.GraphNewEdgeAfterFreeze, reason.GraphNewPeer}
+	dec, _, err := eng.EvaluateSignal(context.Background(), sig)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if dec == nil {
+		t.Fatal("expected a decision")
+	}
+
+	found := 0
+	for _, rc := range dec.ReasonCodes {
+		if rc == reason.GraphNewEdgeAfterFreeze || rc == reason.GraphNewPeer {
+			found++
+		}
+	}
+	if found < 2 {
+		t.Errorf("expected both reason codes propagated, got %v", dec.ReasonCodes)
+	}
+}
+
+/* ---- RecordFSMTransition tests ---- */
+
+func TestRecordFSMTransition_ObserveToSoft(t *testing.T) {
+	eng := decisionengine.New(basePolicy(), &stubPEP{})
+
+	subj := observation.EntityRef{Kind: observation.KindIP, ID: "10.0.0.1"}
+	dec := eng.RecordFSMTransition(subj, fsm.LevelObserve, fsm.LevelSoft, 0.6, reason.PPSHigh)
+
+	if dec == nil {
+		t.Fatal("expected a decision")
+	}
+	if dec.Action.Type != decision.ActionRateLimit {
+		t.Errorf("expected rate_limit for soft level, got %s", dec.Action.Type)
+	}
+	if dec.Subject.ID != "10.0.0.1" {
+		t.Errorf("expected subject 10.0.0.1, got %s", dec.Subject.ID)
+	}
+}
+
+func TestRecordFSMTransition_SoftToBlock(t *testing.T) {
+	eng := decisionengine.New(basePolicy(), &stubPEP{})
+
+	subj := observation.EntityRef{Kind: observation.KindIP, ID: "10.0.0.2"}
+	dec := eng.RecordFSMTransition(subj, fsm.LevelSoft, fsm.LevelBlock, 0.95, reason.ScanRateHigh)
+
+	if dec.Action.Type != decision.ActionBlock {
+		t.Errorf("expected block for block level, got %s", dec.Action.Type)
+	}
+	if dec.ExpiresAt == nil {
+		t.Error("expected expiry set for block decision")
+	}
+}
+
+func TestRecordFSMTransition_BlockCappedByMaxAction(t *testing.T) {
+	pol := basePolicy()
+	pol.MaxAction = decision.ActionRateLimit
+	eng := decisionengine.New(pol, &stubPEP{})
+
+	subj := observation.EntityRef{Kind: observation.KindIP, ID: "10.0.0.3"}
+	dec := eng.RecordFSMTransition(subj, fsm.LevelHard, fsm.LevelBlock, 0.9)
+
+	if dec.Action.Type != decision.ActionRateLimit {
+		t.Errorf("expected rate_limit (MaxAction cap), got %s", dec.Action.Type)
+	}
+}
+
+func TestRecordFSMTransition_FSMAttributesSet(t *testing.T) {
+	eng := decisionengine.New(basePolicy(), &stubPEP{})
+
+	subj := observation.EntityRef{Kind: observation.KindIP, ID: "10.0.0.4"}
+	dec := eng.RecordFSMTransition(subj, fsm.LevelObserve, fsm.LevelHard, 0.75)
+
+	if dec.Attributes["fsm_from"] != fsm.LevelObserve.String() {
+		t.Errorf("expected fsm_from=%s, got %s", fsm.LevelObserve.String(), dec.Attributes["fsm_from"])
+	}
+	if dec.Attributes["fsm_to"] != fsm.LevelHard.String() {
+		t.Errorf("expected fsm_to=%s, got %s", fsm.LevelHard.String(), dec.Attributes["fsm_to"])
+	}
+}
+
+/* ---- UpdatePolicy / Policy tests ---- */
+
+func TestUpdatePolicy_Atomic(t *testing.T) {
+	eng := decisionengine.New(basePolicy(), &stubPEP{})
+
+	newPol := basePolicy()
+	newPol.NodeID = "updated-node"
+	eng.UpdatePolicy(newPol)
+
+	got := eng.Policy()
+	if got.NodeID != "updated-node" {
+		t.Errorf("expected NodeID updated-node, got %s", got.NodeID)
+	}
+}
+
+/* ---- Default-filling tests ---- */
+
+func TestNew_AppliesDefaults(t *testing.T) {
+	eng := decisionengine.New(decisionengine.LocalPolicy{NodeID: "x"}, &stubPEP{})
+	pol := eng.Policy()
+
+	if pol.MaxAction == "" {
+		t.Error("MaxAction should have default")
+	}
+	if pol.GraphFreezeAction == "" {
+		t.Error("GraphFreezeAction should have default")
+	}
+	if pol.GraphFreezeTTL == 0 {
+		t.Error("GraphFreezeTTL should have default")
+	}
+	if pol.LevelSoft == "" {
+		t.Error("LevelSoft should have default")
+	}
+}

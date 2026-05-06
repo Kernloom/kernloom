@@ -12,10 +12,13 @@ package shieldclient
 import (
 	"fmt"
 	"log"
+	"os"
 	"path/filepath"
 
 	"github.com/cilium/ebpf"
 )
+
+var logger = log.New(os.Stderr, "[shield-client] ", log.LstdFlags)
 
 // Map pin paths (relative to bpffs root, default /sys/fs/bpf).
 const (
@@ -193,19 +196,19 @@ func Open(root string, dryRun bool) (*Maps, error) {
 	if m6, err := OpenPinnedMap(filepath.Join(root, MapPinSrc6)); err == nil {
 		m.Src6 = m6
 	} else {
-		log.Printf("shieldclient: IPv6 telemetry map not available (optional): %v", err)
+		logger.Printf("IPv6 telemetry map not available (optional): %v", err)
 	}
 
 	if f4, err := OpenPinnedMap(filepath.Join(root, MapPinFlow4)); err == nil {
 		m.Flow4 = f4
 	} else {
-		log.Printf("shieldclient: flow4 map not available (optional): %v", err)
+		logger.Printf("flow4 map not available (optional): %v", err)
 	}
 
 	if tm, err := OpenPinnedMap(filepath.Join(root, MapPinTotals)); err == nil {
 		m.Totals = tm
 	} else {
-		log.Printf("shieldclient: totals map not available (optional): %v", err)
+		logger.Printf("totals map not available (optional): %v", err)
 	}
 
 	if dryRun {
@@ -229,12 +232,12 @@ func Open(root string, dryRun bool) (*Maps, error) {
 	if m6, err := OpenPinnedMap(filepath.Join(root, MapPinDeny6)); err == nil {
 		m.Deny6 = m6
 	} else {
-		log.Printf("shieldclient: IPv6 deny map not available (optional): %v", err)
+		logger.Printf("IPv6 deny map not available (optional): %v", err)
 	}
 	if m6, err := OpenPinnedMap(filepath.Join(root, MapPinRLPolicy6)); err == nil {
 		m.RL6 = m6
 	} else {
-		log.Printf("shieldclient: IPv6 rl policy map not available (optional): %v", err)
+		logger.Printf("IPv6 rl policy map not available (optional): %v", err)
 	}
 
 	return m, nil

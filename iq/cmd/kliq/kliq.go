@@ -45,13 +45,17 @@ import (
 	"github.com/adrianenderlin/kernloom/pkg/adapters/graphlearner"
 	"github.com/adrianenderlin/kernloom/pkg/adapters/shieldpep"
 	"github.com/adrianenderlin/kernloom/pkg/adapters/shieldtelemetry"
+	"github.com/adrianenderlin/kernloom/pkg/core/decision"
 	"github.com/adrianenderlin/kernloom/pkg/core/fsm"
 	"github.com/adrianenderlin/kernloom/pkg/core/graph"
 	"github.com/adrianenderlin/kernloom/pkg/core/observation"
+	"github.com/adrianenderlin/kernloom/pkg/decisionengine"
 	gstore "github.com/adrianenderlin/kernloom/pkg/graphstore/sqlite"
 	"github.com/adrianenderlin/kernloom/pkg/shieldclient"
 	"github.com/adrianenderlin/kernloom/pkg/signalengine/shieldheuristic"
 )
+
+var kliqLog = log.New(os.Stderr, "[kliq] ", log.LstdFlags)
 
 // prevV4 stores the previous tick's counters for an IPv4 source.
 type prevV4 struct {
@@ -94,11 +98,11 @@ func main() {
 			if st.Active.Trig.TrigScan > 0 {
 				c.TrigScan = st.Active.Trig.TrigScan
 			}
-			log.Printf("Loaded state: profile=%s rev=%d updated=%s trig{pps=%.1f syn=%.1f scan=%.1f}",
+			kliqLog.Printf("Loaded state: profile=%s rev=%d updated=%s trig{pps=%.1f syn=%.1f scan=%.1f}",
 				st.Active.Profile, st.Active.Revision, st.Active.UpdatedAt.Format(time.RFC3339),
 				c.TrigPPS, c.TrigSyn, c.TrigScan)
 		} else {
-			log.Printf("No usable state loaded (%s): %v", c.StatePath, err)
+			kliqLog.Printf("No usable state loaded (%s): %v", c.StatePath, err)
 		}
 	}
 
@@ -146,10 +150,10 @@ func main() {
 			if fi, err := os.Stat(c.WhitelistPath); err == nil {
 				wl.modTime = fi.ModTime()
 			}
-			log.Printf("Whitelist loaded: %s entries4=%d cidrs4=%d entries6=%d cidrs6=%d",
+			kliqLog.Printf("Whitelist loaded: %s entries4=%d cidrs4=%d entries6=%d cidrs6=%d",
 				c.WhitelistPath, len(wl.exact4), len(wl.cidrs4), len(wl.exact6), len(wl.cidrs6))
 		} else {
-			log.Printf("Whitelist not loaded (%s): %v", c.WhitelistPath, err)
+			kliqLog.Printf("Whitelist not loaded (%s): %v", c.WhitelistPath, err)
 		}
 	}
 
@@ -158,10 +162,10 @@ func main() {
 			if fi, err := os.Stat(c.FeedbackPath); err == nil {
 				fb.modTime = fi.ModTime()
 			}
-			log.Printf("Feedback loaded: %s entries4=%d cidrs4=%d entries6=%d cidrs6=%d",
+			kliqLog.Printf("Feedback loaded: %s entries4=%d cidrs4=%d entries6=%d cidrs6=%d",
 				c.FeedbackPath, len(fb.exact4), len(fb.cidrs4), len(fb.exact6), len(fb.cidrs6))
 		} else {
-			log.Printf("Feedback not loaded (%s): %v", c.FeedbackPath, err)
+			kliqLog.Printf("Feedback not loaded (%s): %v", c.FeedbackPath, err)
 		}
 	}
 
@@ -187,6 +191,25 @@ func main() {
 	if err := pep.Init(context.Background(), nil); err != nil {
 		log.Fatalf("init shield pep: %v", err)
 	}
+
+	// Decision engine: adds audit trail for FSM transitions and enforces graph-freeze signals.
+	decPolicy := decisionengine.LocalPolicy{
+		NodeID:              nodeID,
+		DryRun:              c.DryRun,
+		MaxAction:           decision.ActionType(c.GraphFreezeMaxAction),
+		AllowLocalBlock:     c.GraphFreezeAllowBlock,
+		GraphFreezeAction:   decision.ActionType(c.GraphFreezeAction),
+		GraphFreezeTTL:      c.GraphFreezeTTL,
+		LevelSoft:           decision.ActionRateLimit,
+		LevelHard:           decision.ActionRateLimit,
+		LevelBlock:          decision.ActionBlock,
+		SoftTTL:             c.SoftTTL,
+		HardTTL:             c.HardTTL,
+		BlockTTL:            c.BlockTTL,
+		MinSeverityForBlock: c.GraphFreezeMinSeverity,
+	}
+	shieldBridge := decisionengine.NewShieldBridge(maps, c.DryRun, nodeID, c.toPEPParams())
+	decisionEng := decisionengine.New(decPolicy, shieldBridge)
 
 	// Heuristic signal engine: converts per-source metrics → Signals + fsm.Metrics.
 	// Replaces inline fsm.CalcSeverity calls throughout the main loop.
@@ -217,8 +240,11 @@ func main() {
 				if !ok {
 					return
 				}
-				log.Printf("SIGNAL type=%s subject=%s score=%d confidence=%d ttl=%s reasons=%v",
+				kliqLog.Printf("SIGNAL type=%s subject=%s score=%d confidence=%d ttl=%s reasons=%v",
 					sig.Type, sig.Subject.ID, sig.Score, sig.Confidence, sig.TTL, sig.ReasonCodes)
+				if _, _, err := decisionEng.EvaluateSignal(sigCtx, sig); err != nil {
+					kliqLog.Printf("SIGNAL decision error: %v", err)
+				}
 			}
 		}
 	}()
@@ -247,6 +273,11 @@ func main() {
 			mode = graphlearner.ModeFrozenObserve
 		}
 
+		excludeCIDRs := parseGraphExcludeCIDRs(c.GraphExcludeSourceCIDR)
+		if len(excludeCIDRs) > 0 {
+			kliqLog.Printf("Graph: excluding source CIDRs from learning: %s", c.GraphExcludeSourceCIDR)
+		}
+
 		learner := graphlearner.New(graphlearner.Config{
 			NodeID: nodeID,
 			Mode:   mode,
@@ -255,12 +286,13 @@ func main() {
 				MinDistinctWindows: c.GraphMinWindows,
 				MinFirstSeenAge:    c.GraphMinAge,
 			},
-			PromoteInterval:   c.GraphPromoteInterval,
-			ExpireTTL:         c.GraphExpireTTL,
-			MinPacketsPerTick: c.GraphMinPackets,
-			MinBytesPerTick:   c.GraphMinBytes,
-			ExcludeBroadcast:  c.GraphExcludeBcast,
-			ExcludeLoopback:   c.GraphExcludeLoopback,
+			PromoteInterval:    c.GraphPromoteInterval,
+			ExpireTTL:          c.GraphExpireTTL,
+			MinPacketsPerTick:  c.GraphMinPackets,
+			MinBytesPerTick:    c.GraphMinBytes,
+			ExcludeBroadcast:   c.GraphExcludeBcast,
+			ExcludeLoopback:    c.GraphExcludeLoopback,
+			ExcludeSourceCIDRs: excludeCIDRs,
 		}, graphStore)
 
 		gctx, cancel := context.WithCancel(context.Background())
@@ -279,7 +311,7 @@ func main() {
 			cancel()
 		}()
 
-		log.Printf("Graph learning started: mode=%s store=%s node=%s", c.GraphMode, c.GraphStorePath, nodeID)
+		kliqLog.Printf("Graph learning started: mode=%s store=%s node=%s", c.GraphMode, c.GraphStorePath, nodeID)
 	}
 	_ = graphCtxCancel // may be nil when graph is disabled
 
@@ -314,8 +346,9 @@ func main() {
 
 	ticker := time.NewTicker(c.Interval)
 	defer ticker.Stop()
+	var tickN uint64
 
-	log.Printf("Kernloom IQ started profile=%s interval=%s dry_run=%v top=%d trig{pps=%.1f syn=%.1f scan=%.1f} weights{pps=%.2f syn=%.2f scan=%.2f} cap=%.1f (ipv6=%v)",
+	kliqLog.Printf("Kernloom IQ started profile=%s interval=%s dry_run=%v top=%d trig{pps=%.1f syn=%.1f scan=%.1f} weights{pps=%.2f syn=%.2f scan=%.2f} cap=%.1f (ipv6=%v)",
 		p.Name, c.Interval.String(), c.DryRun, c.TopN, c.TrigPPS, c.TrigSyn, c.TrigScan, c.WPPS, c.WSyn, c.WScan, c.SevCap, maps.Src6 != nil)
 
 	for range ticker.C {
@@ -409,7 +442,7 @@ func main() {
 			})
 		}
 		if err := it4.Err(); err != nil {
-			log.Printf("iterate src4 map err: %v", err)
+			kliqLog.Printf("iterate src4 map err: %v", err)
 			continue
 		}
 
@@ -472,7 +505,7 @@ func main() {
 				})
 			}
 			if err := it6.Err(); err != nil {
-				log.Printf("iterate src6 map err: %v", err)
+				kliqLog.Printf("iterate src6 map err: %v", err)
 			}
 		}
 
@@ -520,6 +553,38 @@ func main() {
 			} else {
 				state6[m.IP6] = processCandidate6(m, state6[m.IP6], nowWall, c, wl, fb, pep, resPPS, resSyn, resScan, clean)
 			}
+		}
+
+		tickN++
+		if tickN%30 == 1 {
+			softN, hardN, blockN := 0, 0, 0
+			for _, st := range state4 {
+				switch st.Level {
+				case fsm.LevelSoft:
+					softN++
+				case fsm.LevelHard:
+					hardN++
+				case fsm.LevelBlock:
+					blockN++
+				}
+			}
+			for _, st := range state6 {
+				switch st.Level {
+				case fsm.LevelSoft:
+					softN++
+				case fsm.LevelHard:
+					hardN++
+				case fsm.LevelBlock:
+					blockN++
+				}
+			}
+			topSummary := "none"
+			if len(cands) > 0 {
+				top := cands[0]
+				topSummary = fmt.Sprintf("%s sev=%.2f pps=%.0f syn=%.0f scan=%.0f", top.ipString(), top.Severity, top.PPS, top.SynRate, top.ScanRate)
+			}
+			kliqLog.Printf("TICK#%d sources=%d cands=%d clean=%v fsm{soft=%d hard=%d block=%d} trig{pps=%.0f syn=%.0f scan=%.0f} top: %s",
+				tickN, seenForLearn, len(cands), clean, softN, hardN, blockN, c.TrigPPS, c.TrigSyn, c.TrigScan, topSummary)
 		}
 
 		// Housekeeping: bound memory.
@@ -572,7 +637,7 @@ func main() {
 			}
 
 			if n < c.AutoMinSamples {
-				log.Printf("AUTOTUNE skipped: not enough samples (have=%d need=%d) cleanRatio=%.4f", n, c.AutoMinSamples, cleanRatio)
+				kliqLog.Printf("AUTOTUNE skipped: not enough samples (have=%d need=%d) cleanRatio=%.4f", n, c.AutoMinSamples, cleanRatio)
 				lastTune = time.Now()
 				continue
 			}
@@ -607,7 +672,7 @@ func main() {
 				WPPS: c.WPPS, WSyn: c.WSyn, WScan: c.WScan, SevCap: c.SevCap,
 			})
 
-			log.Printf("AUTOTUNE applied: trig_pps %.1f->%.1f trig_syn %.1f->%.1f trig_scan %.1f->%.1f (median+MAD k=%.2f) samples=%d cleanRatio=%.4f clean=%v dropRatio=%.4f phase=%s",
+			kliqLog.Printf("AUTOTUNE applied: trig_pps %.1f->%.1f trig_syn %.1f->%.1f trig_scan %.1f->%.1f (median+MAD k=%.2f) samples=%d cleanRatio=%.4f clean=%v dropRatio=%.4f phase=%s",
 				oldPPS, c.TrigPPS, oldSyn, c.TrigSyn, oldScan, c.TrigScan, pol.K, n, cleanRatio, clean, dropRatio, pol.Phase)
 
 			if c.StatePath != "" {
@@ -642,10 +707,10 @@ func main() {
 					Notes:       "autotune",
 				}
 				if err := writeStateAtomic(c.StatePath, st); err != nil {
-					log.Printf("AUTOTUNE state write failed: %v", err)
+					kliqLog.Printf("AUTOTUNE state write failed: %v", err)
 				} else {
 					stFile = st
-					log.Printf("AUTOTUNE state saved: %s (rev=%d)", c.StatePath, rev)
+					kliqLog.Printf("AUTOTUNE state saved: %s (rev=%d)", c.StatePath, rev)
 				}
 			}
 		}

@@ -8,6 +8,9 @@ package shieldpep
 
 import (
 	"context"
+	"log"
+	"net"
+	"os"
 	"sync/atomic"
 	"time"
 
@@ -17,6 +20,8 @@ import (
 	"github.com/adrianenderlin/kernloom/pkg/shieldclient"
 	"github.com/cilium/ebpf"
 )
+
+var logger = log.New(os.Stderr, "[shield-pep] ", log.LstdFlags)
 
 // EnforcementParams carries the per-level rate-limit and timing configuration
 // needed by the PEP adapter when transitioning a source to a new level.
@@ -99,6 +104,7 @@ func (a *Adapter) TransitionV4(
 	ip [4]byte, st fsm.State, target fsm.Level,
 	now time.Time, p EnforcementParams,
 ) fsm.State {
+	logger.Printf("ACTION ip=%s %s->%s dry_run=%v", net.IPv4(ip[0], ip[1], ip[2], ip[3]).String(), st.Level, target, a.dryRun)
 	if !a.dryRun && a.maps != nil {
 		switch target {
 		case fsm.LevelObserve:
@@ -143,6 +149,7 @@ func (a *Adapter) TransitionV6(
 	ip [16]byte, st fsm.State, target fsm.Level,
 	now time.Time, p EnforcementParams,
 ) fsm.State {
+	logger.Printf("ACTION ip=%s %s->%s dry_run=%v", net.IP(ip[:]).String(), st.Level, target, a.dryRun)
 	if !a.dryRun && a.maps != nil {
 		krl := shieldclient.Src6Key{IP: ip}
 		kd := shieldclient.Key6Bytes{IP: ip}

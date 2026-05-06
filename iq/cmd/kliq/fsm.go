@@ -4,7 +4,6 @@
 package main
 
 import (
-	"log"
 	"time"
 
 	"github.com/adrianenderlin/kernloom/pkg/adapters/shieldpep"
@@ -58,7 +57,7 @@ func processCandidate4(m metrics, st fsm.State, nowWall time.Time, c cfg,
 	st = newSt
 
 	if transitioned {
-		log.Printf("STATE %s %s->%s strikes=%d up=%d down=%d noncomp=%d sev=%.2f pps=%.0f syn=%.0f scan=%.0f dropRL/s=%.1f",
+		kliqLog.Printf("STATE %s %s->%s strikes=%d up=%d down=%d noncomp=%d sev=%.2f pps=%.0f syn=%.0f scan=%.0f dropRL/s=%.1f",
 			m.ipString(), prevLevel.String(), st.Level.String(),
 			st.Strikes, st.UpStreak, st.DownStreak, st.NonCompTicks,
 			m.Severity, m.PPS, m.SynRate, m.ScanRate, m.DropRLRate)
@@ -111,7 +110,7 @@ func processCandidate6(m metrics, st fsm.State, nowWall time.Time, c cfg,
 	st = newSt
 
 	if transitioned {
-		log.Printf("STATE %s %s->%s strikes=%d up=%d down=%d noncomp=%d sev=%.2f pps=%.0f syn=%.0f scan=%.0f dropRL/s=%.1f",
+		kliqLog.Printf("STATE %s %s->%s strikes=%d up=%d down=%d noncomp=%d sev=%.2f pps=%.0f syn=%.0f scan=%.0f dropRL/s=%.1f",
 			m.ipString(), prevLevel.String(), st.Level.String(),
 			st.Strikes, st.UpStreak, st.DownStreak, st.NonCompTicks,
 			m.Severity, m.PPS, m.SynRate, m.ScanRate, m.DropRLRate)

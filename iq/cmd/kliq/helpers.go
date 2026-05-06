@@ -4,7 +4,9 @@
 package main
 
 import (
+	"log"
 	"net"
+	"strings"
 	"time"
 )
 
@@ -83,6 +85,28 @@ func bootstrapEffective(now time.Time, info bootstrapInfo, window, p1End, p2End 
 		return bootstrapPolicy{Active: true, Phase: "bootstrap-3", Every: every3, K: k, MaxUp: maxUp3, MaxDown: maxDown3, Alpha: alpha3}
 	}
 	return bootstrapPolicy{Active: false, Phase: "steady", Every: steadyEvery, K: steadyK, MaxUp: steadyUp, MaxDown: steadyDown, Alpha: steadyAlpha}
+}
+
+// parseGraphExcludeCIDRs parses a comma-separated list of CIDR strings.
+// Invalid entries are logged and skipped.
+func parseGraphExcludeCIDRs(s string) []net.IPNet {
+	if s == "" {
+		return nil
+	}
+	var out []net.IPNet
+	for _, raw := range strings.Split(s, ",") {
+		raw = strings.TrimSpace(raw)
+		if raw == "" {
+			continue
+		}
+		_, cidr, err := net.ParseCIDR(raw)
+		if err != nil {
+			log.Printf("graph: ignoring invalid exclude CIDR %q: %v", raw, err)
+			continue
+		}
+		out = append(out, *cidr)
+	}
+	return out
 }
 
 /* ---------------- Utility ---------------- */

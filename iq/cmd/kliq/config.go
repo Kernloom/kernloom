@@ -151,8 +151,16 @@ type cfg struct {
 	GraphExpireTTL       time.Duration
 	GraphMinPackets      uint64
 	GraphMinBytes        uint64
-	GraphExcludeBcast    bool
-	GraphExcludeLoopback bool
+	GraphExcludeBcast      bool
+	GraphExcludeLoopback   bool
+	GraphExcludeSourceCIDR string // comma-separated CIDRs to exclude from graph learning
+
+	// Graph freeze enforcement (decision engine).
+	GraphFreezeAction     string        // "signal", "rate_limit", "block"
+	GraphFreezeTTL        time.Duration // enforcement TTL for freeze violations
+	GraphFreezeMaxAction  string        // upper bound on freeze enforcement action
+	GraphFreezeAllowBlock bool          // permit block decisions from freeze violations
+	GraphFreezeMinSeverity int          // minimum signal score (0-100) before enforcement
 }
 
 // toFSMConfig converts the relevant cfg fields to an fsm.Config.
@@ -330,6 +338,13 @@ func parseFlags() cfg {
 	flag.Uint64Var(&c.GraphMinBytes, "graph-min-bytes", 0, "min bytes per tick to record a graph edge (0 disables)")
 	flag.BoolVar(&c.GraphExcludeBcast, "graph-exclude-broadcast", true, "exclude broadcast/multicast destination addresses from graph")
 	flag.BoolVar(&c.GraphExcludeLoopback, "graph-exclude-loopback", true, "exclude loopback addresses from graph")
+	flag.StringVar(&c.GraphExcludeSourceCIDR, "graph-exclude-source-cidrs", "", "comma-separated CIDRs whose source IPs are excluded from graph learning (e.g. 172.16.0.0/12)")
+
+	flag.StringVar(&c.GraphFreezeAction, "graph-freeze-action", "signal", "action on new edge after freeze: signal, rate_limit, block")
+	flag.DurationVar(&c.GraphFreezeTTL, "graph-freeze-ttl", 10*time.Minute, "enforcement TTL for graph freeze violations")
+	flag.StringVar(&c.GraphFreezeMaxAction, "graph-freeze-max-action", "rate_limit", "maximum allowed action for graph freeze enforcement")
+	flag.BoolVar(&c.GraphFreezeAllowBlock, "graph-freeze-allow-block", false, "permit block decisions from graph freeze violations")
+	flag.IntVar(&c.GraphFreezeMinSeverity, "graph-freeze-min-severity", 70, "minimum signal score (0-100) required before enforcing on a graph freeze violation")
 
 	flag.Parse()
 	return c

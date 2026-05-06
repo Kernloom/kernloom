@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"log"
 	"net"
+	"os"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -21,6 +22,8 @@ import (
 	"github.com/adrianenderlin/kernloom/pkg/core/observation"
 	"github.com/adrianenderlin/kernloom/pkg/shieldclient"
 )
+
+var logger = log.New(os.Stderr, "[shield-telemetry] ", log.LstdFlags)
 
 // Config holds the configuration for the Shield telemetry adapter.
 type Config struct {
@@ -242,11 +245,11 @@ func (a *Adapter) poll(ctx context.Context, bus adapterruntime.EventBus, nowWall
 		obs.SetAttribute("ip_version", "4")
 
 		if err := bus.PublishObservation(ctx, *obs); err != nil {
-			log.Printf("shield-telemetry: publish v4 obs: %v", err)
+			logger.Printf("publish v4 obs: %v", err)
 		}
 	}
 	if err := it4.Err(); err != nil {
-		log.Printf("shield-telemetry: iterate src4: %v", err)
+		logger.Printf("iterate src4: %v", err)
 		atomic.StoreUint32(&a.healthy, 0)
 	} else {
 		atomic.StoreUint32(&a.healthy, 1)
@@ -310,11 +313,11 @@ func (a *Adapter) poll(ctx context.Context, bus adapterruntime.EventBus, nowWall
 			obs.SetAttribute("ip_version", "6")
 
 			if err := bus.PublishObservation(ctx, *obs); err != nil {
-				log.Printf("shield-telemetry: publish v6 obs: %v", err)
+				logger.Printf("publish v6 obs: %v", err)
 			}
 		}
 		if err := it6.Err(); err != nil {
-			log.Printf("shield-telemetry: iterate src6: %v", err)
+			logger.Printf("iterate src6: %v", err)
 		}
 	}
 
@@ -364,7 +367,7 @@ func (a *Adapter) pollFlow4(ctx context.Context, bus adapterruntime.EventBus, no
 		batch = append(batch, entry{k, v})
 	}
 	if err := it.Err(); err != nil {
-		log.Printf("shield-telemetry: iterate flow4: %v", err)
+		logger.Printf("iterate flow4: %v", err)
 		return
 	}
 
@@ -394,7 +397,7 @@ func (a *Adapter) pollFlow4(ctx context.Context, bus adapterruntime.EventBus, no
 		obs.SetAttribute("destination_port", fmt.Sprintf("%d", e.k.DstPort))
 
 		if err := bus.PublishObservation(ctx, *obs); err != nil {
-			log.Printf("shield-telemetry: publish flow4 obs: %v", err)
+			logger.Printf("publish flow4 obs: %v", err)
 		}
 	}
 }
