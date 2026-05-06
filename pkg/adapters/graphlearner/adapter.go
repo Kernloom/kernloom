@@ -79,7 +79,7 @@ func New(cfg Config, store Store) *Adapter {
 	return a
 }
 
-func (a *Adapter) ID() string           { return "graph-learner" }
+func (a *Adapter) ID() string                       { return "graph-learner" }
 func (a *Adapter) Kind() adapterruntime.AdapterKind { return adapterruntime.AdapterTelemetry }
 
 func (a *Adapter) Capabilities() []*capability.Capability {
@@ -195,7 +195,7 @@ func (a *Adapter) emitNewEdgeSignal(ctx context.Context, bus adapterruntime.Even
 		SetObject(e.Destination).
 		SetScore(70).
 		SetConfidence(80).
-		SetTTL(30 * time.Minute).
+		SetTTL(30*time.Minute).
 		AddReasonCode("graph_new_edge_after_freeze").
 		SetAttribute("node_id", e.NodeID).
 		SetAttribute("protocol", e.Protocol).

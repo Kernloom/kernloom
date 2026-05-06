@@ -255,10 +255,10 @@ func (s *Store) Stats(nodeID string) (map[graph.EdgeState]int, error) {
 // scanEdge scans one row into an Edge. Returns nil, nil when no row is found.
 func scanEdge(row *sql.Row) (*graph.Edge, error) {
 	var (
-		e              graph.Edge
+		e                                       graph.Edge
 		srcKind, dstKind, dir, state, learnedBy string
-		firstNano, lastNano                       int64
-		attrsJSON                                 string
+		firstNano, lastNano                     int64
+		attrsJSON                               string
 	)
 	err := row.Scan(
 		&e.ID, &e.NodeID,
@@ -294,10 +294,10 @@ func collectEdges(rows *sql.Rows) ([]*graph.Edge, error) {
 	var out []*graph.Edge
 	for rows.Next() {
 		var (
-			e              graph.Edge
+			e                                       graph.Edge
 			srcKind, dstKind, dir, state, learnedBy string
-			firstNano, lastNano                       int64
-			attrsJSON                                 string
+			firstNano, lastNano                     int64
+			attrsJSON                               string
 		)
 		if err := rows.Scan(
 			&e.ID, &e.NodeID,

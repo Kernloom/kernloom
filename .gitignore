@@ -47,3 +47,5 @@ coverage.out
 # Env files
 .env
 .env.*
+
+.claude

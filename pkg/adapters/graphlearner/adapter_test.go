@@ -8,8 +8,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/adrianenderlin/kernloom/pkg/adapters/graphlearner"
 	"github.com/adrianenderlin/kernloom/pkg/adapterruntime"
+	"github.com/adrianenderlin/kernloom/pkg/adapters/graphlearner"
 	"github.com/adrianenderlin/kernloom/pkg/core/graph"
 	"github.com/adrianenderlin/kernloom/pkg/core/observation"
 	gstore "github.com/adrianenderlin/kernloom/pkg/graphstore/sqlite"

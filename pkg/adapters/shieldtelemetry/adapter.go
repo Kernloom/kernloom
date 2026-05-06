@@ -59,6 +59,7 @@ type Adapter struct {
 }
 
 // New creates a new Shield telemetry adapter with the given configuration.
+// Init must be called before Start to open the eBPF map handles.
 func New(cfg Config) *Adapter {
 	if cfg.BPFfsRoot == "" {
 		cfg.BPFfsRoot = "/sys/fs/bpf"
@@ -74,6 +75,26 @@ func New(cfg Config) *Adapter {
 		prev4: make(map[[4]byte]prevSnapshot, 64_000),
 		prev6: make(map[[16]byte]prevSnapshot, 64_000),
 	}
+}
+
+// NewFromMaps creates a Shield telemetry adapter that uses already-opened map
+// handles. Init must NOT be called — the adapter is ready to Start immediately.
+// The caller retains ownership of maps and is responsible for closing them.
+func NewFromMaps(cfg Config, maps *shieldclient.Maps) *Adapter {
+	if cfg.Interval <= 0 {
+		cfg.Interval = time.Second
+	}
+	if cfg.PrevTTL <= 0 {
+		cfg.PrevTTL = 10 * time.Minute
+	}
+	a := &Adapter{
+		cfg:   cfg,
+		maps:  maps,
+		prev4: make(map[[4]byte]prevSnapshot, 64_000),
+		prev6: make(map[[16]byte]prevSnapshot, 64_000),
+	}
+	atomic.StoreUint32(&a.healthy, 1)
+	return a
 }
 
 /* ---------------- adapterruntime.Adapter interface ----------------------- */

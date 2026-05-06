@@ -45,12 +45,16 @@ import (
 	"github.com/adrianenderlin/kernloom/pkg/adapterruntime"
 	"github.com/adrianenderlin/kernloom/pkg/adapters/graphlearner"
 	"github.com/adrianenderlin/kernloom/pkg/adapters/shieldpep"
+	"github.com/adrianenderlin/kernloom/pkg/adapters/shieldtelemetry"
 	"github.com/adrianenderlin/kernloom/pkg/core/fsm"
 	"github.com/adrianenderlin/kernloom/pkg/core/graph"
-	"github.com/adrianenderlin/kernloom/pkg/core/observation"
 	gstore "github.com/adrianenderlin/kernloom/pkg/graphstore/sqlite"
 	"github.com/adrianenderlin/kernloom/pkg/shieldclient"
 )
+
+// graphBus is declared at package level so the telemetry adapter and learner
+// can share it; nil when --graph is not enabled.
+var graphBus *adapterruntime.Bus
 
 // prevV4 stores the previous tick's counters for an IPv4 source.
 type prevV4 struct {
@@ -199,7 +203,14 @@ func main() {
 		defer gs.Close()
 		graphStore = gs
 
-		graphBus = adapterruntime.NewBus(256)
+		graphBus = adapterruntime.NewBus(512)
+
+		// Shield telemetry adapter feeds ALL flows (no PPS filter) into the graph bus.
+		telAdapter := shieldtelemetry.NewFromMaps(shieldtelemetry.Config{
+			Interval: c.Interval,
+			NodeID:   nodeID,
+			PrevTTL:  c.PrevTTL,
+		}, maps)
 
 		mode := graphlearner.ModeLearn
 		if c.GraphMode == "frozen-observe" {
@@ -220,11 +231,16 @@ func main() {
 
 		gctx, cancel := context.WithCancel(context.Background())
 		graphCtxCancel = cancel
+		if err := telAdapter.Start(gctx, graphBus); err != nil {
+			cancel()
+			log.Fatalf("start graph telemetry adapter: %v", err)
+		}
 		if err := learner.Start(gctx, graphBus); err != nil {
 			cancel()
 			log.Fatalf("start graph learner: %v", err)
 		}
 		defer func() {
+			telAdapter.Stop(context.Background())
 			learner.Stop(context.Background())
 			cancel()
 		}()
@@ -462,9 +478,6 @@ func main() {
 			} else {
 				state6[m.IP6] = processCandidate6(m, state6[m.IP6], nowWall, c, wl, fb, pep, resPPS, resSyn, resScan, clean)
 			}
-			if graphBus != nil {
-				publishFlowObservation(graphBus, m, nowWall)
-			}
 		}
 
 		// Housekeeping: bound memory.
@@ -603,25 +616,6 @@ func main() {
 				c.TrigPPS, c.TrigSyn, c.TrigScan, clean, dropRatio, topWL, pol.Phase)
 		}
 	}
-}
-
-// publishFlowObservation sends a flow observation for the given source to the graph bus.
-func publishFlowObservation(bus *adapterruntime.Bus, m metrics, now time.Time) {
-	src := observation.EntityRef{Kind: observation.KindIP, ID: m.ipString()}
-	obs := observation.NewObservation(observation.SourceShield, observation.TypeFlow, "", src)
-	obs.Time = now
-	obs.SetObject(observation.EntityRef{Kind: observation.KindIP, ID: "local"})
-	obs.SetMetric("pps", m.PPS)
-	obs.SetMetric("bps", m.Bps)
-	obs.SetMetric("packets", m.PPS)
-	obs.SetMetric("bytes", m.Bps)
-	obs.SetAttribute("protocol", "ip")
-	if m.IPVer == 6 {
-		obs.SetAttribute("ip_version", "6")
-	} else {
-		obs.SetAttribute("ip_version", "4")
-	}
-	_ = bus.PublishObservation(context.Background(), *obs)
 }
 
 // obsToMetrics converts a shield observation (published on the bus) back to a
