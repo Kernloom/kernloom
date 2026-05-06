@@ -70,6 +70,12 @@ func graphSignal(subjectID string, score int) signal.Signal {
 
 /* ---- EvaluateSignal tests ---- */
 
+// EvaluateSignal is always audit-only: it returns a Decision for the audit trail
+// but never calls the PEP directly. Enforcement is handled by the main tick loop
+// via FSM strike injection (graphStrikeCh). The enforcement_via attribute indicates
+// whether the signal will trigger normal FSM strike accumulation (fsm_strikes) or
+// an immediate forced BLOCK transition (fsm_force_block).
+
 func TestEvaluateSignal_GraphFreezeRateLimit(t *testing.T) {
 	pep := &stubPEP{}
 	pol := basePolicy()
@@ -85,17 +91,15 @@ func TestEvaluateSignal_GraphFreezeRateLimit(t *testing.T) {
 	if dec == nil {
 		t.Fatal("expected a decision, got nil")
 	}
-	if receipt == nil {
-		t.Fatal("expected a receipt, got nil")
+	// Audit-only: no PEP call, no receipt.
+	if receipt != nil {
+		t.Errorf("expected no receipt (audit-only), got %+v", receipt)
+	}
+	if pep.called != 0 {
+		t.Errorf("expected PEP not called, got %d", pep.called)
 	}
 	if dec.Action.Type != decision.ActionRateLimit {
 		t.Errorf("expected action rate_limit, got %s", dec.Action.Type)
-	}
-	if pep.called != 1 {
-		t.Errorf("expected PEP called once, got %d", pep.called)
-	}
-	if receipt.Status != decision.StatusApplied {
-		t.Errorf("expected status applied, got %s", receipt.Status)
 	}
 }
 
@@ -111,12 +115,12 @@ func TestEvaluateSignal_GraphFreezeSignalOnly(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	// Signal-only means no enforcement; engine returns nil, nil, nil.
-	if dec != nil {
-		t.Errorf("expected no decision for signal-only action, got %+v", dec)
+	// Audit-only: decision is returned for audit trail, no PEP call.
+	if dec == nil {
+		t.Fatal("expected an audit decision, got nil")
 	}
 	if receipt != nil {
-		t.Errorf("expected no receipt for signal-only action, got %+v", receipt)
+		t.Errorf("expected no receipt (audit-only), got %+v", receipt)
 	}
 	if pep.called != 0 {
 		t.Errorf("expected PEP not called, got %d", pep.called)
@@ -132,18 +136,24 @@ func TestEvaluateSignal_BlockBelowMinSeverity(t *testing.T) {
 	pol.MinSeverityForBlock = 80
 	eng := decisionengine.New(pol, pep)
 
-	// Score 60 is below MinSeverityForBlock=80.
+	// Score 60 < MinSeverityForBlock=80 → enforcement_via=fsm_strikes (not force_block).
 	sig := graphSignal("203.0.113.3", 60)
-	dec, _, err := eng.EvaluateSignal(context.Background(), sig)
+	dec, receipt, err := eng.EvaluateSignal(context.Background(), sig)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	// Block gated; engine should return nil.
-	if dec != nil {
-		t.Errorf("expected no decision when score below min-severity-for-block, got action %s", dec.Action.Type)
+	if dec == nil {
+		t.Fatal("expected an audit decision, got nil")
+	}
+	if receipt != nil {
+		t.Errorf("expected no receipt (audit-only), got %+v", receipt)
 	}
 	if pep.called != 0 {
 		t.Errorf("expected PEP not called, got %d", pep.called)
+	}
+	if dec.Attributes["enforcement_via"] != "fsm_strikes" {
+		t.Errorf("expected enforcement_via=fsm_strikes for score below threshold, got %s",
+			dec.Attributes["enforcement_via"])
 	}
 }
 
@@ -156,7 +166,7 @@ func TestEvaluateSignal_BlockAboveMinSeverity(t *testing.T) {
 	pol.MinSeverityForBlock = 80
 	eng := decisionengine.New(pol, pep)
 
-	// Score 85 >= MinSeverityForBlock=80: enforcement allowed.
+	// Score 85 >= MinSeverityForBlock=80 → enforcement_via=fsm_force_block.
 	sig := graphSignal("203.0.113.4", 85)
 	dec, receipt, err := eng.EvaluateSignal(context.Background(), sig)
 	if err != nil {
@@ -165,11 +175,16 @@ func TestEvaluateSignal_BlockAboveMinSeverity(t *testing.T) {
 	if dec == nil {
 		t.Fatal("expected a decision, got nil")
 	}
-	if dec.Action.Type != decision.ActionBlock {
-		t.Errorf("expected action block, got %s", dec.Action.Type)
+	// Audit-only: no receipt regardless of score.
+	if receipt != nil {
+		t.Errorf("expected no receipt (audit-only), got %+v", receipt)
 	}
-	if receipt == nil || receipt.Status != decision.StatusApplied {
-		t.Errorf("expected applied receipt")
+	if pep.called != 0 {
+		t.Errorf("expected PEP not called, got %d", pep.called)
+	}
+	if dec.Attributes["enforcement_via"] != "fsm_force_block" {
+		t.Errorf("expected enforcement_via=fsm_force_block for score above threshold, got %s",
+			dec.Attributes["enforcement_via"])
 	}
 }
 
