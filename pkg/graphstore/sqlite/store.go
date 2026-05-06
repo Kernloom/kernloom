@@ -96,11 +96,15 @@ func (s *Store) Upsert(e *graph.Edge) (*graph.Edge, error) {
 		) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
 		ON CONFLICT(node_id,source_kind,source_id,destination_kind,destination_id,protocol,destination_port,direction)
 		DO UPDATE SET
+			-- Expired edges restart the learning cycle from scratch.
+			-- Denied and frozen edges are intentional admin decisions and are never overwritten.
+			state            = CASE WHEN state = 'expired' THEN excluded.state ELSE state END,
+			first_seen_at    = CASE WHEN state = 'expired' THEN excluded.first_seen_at ELSE first_seen_at END,
 			last_seen_at     = MAX(last_seen_at, excluded.last_seen_at),
-			seen_count       = seen_count + excluded.seen_count,
-			distinct_windows = distinct_windows + excluded.distinct_windows,
-			packets_total    = packets_total + excluded.packets_total,
-			bytes_total      = bytes_total + excluded.bytes_total,
+			seen_count       = CASE WHEN state = 'expired' THEN excluded.seen_count ELSE seen_count + excluded.seen_count END,
+			distinct_windows = CASE WHEN state = 'expired' THEN excluded.distinct_windows ELSE distinct_windows + excluded.distinct_windows END,
+			packets_total    = CASE WHEN state = 'expired' THEN excluded.packets_total ELSE packets_total + excluded.packets_total END,
+			bytes_total      = CASE WHEN state = 'expired' THEN excluded.bytes_total ELSE bytes_total + excluded.bytes_total END,
 			confidence       = excluded.confidence,
 			attributes_json  = excluded.attributes_json
 	`,
@@ -221,6 +225,25 @@ func (s *Store) MarkExpired(nodeID string, cutoff time.Time) (int, error) {
 		string(graph.EdgeExpired),
 		nodeID, cutoff.UnixNano(),
 		string(graph.EdgeDenied), string(graph.EdgeExpired), string(graph.EdgeFrozen),
+	)
+	if err != nil {
+		return 0, err
+	}
+	n, _ := res.RowsAffected()
+	return int(n), nil
+}
+
+// ExpireCandidatesBySource marks as expired all candidate edges for nodeID
+// whose source_id matches sourceID. Used to remove attack traffic that created
+// candidates before the heuristic signal arrived.
+func (s *Store) ExpireCandidatesBySource(nodeID, sourceID string) (int, error) {
+	res, err := s.db.Exec(`
+		UPDATE graph_edges SET state=?
+		WHERE node_id=? AND source_id=? AND state=?
+	`,
+		string(graph.EdgeExpired),
+		nodeID, sourceID,
+		string(graph.EdgeCandidate),
 	)
 	if err != nil {
 		return 0, err

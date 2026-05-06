@@ -182,6 +182,103 @@ func TestStore_MarkExpired(t *testing.T) {
 	}
 }
 
+func TestStore_Upsert_ExpiredRestartsLearning(t *testing.T) {
+	s := openStore(t)
+	now := time.Now()
+
+	// Create an edge and mark it expired (simulates attack suppression).
+	e := makeEdge("node-1", "1.2.3.4", "10.0.0.1", 443, now.Add(-1*time.Hour))
+	e.SeenCount = 40
+	e.DistinctWindows = 20
+	e.PacketsTotal = 4000
+	if _, err := s.Upsert(e); err != nil {
+		t.Fatalf("initial upsert: %v", err)
+	}
+	if _, err := s.MarkExpired("node-1", now); err != nil {
+		t.Fatalf("mark expired: %v", err)
+	}
+
+	// Verify it is expired.
+	got, _ := s.GetByKey(e.Key())
+	if got.State != graph.EdgeExpired {
+		t.Fatalf("expected expired, got %s", got.State)
+	}
+
+	// New observation arrives after the false-positive window — traffic resumed.
+	e2 := makeEdge("node-1", "1.2.3.4", "10.0.0.1", 443, now.Add(10*time.Minute))
+	e2.SeenCount = 1
+	e2.DistinctWindows = 1
+	e2.PacketsTotal = 5
+	got2, err := s.Upsert(e2)
+	if err != nil {
+		t.Fatalf("re-upsert after expire: %v", err)
+	}
+
+	// State must be reset to candidate — learning starts fresh.
+	if got2.State != graph.EdgeCandidate {
+		t.Errorf("expected candidate after re-upsert on expired, got %s", got2.State)
+	}
+	// Counters must be fresh, not accumulated from the old expired values.
+	if got2.SeenCount != 1 {
+		t.Errorf("expected seen_count=1 (fresh start), got %d", got2.SeenCount)
+	}
+	if got2.PacketsTotal != 5 {
+		t.Errorf("expected packets_total=5 (fresh start), got %d", got2.PacketsTotal)
+	}
+}
+
+func TestStore_Upsert_DeniedNotOverwritten(t *testing.T) {
+	s := openStore(t)
+	now := time.Now()
+
+	e := makeEdge("node-1", "1.2.3.4", "10.0.0.1", 443, now)
+	e.State = graph.EdgeDenied
+	if _, err := s.Upsert(e); err != nil {
+		t.Fatalf("upsert denied: %v", err)
+	}
+
+	// New observation must not reset a denied edge.
+	e2 := makeEdge("node-1", "1.2.3.4", "10.0.0.1", 443, now.Add(time.Minute))
+	got, err := s.Upsert(e2)
+	if err != nil {
+		t.Fatalf("re-upsert: %v", err)
+	}
+	if got.State != graph.EdgeDenied {
+		t.Errorf("denied edge must not be overwritten, got %s", got.State)
+	}
+}
+
+func TestStore_ExpireCandidatesBySource(t *testing.T) {
+	s := openStore(t)
+	now := time.Now()
+
+	// Two candidate edges from the same source IP.
+	e1 := makeEdge("node-1", "5.5.5.5", "10.0.0.1", 80, now)
+	e2 := makeEdge("node-1", "5.5.5.5", "10.0.0.1", 443, now)
+	// One from a different source — must not be touched.
+	e3 := makeEdge("node-1", "6.6.6.6", "10.0.0.1", 80, now)
+
+	for _, e := range []*graph.Edge{e1, e2, e3} {
+		if _, err := s.Upsert(e); err != nil {
+			t.Fatalf("upsert: %v", err)
+		}
+	}
+
+	n, err := s.ExpireCandidatesBySource("node-1", "5.5.5.5")
+	if err != nil {
+		t.Fatalf("expire by source: %v", err)
+	}
+	if n != 2 {
+		t.Errorf("expected 2 expired, got %d", n)
+	}
+
+	// e3 must still be candidate.
+	got, _ := s.GetByKey(e3.Key())
+	if got.State != graph.EdgeCandidate {
+		t.Errorf("unrelated edge should stay candidate, got %s", got.State)
+	}
+}
+
 func TestStore_Stats(t *testing.T) {
 	s := openStore(t)
 	now := time.Now()

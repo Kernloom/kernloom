@@ -43,6 +43,10 @@ type Store interface {
 	GetByKey(key graph.EdgeKey) (*graph.Edge, error)
 	PromoteCandidates(nodeID string, cfg graph.PromotionConfig, now time.Time) (int, error)
 	MarkExpired(nodeID string, cutoff time.Time) (int, error)
+	// ExpireCandidatesBySource expires all candidate edges whose source IP
+	// matches sourceID for the given node. Used to retroactively clean up
+	// candidates that slipped through before the heuristic signal fired.
+	ExpireCandidatesBySource(nodeID, sourceID string) (int, error)
 }
 
 // Config configures the graph learner adapter.
@@ -173,7 +177,9 @@ func (a *Adapter) signalLoop(ctx context.Context, bus adapterruntime.EventBus) {
 	}
 }
 
-// handleSignal records the signal subject as suspicious for the signal's TTL.
+// handleSignal records the signal subject as suspicious for the signal's TTL
+// and retroactively expires any candidate edges from that source that may have
+// been written before the signal arrived (race-condition cleanup).
 func (a *Adapter) handleSignal(sig signal.Signal) {
 	switch sig.Type {
 	case signal.SignalPPSHigh,
@@ -193,6 +199,13 @@ func (a *Adapter) handleSignal(sig signal.Signal) {
 	a.suspMu.Lock()
 	a.suspicious[sig.Subject.ID] = suspiciousEntry{expiresAt: time.Now().Add(ttl)}
 	a.suspMu.Unlock()
+
+	// Expire any candidate edges that snuck through before this signal fired.
+	if n, err := a.store.ExpireCandidatesBySource(a.cfg.NodeID, sig.Subject.ID); err != nil {
+		log.Printf("graph-learner: expire candidates for %s: %v", sig.Subject.ID, err)
+	} else if n > 0 {
+		log.Printf("graph-learner: expired %d candidate(s) for suspicious source %s", n, sig.Subject.ID)
+	}
 }
 
 // isSuspicious returns true when the given IP is currently flagged.
