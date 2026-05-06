@@ -1,0 +1,154 @@
+// SPDX-License-Identifier: MPL-2.0
+// Copyright (c) 2026 Adrian Enderlin
+
+package main
+
+import (
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
+	"fmt"
+	"os"
+	"path/filepath"
+	"time"
+)
+
+/* ---------------- Persistence (state.json) ---------------- */
+
+type trigState struct {
+	TrigPPS  float64 `json:"trig_pps"`
+	TrigSyn  float64 `json:"trig_syn"`
+	TrigScan float64 `json:"trig_scan"`
+}
+
+type tuneMeta struct {
+	Method      string  `json:"method"`
+	Window      string  `json:"window"`
+	K           float64 `json:"k"`
+	SigmaFactor float64 `json:"sigma_factor"`
+}
+
+type bootstrapInfo struct {
+	Enabled   bool      `json:"enabled"`
+	StartedAt time.Time `json:"started_at"`
+	Window    string    `json:"window,omitempty"`
+	Phase     string    `json:"phase,omitempty"`
+}
+
+type stateActive struct {
+	Profile     string        `json:"profile"`
+	Revision    int           `json:"revision"`
+	UpdatedAt   time.Time     `json:"updated_at"`
+	Trig        trigState     `json:"trig"`
+	Tune        tuneMeta      `json:"tune"`
+	Bootstrap   bootstrapInfo `json:"bootstrap,omitempty"`
+	SampleCount int           `json:"sample_count"`
+	CleanRatio  float64       `json:"clean_ratio"`
+	Notes       string        `json:"notes,omitempty"`
+}
+
+type stateHistory struct {
+	Revision    int       `json:"revision"`
+	At          time.Time `json:"at"`
+	Trig        trigState `json:"trig"`
+	MedianPPS   float64   `json:"median_pps"`
+	MadPPS      float64   `json:"mad_pps"`
+	MedianSyn   float64   `json:"median_syn"`
+	MadSyn      float64   `json:"mad_syn"`
+	MedianScan  float64   `json:"median_scan"`
+	MadScan     float64   `json:"mad_scan"`
+	SampleCount int       `json:"sample_count"`
+	CleanRatio  float64   `json:"clean_ratio"`
+	Notes       string    `json:"notes,omitempty"`
+}
+
+type integrity struct {
+	SHA256 string `json:"sha256"`
+}
+
+type stateFile struct {
+	Version   int            `json:"version"`
+	Generated time.Time      `json:"generated_at"`
+	Active    stateActive    `json:"active"`
+	History   []stateHistory `json:"history"`
+	Integrity integrity      `json:"integrity"`
+}
+
+func computeSHA256NoIntegrity(b []byte) string {
+	h := sha256.Sum256(b)
+	return hex.EncodeToString(h[:])
+}
+
+func writeStateAtomic(path string, st *stateFile) error {
+	tmp := *st
+	tmp.Integrity = integrity{}
+	tmp.Generated = time.Now()
+
+	rawNoInt, err := json.MarshalIndent(&tmp, "", "  ")
+	if err != nil {
+		return err
+	}
+
+	st.Integrity = integrity{SHA256: computeSHA256NoIntegrity(rawNoInt)}
+	raw, err := json.MarshalIndent(st, "", "  ")
+	if err != nil {
+		return err
+	}
+
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return err
+	}
+
+	tmpPath := path + ".tmp"
+	bakPath := path + ".bak"
+
+	f, err := os.OpenFile(tmpPath, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o640)
+	if err != nil {
+		return err
+	}
+	if _, err := f.Write(raw); err != nil {
+		_ = f.Close()
+		return err
+	}
+	if err := f.Sync(); err != nil {
+		_ = f.Close()
+		return err
+	}
+	if err := f.Close(); err != nil {
+		return err
+	}
+
+	if _, err := os.Stat(path); err == nil {
+		_ = os.Rename(path, bakPath)
+	}
+
+	return os.Rename(tmpPath, path)
+}
+
+func loadState(path string, maxAge time.Duration) (*stateFile, error) {
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+
+	var st stateFile
+	if err := json.Unmarshal(raw, &st); err != nil {
+		return nil, err
+	}
+
+	tmp := st
+	tmp.Integrity = integrity{}
+	rawNoInt, _ := json.MarshalIndent(&tmp, "", "  ")
+	want := computeSHA256NoIntegrity(rawNoInt)
+	if st.Integrity.SHA256 != "" && st.Integrity.SHA256 != want {
+		return nil, fmt.Errorf("state integrity mismatch")
+	}
+
+	if maxAge > 0 && !st.Active.UpdatedAt.IsZero() {
+		if time.Since(st.Active.UpdatedAt) > maxAge {
+			return nil, fmt.Errorf("state too old (%s)", time.Since(st.Active.UpdatedAt).String())
+		}
+	}
+	return &st, nil
+}

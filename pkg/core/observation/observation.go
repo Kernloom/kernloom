@@ -4,6 +4,8 @@
 package observation
 
 import (
+	"crypto/rand"
+	"fmt"
 	"time"
 )
 
@@ -11,13 +13,13 @@ import (
 type ObservationSource string
 
 const (
-	SourceShield  ObservationSource = "shield"   // eBPF/XDP telemetry
-	SourceNginx   ObservationSource = "nginx"    // HTTP/access logs
-	SourceZiti    ObservationSource = "ziti"     // OpenZiti session events
-	SourceTrustd  ObservationSource = "trustd"   // Local trust daemon
-	SourceApp     ObservationSource = "app"      // Application instrumentation
-	SourceSyslog  ObservationSource = "syslog"   // Syslog/journald
-	SourceCilium  ObservationSource = "cilium"   // Cilium eBPF
+	SourceShield    ObservationSource = "shield"    // eBPF/XDP telemetry
+	SourceNginx     ObservationSource = "nginx"     // HTTP/access logs
+	SourceZiti      ObservationSource = "ziti"      // OpenZiti session events
+	SourceTrustd    ObservationSource = "trustd"    // Local trust daemon
+	SourceApp       ObservationSource = "app"       // Application instrumentation
+	SourceSyslog    ObservationSource = "syslog"    // Syslog/journald
+	SourceCilium    ObservationSource = "cilium"    // Cilium eBPF
 	SourceCorrelate ObservationSource = "correlate" // Correlate global signals as obs
 )
 
@@ -26,16 +28,16 @@ type ObservationType string
 
 const (
 	// Network flow observations
-	TypeFlow      ObservationType = "flow"      // Bidirectional or unidirectional traffic
-	TypeDrop      ObservationType = "drop"      // Packet drop (policy, rate-limit, error)
-	TypeScan      ObservationType = "scan"      // Port/host scan behavior
+	TypeFlow      ObservationType = "flow"       // Bidirectional or unidirectional traffic
+	TypeDrop      ObservationType = "drop"       // Packet drop (policy, rate-limit, error)
+	TypeScan      ObservationType = "scan"       // Port/host scan behavior
 	TypeRateLimit ObservationType = "rate_limit" // Rate-limit drop
 
 	// Application observations
-	TypeHTTP      ObservationType = "http"      // HTTP status codes, redirects
-	TypeDNS       ObservationType = "dns"       // DNS queries, responses
-	TypeAuth      ObservationType = "auth"      // Authentication success/failure
-	TypeProcess   ObservationType = "process"   // Process creation, termination, hash change
+	TypeHTTP    ObservationType = "http"    // HTTP status codes, redirects
+	TypeDNS     ObservationType = "dns"     // DNS queries, responses
+	TypeAuth    ObservationType = "auth"    // Authentication success/failure
+	TypeProcess ObservationType = "process" // Process creation, termination, hash change
 
 	// Trust and integrity observations
 	TypeTrust     ObservationType = "trust"     // Trust state change, attestation result
@@ -49,13 +51,13 @@ const (
 type EntityKind string
 
 const (
-	KindIP       EntityKind = "ip"       // Single IPv4 or IPv6 address
-	KindCIDR     EntityKind = "cidr"     // IPv4 or IPv6 CIDR range
-	KindNode     EntityKind = "node"     // Physical/virtual node with a node_id
-	KindService  EntityKind = "service"  // Logical service (e.g., "postgres", "api-gateway")
-	KindUser     EntityKind = "user"     // User identity (e.g., unix uid, LDAP user)
-	KindWorkload EntityKind = "workload" // Container, pod, process group
-	KindProcess  EntityKind = "process"  // Individual process
+	KindIP        EntityKind = "ip"        // Single IPv4 or IPv6 address
+	KindCIDR      EntityKind = "cidr"      // IPv4 or IPv6 CIDR range
+	KindNode      EntityKind = "node"      // Physical/virtual node with a node_id
+	KindService   EntityKind = "service"   // Logical service (e.g., "postgres", "api-gateway")
+	KindUser      EntityKind = "user"      // User identity (e.g., unix uid, LDAP user)
+	KindWorkload  EntityKind = "workload"  // Container, pod, process group
+	KindProcess   EntityKind = "process"   // Individual process
 	KindNamespace EntityKind = "namespace" // Kubernetes/OS namespace
 )
 
@@ -184,8 +186,11 @@ type Batch struct {
 	Observations []Observation
 }
 
-// generateID generates a unique observation ID (simplified; use UUIDv4 in production).
-// This is a placeholder; real implementation should use crypto/rand or uuid.
+// generateID returns a random UUIDv4 string.
 func generateID() string {
-	return "" // TODO: implement proper UUID generation
+	var b [16]byte
+	_, _ = rand.Read(b[:])
+	b[6] = (b[6] & 0x0f) | 0x40
+	b[8] = (b[8] & 0x3f) | 0x80
+	return fmt.Sprintf("%08x-%04x-%04x-%04x-%012x", b[0:4], b[4:6], b[6:8], b[8:10], b[10:])
 }
