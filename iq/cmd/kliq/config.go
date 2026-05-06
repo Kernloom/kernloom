@@ -140,7 +140,8 @@ type cfg struct {
 
 	// Graph learning
 	GraphEnabled         bool
-	GraphStorePath       string
+	GraphStorePath       string // runtime state — /var/lib/kernloom/iq/
+	GraphFrozenPath      string // IMA-attested static baseline — /opt/kernloom/attested/etc/
 	GraphMode            string
 	GraphNodeID          string
 	GraphPromoteInterval time.Duration
@@ -204,15 +205,18 @@ func parseFlags() cfg {
 	flag.Float64Var(&c.MinSev, "min-sev", 0.0, "include candidates with severity >= min-sev")
 
 	flag.StringVar(&c.ProfileName, "profile", "controller", "initial profile name (aliases apply)")
-	flag.StringVar(&c.StatePath, "state-file", "/var/lib/kernloom/iq/state.json", "path to persisted state file")
+	// Runtime state — mutable, not under IMA measurement.
+	flag.StringVar(&c.StatePath, "state-file", "/var/lib/kernloom/iq/state.json", "autotune state file (runtime, not IMA-attested)")
 	flag.DurationVar(&c.MaxStateAge, "max-state-age", 14*24*time.Hour, "ignore persisted state older than this (0 disables)")
 	flag.IntVar(&c.HistoryKeep, "state-history", 30, "keep last N history entries")
 
-	flag.StringVar(&c.WhitelistPath, "whitelist", "/etc/kernloom/iq/whitelist.txt", "whitelist file (IPv4/IPv6/CIDR), one per line; empty disables")
+	// IMA-attested: static policy file, seldom changed, measured by IMA on read.
+	flag.StringVar(&c.WhitelistPath, "whitelist", "/opt/kernloom/attested/etc/whitelist.txt", "whitelist file (IPv4/IPv6/CIDR), one per line; empty disables (IMA-attested)")
 	flag.DurationVar(&c.WhitelistReload, "whitelist-reload", 10*time.Second, "reload whitelist if file changed (0 disables)")
 	flag.BoolVar(&c.WhitelistLearn, "whitelist-learn", false, "if true, whitelisted IPs may contribute to learning; default false")
 
-	flag.StringVar(&c.FeedbackPath, "feedback-file", "/var/lib/kernloom/iq/feedback.json", "feedback file (JSON array) for temporary forgive/whitelist entries; empty disables")
+	// Runtime state — temporary exemptions, changes frequently, not under IMA.
+	flag.StringVar(&c.FeedbackPath, "feedback-file", "/var/lib/kernloom/iq/feedback.json", "feedback file for temporary forgive/whitelist entries (runtime, not IMA-attested); empty disables")
 	flag.DurationVar(&c.FeedbackReload, "feedback-reload", 10*time.Second, "reload feedback file if changed (0 disables)")
 	flag.BoolVar(&c.FeedbackLearn, "feedback-learn", false, "if true, feedback-exempt IPs may contribute to learning; default false")
 	flag.BoolVar(&c.FeedbackCIDRDeenforce, "feedback-deenforce-cidr", true, "if true, CIDR feedback entries will actively de-enforce existing deny/rl map entries by scanning maps periodically (best effort)")
@@ -307,7 +311,10 @@ func parseFlags() cfg {
 	flag.StringVar(&c.BPFfsRoot, "bpffs-root", "/sys/fs/bpf", "bpffs mount root")
 
 	flag.BoolVar(&c.GraphEnabled, "graph", false, "enable graph learning")
-	flag.StringVar(&c.GraphStorePath, "graph-store", "/var/lib/kernloom/iq/graph.db", "path to graph SQLite database")
+	// Runtime state — SQLite DB updated every tick, not under IMA.
+	flag.StringVar(&c.GraphStorePath, "graph-store", "/var/lib/kernloom/iq/graph.db", "graph SQLite database (runtime, not IMA-attested)")
+	// IMA-attested: written once by 'kliq graph freeze', then static until next freeze.
+	flag.StringVar(&c.GraphFrozenPath, "graph-frozen", "/opt/kernloom/attested/etc/frozen-graph.yaml", "frozen graph baseline written by 'kliq graph freeze' (IMA-attested)")
 	flag.StringVar(&c.GraphMode, "graph-mode", "learn", "graph mode: learn or frozen-observe")
 	flag.StringVar(&c.GraphNodeID, "graph-node-id", "", "node ID for graph edges (defaults to hostname)")
 	flag.DurationVar(&c.GraphPromoteInterval, "graph-promote-interval", 5*time.Minute, "how often to promote candidate edges to learned")

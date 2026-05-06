@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"os"
 	"sort"
-	"strconv"
 	"text/tabwriter"
 	"time"
 
@@ -120,6 +119,48 @@ type graphProposal struct {
 	} `yaml:"spec"`
 }
 
+// buildProposal constructs a graphProposal from a list of edges and stats.
+func buildProposal(nodeID string, edges []*graph.Edge, stats map[graph.EdgeState]int) graphProposal {
+	sort.Slice(edges, func(i, j int) bool {
+		if edges[i].State != edges[j].State {
+			return stateOrder(edges[i].State) < stateOrder(edges[j].State)
+		}
+		return edges[i].LastSeenAt.After(edges[j].LastSeenAt)
+	})
+
+	proposal := graphProposal{APIVersion: "kernloom.io/v1alpha1", Kind: "GraphProposal"}
+	proposal.Metadata.NodeID = nodeID
+	proposal.Metadata.GeneratedAt = time.Now().UTC()
+	proposal.Metadata.GeneratedBy = "kliq"
+	proposal.Metadata.Mode = "learned"
+	proposal.Spec.Summary = graphProposalSummary{
+		CandidateEdges: stats[graph.EdgeCandidate],
+		LearnedEdges:   stats[graph.EdgeLearned],
+		ApprovedEdges:  stats[graph.EdgeApproved],
+		FrozenEdges:    stats[graph.EdgeFrozen],
+	}
+	for _, e := range edges {
+		if e.State == graph.EdgeExpired {
+			continue
+		}
+		proposal.Spec.Edges = append(proposal.Spec.Edges, graphProposalEdge{
+			ID:              e.ID,
+			State:           string(e.State),
+			Source:          graphEntityRef{Kind: string(e.Source.Kind), ID: e.Source.ID},
+			Destination:     graphEntityRef{Kind: string(e.Destination.Kind), ID: e.Destination.ID},
+			Protocol:        e.Protocol,
+			DestinationPort: e.DestinationPort,
+			Direction:       string(e.Direction),
+			FirstSeenAt:     e.FirstSeenAt,
+			LastSeenAt:      e.LastSeenAt,
+			SeenCount:       e.SeenCount,
+			Confidence:      e.Confidence,
+			Attributes:      e.Attributes,
+		})
+	}
+	return proposal
+}
+
 // runGraphExport writes the full graph as a YAML proposal to stdout.
 func runGraphExport(storePath, nodeID, outputFormat string) {
 	s, err := gstore.Open(storePath)
@@ -140,48 +181,7 @@ func runGraphExport(storePath, nodeID, outputFormat string) {
 		os.Exit(1)
 	}
 
-	sort.Slice(edges, func(i, j int) bool {
-		if edges[i].State != edges[j].State {
-			return stateOrder(edges[i].State) < stateOrder(edges[j].State)
-		}
-		return edges[i].LastSeenAt.After(edges[j].LastSeenAt)
-	})
-
-	proposal := graphProposal{
-		APIVersion: "kernloom.io/v1alpha1",
-		Kind:       "GraphProposal",
-	}
-	proposal.Metadata.NodeID = nodeID
-	proposal.Metadata.GeneratedAt = time.Now().UTC()
-	proposal.Metadata.GeneratedBy = "kliq"
-	proposal.Metadata.Mode = "learned"
-	proposal.Spec.Summary = graphProposalSummary{
-		CandidateEdges: stats[graph.EdgeCandidate],
-		LearnedEdges:   stats[graph.EdgeLearned],
-		ApprovedEdges:  stats[graph.EdgeApproved],
-		FrozenEdges:    stats[graph.EdgeFrozen],
-	}
-
-	for _, e := range edges {
-		if e.State == graph.EdgeExpired {
-			continue
-		}
-		pe := graphProposalEdge{
-			ID:              e.ID,
-			State:           string(e.State),
-			Source:          graphEntityRef{Kind: string(e.Source.Kind), ID: e.Source.ID},
-			Destination:     graphEntityRef{Kind: string(e.Destination.Kind), ID: e.Destination.ID},
-			Protocol:        e.Protocol,
-			DestinationPort: e.DestinationPort,
-			Direction:       string(e.Direction),
-			FirstSeenAt:     e.FirstSeenAt,
-			LastSeenAt:      e.LastSeenAt,
-			SeenCount:       e.SeenCount,
-			Confidence:      e.Confidence,
-			Attributes:      e.Attributes,
-		}
-		proposal.Spec.Edges = append(proposal.Spec.Edges, pe)
-	}
+	proposal := buildProposal(nodeID, edges, stats)
 
 	switch outputFormat {
 	case "json":
@@ -218,17 +218,20 @@ func stateOrder(s graph.EdgeState) int {
 	}
 }
 
-// handleGraphSubcommand checks os.Args for "graph status" or "graph export"
-// and runs them without starting the main kliq loop.
-// Returns true if a subcommand was handled.
-func handleGraphSubcommand(storePath, nodeID string) bool {
+// handleGraphSubcommand checks os.Args for graph subcommands and runs them
+// without starting the main kliq loop. Returns true if a subcommand was handled.
+//
+// Usage:
+//
+//	kliq graph status  [store]  [node-id]
+//	kliq graph export  [store]  [node-id]  [--format=json]
+//	kliq graph freeze  [store]  [node-id]  [frozen-out]
+func handleGraphSubcommand(storePath, frozenPath, nodeID string) bool {
 	args := os.Args[1:]
 	if len(args) < 2 || args[0] != "graph" {
 		return false
 	}
 
-	// Resolve nodeID (may be overridden by --graph-node-id flag, but flags
-	// aren't parsed yet at this point — we accept it as a positional arg too).
 	if nodeID == "" {
 		if h, err := os.Hostname(); err == nil {
 			nodeID = h
@@ -237,9 +240,6 @@ func handleGraphSubcommand(storePath, nodeID string) bool {
 		}
 	}
 
-	// Allow overriding store path and node-id via simple positional args:
-	// kliq graph status [store-path] [node-id]
-	// kliq graph export [store-path] [node-id] [--format=json]
 	getArg := func(idx int, def string) string {
 		if len(args) > idx {
 			return args[idx]
@@ -249,40 +249,35 @@ func handleGraphSubcommand(storePath, nodeID string) bool {
 
 	switch args[1] {
 	case "status":
-		sp := getArg(2, storePath)
-		nid := getArg(3, nodeID)
-		runGraphStatus(sp, nid)
+		runGraphStatus(getArg(2, storePath), getArg(3, nodeID))
 		return true
 
 	case "export":
-		sp := getArg(2, storePath)
-		nid := getArg(3, nodeID)
 		format := "yaml"
 		for _, a := range args[4:] {
 			if a == "--format=json" || a == "-json" {
 				format = "json"
 			}
 		}
-		runGraphExport(sp, nid, format)
+		runGraphExport(getArg(2, storePath), getArg(3, nodeID), format)
 		return true
 
 	case "freeze":
-		sp := getArg(2, storePath)
-		nid := getArg(3, nodeID)
-		runGraphFreeze(sp, nid)
+		runGraphFreeze(getArg(2, storePath), getArg(3, nodeID), getArg(4, frozenPath))
 		return true
 
 	default:
 		fmt.Fprintf(os.Stderr, "unknown graph subcommand: %s\n", args[1])
-		fmt.Fprintln(os.Stderr, "usage: kliq graph {status|export|freeze} [store-path] [node-id]")
+		fmt.Fprintln(os.Stderr, "usage: kliq graph {status|export|freeze} [store] [node-id] [frozen-out]")
 		os.Exit(1)
 	}
 	return false
 }
 
-// runGraphFreeze marks all learned/approved edges as frozen and prints the count.
-// This is a preparation step before switching to frozen-observe mode.
-func runGraphFreeze(storePath, nodeID string) {
+// runGraphFreeze marks all learned/approved edges as frozen in the store and
+// writes the frozen baseline as YAML to frozenPath (IMA-attested location).
+// This is the preparation step before switching to frozen-observe mode.
+func runGraphFreeze(storePath, nodeID, frozenPath string) {
 	s, err := gstore.Open(storePath)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: open graph store: %v\n", err)
@@ -307,6 +302,60 @@ func runGraphFreeze(storePath, nodeID string) {
 		}
 	}
 
-	fmt.Printf("Frozen %s edges for node %s.\n", strconv.Itoa(frozen), nodeID)
+	fmt.Printf("Frozen %d edges for node %s.\n", frozen, nodeID)
+
+	// Write the frozen baseline YAML to the IMA-attested path.
+	if frozenPath != "" {
+		if err := os.MkdirAll(dirOf(frozenPath), 0o755); err != nil {
+			fmt.Fprintf(os.Stderr, "warning: could not create directory for %s: %v\n", frozenPath, err)
+		} else {
+			runGraphExportToFile(storePath, nodeID, frozenPath)
+			fmt.Printf("Frozen baseline written to %s (IMA-attested).\n", frozenPath)
+		}
+	}
+
 	fmt.Println("Switch kliq to --graph-mode=frozen-observe to detect new edges.")
+}
+
+// runGraphExportToFile writes the graph proposal YAML to a file instead of stdout.
+func runGraphExportToFile(storePath, nodeID, path string) {
+	s, err := gstore.Open(storePath)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: open graph store: %v\n", err)
+		os.Exit(1)
+	}
+	defer s.Close()
+
+	edges, err := s.ListByNode(nodeID, graph.EdgeFrozen)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: list frozen edges: %v\n", err)
+		os.Exit(1)
+	}
+	stats, _ := s.Stats(nodeID)
+
+	proposal := buildProposal(nodeID, edges, stats)
+	out, err := yaml.Marshal(proposal)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: marshal yaml: %v\n", err)
+		os.Exit(1)
+	}
+
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, out, 0o644); err != nil {
+		fmt.Fprintf(os.Stderr, "error: write %s: %v\n", tmp, err)
+		os.Exit(1)
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		fmt.Fprintf(os.Stderr, "error: rename to %s: %v\n", path, err)
+		os.Exit(1)
+	}
+}
+
+func dirOf(path string) string {
+	for i := len(path) - 1; i >= 0; i-- {
+		if path[i] == '/' {
+			return path[:i]
+		}
+	}
+	return "."
 }

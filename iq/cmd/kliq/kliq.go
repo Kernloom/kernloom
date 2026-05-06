@@ -68,8 +68,9 @@ func main() {
 	// Handle graph subcommands before flag parsing so they work standalone.
 	// e.g.: kliq graph status, kliq graph export, kliq graph freeze
 	if handleGraphSubcommand(
-		"/var/lib/kernloom/iq/graph.db", // default store path
-		"",                              // nodeID resolved inside
+		"/var/lib/kernloom/iq/graph.db",                // default store path
+		"/opt/kernloom/attested/etc/frozen-graph.yaml", // default frozen output
+		"", // nodeID resolved inside
 	) {
 		return
 	}
