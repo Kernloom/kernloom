@@ -137,6 +137,17 @@ type cfg struct {
 
 	// BPF filesystem root (default /sys/fs/bpf)
 	BPFfsRoot string
+
+	// Graph learning
+	GraphEnabled         bool
+	GraphStorePath       string
+	GraphMode            string
+	GraphNodeID          string
+	GraphPromoteInterval time.Duration
+	GraphMinSeenCount    uint64
+	GraphMinWindows      int
+	GraphMinAge          time.Duration
+	GraphExpireTTL       time.Duration
 }
 
 // toFSMConfig converts the relevant cfg fields to an fsm.Config.
@@ -294,6 +305,16 @@ func parseFlags() cfg {
 	flag.DurationVar(&c.StateTTL, "state-ttl", 60*time.Minute, "forget OBSERVE-only state if not seen for this long")
 	flag.BoolVar(&c.DryRun, "dry-run", true, "if true: no enforcement, only logs")
 	flag.StringVar(&c.BPFfsRoot, "bpffs-root", "/sys/fs/bpf", "bpffs mount root")
+
+	flag.BoolVar(&c.GraphEnabled, "graph", false, "enable graph learning")
+	flag.StringVar(&c.GraphStorePath, "graph-store", "/var/lib/kernloom/iq/graph.db", "path to graph SQLite database")
+	flag.StringVar(&c.GraphMode, "graph-mode", "learn", "graph mode: learn or frozen-observe")
+	flag.StringVar(&c.GraphNodeID, "graph-node-id", "", "node ID for graph edges (defaults to hostname)")
+	flag.DurationVar(&c.GraphPromoteInterval, "graph-promote-interval", 5*time.Minute, "how often to promote candidate edges to learned")
+	flag.Uint64Var(&c.GraphMinSeenCount, "graph-min-seen", 5, "min observations before candidate is promoted to learned")
+	flag.IntVar(&c.GraphMinWindows, "graph-min-windows", 3, "min distinct tick windows before promotion")
+	flag.DurationVar(&c.GraphMinAge, "graph-min-age", 10*time.Minute, "min edge age before promotion")
+	flag.DurationVar(&c.GraphExpireTTL, "graph-expire-ttl", 30*24*time.Hour, "mark edges expired after this idle time (0 disables)")
 
 	flag.Parse()
 	return c

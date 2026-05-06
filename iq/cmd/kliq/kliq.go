@@ -33,6 +33,7 @@ NOTE:
 package main
 
 import (
+	"context"
 	"fmt"
 	"log"
 	"math"
@@ -41,8 +42,13 @@ import (
 	"sort"
 	"time"
 
+	"github.com/adrianenderlin/kernloom/pkg/adapterruntime"
+	"github.com/adrianenderlin/kernloom/pkg/adapters/graphlearner"
 	"github.com/adrianenderlin/kernloom/pkg/adapters/shieldpep"
 	"github.com/adrianenderlin/kernloom/pkg/core/fsm"
+	"github.com/adrianenderlin/kernloom/pkg/core/graph"
+	"github.com/adrianenderlin/kernloom/pkg/core/observation"
+	gstore "github.com/adrianenderlin/kernloom/pkg/graphstore/sqlite"
 	"github.com/adrianenderlin/kernloom/pkg/shieldclient"
 )
 
@@ -59,6 +65,15 @@ type prevV6 struct {
 }
 
 func main() {
+	// Handle graph subcommands before flag parsing so they work standalone.
+	// e.g.: kliq graph status, kliq graph export, kliq graph freeze
+	if handleGraphSubcommand(
+		"/var/lib/kernloom/iq/graph.db", // default store path
+		"",                              // nodeID resolved inside
+	) {
+		return
+	}
+
 	c := parseFlags()
 	p := profileByName(c.ProfileName)
 	applyProfileDefaults(&c, p)
@@ -160,6 +175,62 @@ func main() {
 	if err := pep.Init(nil, nil); err != nil {
 		log.Fatalf("init shield pep: %v", err)
 	}
+
+	// Graph learner (optional).
+	var graphStore *gstore.Store
+	var graphBus *adapterruntime.Bus
+	var graphCtxCancel context.CancelFunc
+
+	if c.GraphEnabled {
+		nodeID := c.GraphNodeID
+		if nodeID == "" {
+			if h, err := os.Hostname(); err == nil {
+				nodeID = h
+			} else {
+				nodeID = "local"
+			}
+		}
+
+		gs, err := gstore.Open(c.GraphStorePath)
+		if err != nil {
+			log.Fatalf("open graph store %s: %v", c.GraphStorePath, err)
+		}
+		defer gs.Close()
+		graphStore = gs
+
+		graphBus = adapterruntime.NewBus(256)
+
+		mode := graphlearner.ModeLearn
+		if c.GraphMode == "frozen-observe" {
+			mode = graphlearner.ModeFrozenObserve
+		}
+
+		learner := graphlearner.New(graphlearner.Config{
+			NodeID: nodeID,
+			Mode:   mode,
+			Promotion: graph.PromotionConfig{
+				MinSeenCount:       c.GraphMinSeenCount,
+				MinDistinctWindows: c.GraphMinWindows,
+				MinFirstSeenAge:    c.GraphMinAge,
+			},
+			PromoteInterval: c.GraphPromoteInterval,
+			ExpireTTL:       c.GraphExpireTTL,
+		}, graphStore)
+
+		gctx, cancel := context.WithCancel(context.Background())
+		graphCtxCancel = cancel
+		if err := learner.Start(gctx, graphBus); err != nil {
+			cancel()
+			log.Fatalf("start graph learner: %v", err)
+		}
+		defer func() {
+			learner.Stop(context.Background())
+			cancel()
+		}()
+
+		log.Printf("Graph learning started: mode=%s store=%s node=%s", c.GraphMode, c.GraphStorePath, nodeID)
+	}
+	_ = graphCtxCancel // may be nil when graph is disabled
 
 	// Per-tick previous-snapshot maps (live here in kliq; not in the adapter).
 	prev4 := make(map[[4]byte]prevV4, 64_000)
@@ -390,6 +461,9 @@ func main() {
 			} else {
 				state6[m.IP6] = processCandidate6(m, state6[m.IP6], nowWall, c, wl, fb, pep, resPPS, resSyn, resScan, clean)
 			}
+			if graphBus != nil {
+				publishFlowObservation(graphBus, m, nowWall)
+			}
 		}
 
 		// Housekeeping: bound memory.
@@ -528,6 +602,25 @@ func main() {
 				c.TrigPPS, c.TrigSyn, c.TrigScan, clean, dropRatio, topWL, pol.Phase)
 		}
 	}
+}
+
+// publishFlowObservation sends a flow observation for the given source to the graph bus.
+func publishFlowObservation(bus *adapterruntime.Bus, m metrics, now time.Time) {
+	src := observation.EntityRef{Kind: observation.KindIP, ID: m.ipString()}
+	obs := observation.NewObservation(observation.SourceShield, observation.TypeFlow, "", src)
+	obs.Time = now
+	obs.SetObject(observation.EntityRef{Kind: observation.KindIP, ID: "local"})
+	obs.SetMetric("pps", m.PPS)
+	obs.SetMetric("bps", m.Bps)
+	obs.SetMetric("packets", m.PPS)
+	obs.SetMetric("bytes", m.Bps)
+	obs.SetAttribute("protocol", "ip")
+	if m.IPVer == 6 {
+		obs.SetAttribute("ip_version", "6")
+	} else {
+		obs.SetAttribute("ip_version", "4")
+	}
+	_ = bus.PublishObservation(context.Background(), *obs)
 }
 
 // obsToMetrics converts a shield observation (published on the bus) back to a
