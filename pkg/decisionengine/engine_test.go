@@ -19,8 +19,8 @@ import (
 /* ---- stub PEP adapter ---- */
 
 type stubPEP struct {
-	called   int
-	lastDec  *decision.Decision
+	called    int
+	lastDec   *decision.Decision
 	returnErr error
 }
 

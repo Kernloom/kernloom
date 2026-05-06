@@ -139,28 +139,28 @@ type cfg struct {
 	BPFfsRoot string
 
 	// Graph learning
-	GraphEnabled         bool
-	GraphStorePath       string // runtime state — /var/lib/kernloom/iq/
-	GraphFrozenPath      string // IMA-attested static baseline — /opt/kernloom/attested/etc/
-	GraphMode            string
-	GraphNodeID          string
-	GraphPromoteInterval time.Duration
-	GraphMinSeenCount    uint64
-	GraphMinWindows      int
-	GraphMinAge          time.Duration
-	GraphExpireTTL       time.Duration
-	GraphMinPackets      uint64
-	GraphMinBytes        uint64
+	GraphEnabled           bool
+	GraphStorePath         string // runtime state — /var/lib/kernloom/iq/
+	GraphFrozenPath        string // IMA-attested static baseline — /opt/kernloom/attested/etc/
+	GraphMode              string
+	GraphNodeID            string
+	GraphPromoteInterval   time.Duration
+	GraphMinSeenCount      uint64
+	GraphMinWindows        int
+	GraphMinAge            time.Duration
+	GraphExpireTTL         time.Duration
+	GraphMinPackets        uint64
+	GraphMinBytes          uint64
 	GraphExcludeBcast      bool
 	GraphExcludeLoopback   bool
 	GraphExcludeSourceCIDR string // comma-separated CIDRs to exclude from graph learning
 
 	// Graph freeze enforcement (decision engine).
-	GraphFreezeAction     string        // "signal", "rate_limit", "block"
-	GraphFreezeTTL        time.Duration // enforcement TTL for freeze violations
-	GraphFreezeMaxAction  string        // upper bound on freeze enforcement action
-	GraphFreezeAllowBlock bool          // permit block decisions from freeze violations
-	GraphFreezeMinSeverity int          // minimum signal score (0-100) before enforcement
+	GraphFreezeAction      string        // "signal", "rate_limit", "block"
+	GraphFreezeTTL         time.Duration // enforcement TTL for freeze violations
+	GraphFreezeMaxAction   string        // upper bound on freeze enforcement action
+	GraphFreezeAllowBlock  bool          // permit block decisions from freeze violations
+	GraphFreezeMinSeverity int           // minimum signal score (0-100) before enforcement
 }
 
 // toFSMConfig converts the relevant cfg fields to an fsm.Config.
