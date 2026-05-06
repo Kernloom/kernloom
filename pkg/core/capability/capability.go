@@ -7,24 +7,24 @@ package capability
 type CapabilityType string
 
 const (
-	TypeTelemetry   CapabilityType = "telemetry"  // Observes and reports metrics
+	TypeTelemetry   CapabilityType = "telemetry"   // Observes and reports metrics
 	TypeEnforcement CapabilityType = "enforcement" // Takes action on traffic/service
-	TypeSignal      CapabilityType = "signal"     // Emits or consumes signals
-	TypePolicy      CapabilityType = "policy"     // Manages or evaluates policy
-	TypeManagement  CapabilityType = "management" // Manages adapters/runtime
-	TypeAnalysis    CapabilityType = "analysis"   // Analyzes data (graph, correlate)
-	TypeExport      CapabilityType = "export"     // Exports data to external systems
+	TypeSignal      CapabilityType = "signal"      // Emits or consumes signals
+	TypePolicy      CapabilityType = "policy"      // Manages or evaluates policy
+	TypeManagement  CapabilityType = "management"  // Manages adapters/runtime
+	TypeAnalysis    CapabilityType = "analysis"    // Analyzes data (graph, correlate)
+	TypeExport      CapabilityType = "export"      // Exports data to external systems
 )
 
 // Layer describes the network/application layer where the capability operates.
 type Layer string
 
 const (
-	LayerL3L4      Layer = "L3L4"      // IP/TCP/UDP level (network layer)
-	LayerL7        Layer = "L7"        // Application layer (HTTP, DNS, etc.)
-	LayerContext   Layer = "context"   // Identity, workload, namespace context
-	LayerTrust     Layer = "trust"     // Attestation and integrity
-	LayerPolicy    Layer = "policy"    // Policy/configuration
+	LayerL3L4       Layer = "L3L4"       // IP/TCP/UDP level (network layer)
+	LayerL7         Layer = "L7"         // Application layer (HTTP, DNS, etc.)
+	LayerContext    Layer = "context"    // Identity, workload, namespace context
+	LayerTrust      Layer = "trust"      // Attestation and integrity
+	LayerPolicy     Layer = "policy"     // Policy/configuration
 	LayerManagement Layer = "management" // System management/metadata
 )
 
