@@ -1,0 +1,96 @@
+# LocalPolicyPack — Kernloom IQ
+#
+# NAS profile: Synology, QNAP, TrueNAS.
+# Burst-tolerant for SMB/NFS file transfers, strict on SYN/scan.
+# Long block TTL: ransomware / brute-force scanners stay blocked.
+
+apiVersion: kernloom.io/v1alpha1
+kind: LocalPolicyPack
+metadata:
+  name: nas
+  description: "NAS (Synology/QNAP/TrueNAS). Burst-tolerant for file transfers, strict on SYN/scan."
+  labels:
+    role: nas
+
+spec:
+  target_selector:
+    match_labels:
+      role: nas
+
+  capabilities:
+    - network.observe_flow
+    - network.rate_limit_source
+    - network.block_source
+
+  autonomy:
+    dry_run: false
+    max_action: block
+    allow_local_block: true
+    min_severity_for_block: 85
+
+  heuristic:
+    trig_pps:  1500
+    trig_syn:  30
+    trig_scan: 8
+    w_pps:     0.30
+    w_syn:     0.35
+    w_scan:    0.35
+    sev_cap:   3.0
+
+  fsm:
+    soft_at:  2
+    hard_at:  5
+    block_at: 14
+
+  enforcement:
+    soft_rate:  600
+    soft_burst: 1500
+    soft_ttl:   "2m"
+    hard_rate:  150
+    hard_burst: 300
+    hard_ttl:   "15m"
+    block_ttl:  "24h"
+    cooldown:   "30s"
+
+  block_gate:
+    min_severity: 2.5
+    min_duration: "30s"
+
+  anti_flap:
+    up_need:       2
+    down_need:     8
+    min_hold_soft: "1m"
+    min_hold_hard: "5m"
+
+  non_compliance:
+    at:    10
+    drop:  2.0
+    sev:   1.8
+    reset: 0.30
+
+  graph:
+    enabled: false
+    mode: learn
+    store: /var/lib/kernloom/iq/graph.db
+    promotion:
+      min_seen_count: 5
+      min_windows:    3
+      min_age:        "10m"
+      expire_ttl:     "720h"
+    freeze:
+      action:                signal
+      ttl:                   "10m"
+      max_action:            rate_limit
+      allow_block:           false
+      min_severity_for_block: 70
+    exclude:
+      broadcast: true
+      loopback:  true
+
+  exports:
+    correlate:
+      enabled: false
+      endpoint: ""
+    forge:
+      enabled: false
+      endpoint: ""

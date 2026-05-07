@@ -21,6 +21,10 @@ type cfg struct {
 	MinPPS   float64
 	MinSev   float64
 
+	// Mode + policy
+	Mode       string // "standalone" or "managed"
+	PolicyFile string // path to LocalPolicyPack YAML; overrides --profile when set
+
 	// Profiles + persistence
 	ProfileName string
 	StatePath   string
@@ -216,7 +220,9 @@ func parseFlags() cfg {
 	flag.Float64Var(&c.MinPPS, "min-pps", 10, "ignore sources below this PPS")
 	flag.Float64Var(&c.MinSev, "min-sev", 0.0, "include candidates with severity >= min-sev")
 
-	flag.StringVar(&c.ProfileName, "profile", "controller", "initial profile name (aliases apply)")
+	flag.StringVar(&c.Mode, "mode", "standalone", `agent mode: standalone (local policy) or managed (Forge-managed; currently logs a warning and runs as standalone)`)
+	flag.StringVar(&c.PolicyFile, "policy-file", "", "path to a LocalPolicyPack YAML file; overrides --profile for enforcement parameters when set")
+	flag.StringVar(&c.ProfileName, "profile", "controller", "initial profile name (aliases apply; ignored when --policy-file is set)")
 	// Runtime state — mutable, not under IMA measurement.
 	flag.StringVar(&c.StatePath, "state-file", "/var/lib/kernloom/iq/state.json", "autotune state file (runtime, not IMA-attested)")
 	flag.DurationVar(&c.MaxStateAge, "max-state-age", 14*24*time.Hour, "ignore persisted state older than this (0 disables)")

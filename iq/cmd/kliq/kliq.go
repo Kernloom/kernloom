@@ -39,7 +39,9 @@ import (
 	"math"
 	"net"
 	"os"
+	ossignal "os/signal"
 	"sort"
+	"syscall"
 	"time"
 
 	"github.com/adrianenderlin/kernloom/pkg/adapterruntime"
@@ -50,6 +52,7 @@ import (
 	"github.com/adrianenderlin/kernloom/pkg/core/fsm"
 	"github.com/adrianenderlin/kernloom/pkg/core/graph"
 	"github.com/adrianenderlin/kernloom/pkg/core/observation"
+	corepolicy "github.com/adrianenderlin/kernloom/pkg/core/policy"
 	"github.com/adrianenderlin/kernloom/pkg/core/signal"
 	"github.com/adrianenderlin/kernloom/pkg/decisionengine"
 	gstore "github.com/adrianenderlin/kernloom/pkg/graphstore/sqlite"
@@ -95,7 +98,30 @@ func main() {
 	}
 
 	c := parseFlags()
-	p := profileByName(c.ProfileName)
+
+	// Mode handling.
+	switch c.Mode {
+	case string(corepolicy.ModeStandalone):
+		// normal local-policy path
+	case string(corepolicy.ModeManaged):
+		kliqLog.Printf("INFO: mode=managed — Forge integration pending, running as standalone")
+	default:
+		log.Fatalf("unknown --mode %q: must be standalone or managed", c.Mode)
+	}
+
+	// Policy resolution: --policy-file takes precedence over --profile.
+	var p profile
+	if c.PolicyFile != "" {
+		pp, err := corepolicy.LoadFromFile(c.PolicyFile)
+		if err != nil {
+			log.Fatalf("load policy file: %v", err)
+		}
+		kliqLog.Printf("Policy loaded: file=%s name=%s", c.PolicyFile, pp.Metadata.Name)
+		p = policyPackToProfile(pp)
+		applyPolicyPackToCfg(pp, &c)
+	} else {
+		p = profileByName(c.ProfileName)
+	}
 	applyProfileDefaults(&c, p)
 
 	// Load persisted state (may override trig-*)
@@ -406,11 +432,44 @@ func main() {
 	defer ticker.Stop()
 	var tickN uint64
 
+	// SIGUSR1: de-escalate all enforced IPs to OBSERVE so kliq state stays in
+	// sync after an external map reset (e.g. klshield reset).
+	resetCh := make(chan os.Signal, 1)
+	ossignal.Notify(resetCh, syscall.SIGUSR1)
+	defer ossignal.Stop(resetCh)
+
 	kliqLog.Printf("Kernloom IQ started profile=%s interval=%s dry_run=%v top=%d trig{pps=%.1f syn=%.1f scan=%.1f} weights{pps=%.2f syn=%.2f scan=%.2f} cap=%.1f (ipv6=%v)",
 		p.Name, c.Interval.String(), c.DryRun, c.TopN, c.TrigPPS, c.TrigSyn, c.TrigScan, c.WPPS, c.WSyn, c.WScan, c.SevCap, maps.Src6 != nil)
 
 	for range ticker.C {
 		nowWall := time.Now()
+
+		// Handle SIGUSR1: clear FSM state to sync with an external map reset.
+		select {
+		case <-resetCh:
+			n := 0
+			pepParams := c.toPEPParams()
+			for ip, st := range state4 {
+				if st.Level != fsm.LevelObserve {
+					pep.TransitionV4(ip, st, fsm.LevelObserve, nowWall, pepParams)
+					st.Strikes, st.UpStreak, st.DownStreak, st.NonCompTicks = 0, 0, 0, 0
+					st.Level = fsm.LevelObserve
+					state4[ip] = st
+					n++
+				}
+			}
+			for ip, st := range state6 {
+				if st.Level != fsm.LevelObserve {
+					pep.TransitionV6(ip, st, fsm.LevelObserve, nowWall, pepParams)
+					st.Strikes, st.UpStreak, st.DownStreak, st.NonCompTicks = 0, 0, 0, 0
+					st.Level = fsm.LevelObserve
+					state6[ip] = st
+					n++
+				}
+			}
+			kliqLog.Printf("RESET via SIGUSR1: de-escalated %d enforced IPs to OBSERVE", n)
+		default:
+		}
 
 		wl.maybeReload(c.WhitelistReload)
 		fb.maybeReload(c.FeedbackReload)

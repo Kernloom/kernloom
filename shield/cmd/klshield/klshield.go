@@ -615,6 +615,84 @@ func delDenyIP(ipStr string) {
 	fmt.Printf("deny6 removed: %s\n", ipStr)
 }
 
+func resetMaps() {
+	total := 0
+
+	// deny4
+	if m, err := openPinnedMap(pinDeny4Hash); err == nil {
+		defer m.Close()
+		var keys []key4Bytes
+		it := m.Iterate()
+		var k key4Bytes
+		var v uint8
+		for it.Next(&k, &v) {
+			keys = append(keys, k)
+		}
+		for _, k := range keys {
+			k := k
+			_ = m.Delete(&k)
+			total++
+		}
+		fmt.Printf("deny4: cleared %d entries\n", len(keys))
+	}
+
+	// deny6
+	if m, err := openPinnedMap(pinDeny6Hash); err == nil {
+		defer m.Close()
+		var keys []key6Bytes
+		it := m.Iterate()
+		var k key6Bytes
+		var v uint8
+		for it.Next(&k, &v) {
+			keys = append(keys, k)
+		}
+		for _, k := range keys {
+			k := k
+			_ = m.Delete(&k)
+			total++
+		}
+		fmt.Printf("deny6: cleared %d entries\n", len(keys))
+	}
+
+	// rl4
+	if m, err := openPinnedMap(pinRLPolicy4); err == nil {
+		defer m.Close()
+		var keys []key4Bytes
+		it := m.Iterate()
+		var k key4Bytes
+		var v rlCfg
+		for it.Next(&k, &v) {
+			keys = append(keys, k)
+		}
+		for _, k := range keys {
+			k := k
+			_ = m.Delete(&k)
+			total++
+		}
+		fmt.Printf("rl4: cleared %d entries\n", len(keys))
+	}
+
+	// rl6
+	if m, err := openPinnedMap(pinRLPolicy6); err == nil {
+		defer m.Close()
+		var keys []src6Key
+		it := m.Iterate()
+		var k src6Key
+		var v rlCfg
+		for it.Next(&k, &v) {
+			keys = append(keys, k)
+		}
+		for _, k := range keys {
+			k := k
+			_ = m.Delete(&k)
+			total++
+		}
+		fmt.Printf("rl6: cleared %d entries\n", len(keys))
+	}
+
+	fmt.Printf("reset: %d entries cleared\n", total)
+}
+
 func listDeny() {
 	// v4
 	if m, err := openPinnedMap(pinDeny4Hash); err == nil {
@@ -1025,6 +1103,8 @@ Commands:
   rl-unset-ip     <ip>
   list-rl
 
+  reset
+
   stats
   top-src         [-n 20] [-by pkts|bytes|drops|droprl]
   events
@@ -1119,6 +1199,9 @@ func main() {
 
 	case "list-rl":
 		listRL()
+
+	case "reset":
+		resetMaps()
 
 	case "stats":
 		stats()

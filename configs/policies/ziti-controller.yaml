@@ -1,0 +1,117 @@
+# LocalPolicyPack — Kernloom IQ
+#
+# Usage:
+#   sudo kliq --policy-file=/etc/kernloom/iq/policy.yaml
+#   sudo kliq --mode=managed --policy-file=/etc/kernloom/iq/policy.yaml
+#
+# This file is forward-compatible with Kernloom Forge: when Forge is available
+# it will push cryptographically signed versions of this format to registered
+# kliq nodes instead of reading a local file.
+
+apiVersion: kernloom.io/v1alpha1
+kind: LocalPolicyPack
+metadata:
+  name: ziti-controller
+  description: "Public OpenZiti controller / enrolment endpoint. SYN-sensitive, cautious blocking."
+  labels:
+    role: ziti-controller
+    environment: production
+
+spec:
+  # --- Forge: which nodes this policy targets (informational in standalone mode) ---
+  target_selector:
+    match_labels:
+      role: ziti-controller
+
+  # --- Forge: capabilities this node's PEP adapters provide ---
+  # Forge uses this to validate that requested capabilities are available.
+  capabilities:
+    - network.observe_flow
+    - network.rate_limit_source
+    - network.block_source
+
+  # --- Autonomy: what kliq is permitted to enforce locally ---
+  # In managed mode Forge can further restrict these. In standalone mode
+  # this is the operator's local authorization for kliq.
+  autonomy:
+    dry_run: false
+    max_action: block
+    allow_local_block: true
+    min_severity_for_block: 85
+
+  # --- Signal engine thresholds and weights ---
+  heuristic:
+    trig_pps:  80
+    trig_syn:  20
+    trig_scan: 5
+    w_pps:     0.35
+    w_syn:     0.40
+    w_scan:    0.25
+    sev_cap:   3.0
+
+  # --- FSM escalation (strike counts) ---
+  fsm:
+    soft_at:  1
+    hard_at:  3
+    block_at: 9
+
+  # --- Per-level rate-limit parameters and TTLs ---
+  enforcement:
+    soft_rate:  20
+    soft_burst: 40
+    soft_ttl:   "60s"
+    hard_rate:  5
+    hard_burst: 10
+    hard_ttl:   "10m"
+    block_ttl:  "30m"
+    cooldown:   "5s"
+
+  # --- Block gate: requires sustained high severity before BLOCK ---
+  block_gate:
+    min_severity: 2.0
+    min_duration: "15s"
+
+  # --- Anti-flap: streak counters and minimum hold times ---
+  anti_flap:
+    up_need:       2
+    down_need:     6
+    min_hold_soft: "15s"
+    min_hold_hard: "30s"
+
+  # --- Non-compliance: escalation for sources that ignore rate limits ---
+  non_compliance:
+    at:    8
+    drop:  1.0
+    sev:   1.5
+    reset: 0.30
+
+  # --- Graph learning and freeze enforcement ---
+  graph:
+    enabled: false        # set to true to enable graph learning
+    mode: learn           # learn | frozen-observe | frozen-enforce
+    store: /var/lib/kernloom/iq/graph.db
+    promotion:
+      min_seen_count: 5
+      min_windows:    3
+      min_age:        "10m"
+      expire_ttl:     "720h"
+    freeze:
+      action:                signal   # signal | rate_limit | block
+      ttl:                   "10m"
+      max_action:            rate_limit
+      allow_block:           false
+      min_severity_for_block: 70
+    exclude:
+      broadcast: true
+      loopback:  true
+      # source_cidrs:
+      #   - 172.16.0.0/12   # WSL / NAT gateway
+
+  # --- Export destinations (stubs — enabled when Correlate/Forge are available) ---
+  exports:
+    correlate:
+      enabled: false
+      endpoint: ""
+    forge:
+      enabled: false
+      endpoint: ""
