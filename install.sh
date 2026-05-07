@@ -13,9 +13,28 @@ REPO="adrianenderlin/kernloom"
 COMPONENT="all"            # all | kliq | klshield
 KERNLOOM_VERSION="${KERNLOOM_VERSION:-latest}"
 PREFIX="${PREFIX:-}"
-SHARE_DIR="${SHARE_DIR:-/usr/local/share/kernloom/bpf}"
-IQ_ETC_DIR="${IQ_ETC_DIR:-/etc/kernloom/iq}"
+
+# /opt/kernloom/ holds files that may be IMA-attested by Keylime:
+#   bin/       — executables
+#   bpf/       — BPF object (architecture-independent bytecode)
+#   attested/  — config files measured by IMA (whitelist, frozen graph, policy/pdp YAML)
+# /var/lib/kernloom/iq/ holds runtime state that changes frequently (not attested):
+#   state.json, feedback.json, graph.db
+# Everything under /opt/kernloom/attested/ is IMA-measured by Keylime:
+#   kliq, klshield        — executables (Keylime attests the binaries)
+#   bpf/                  — BPF object
+#   etc/                  — config files (whitelist, frozen graph, policy/pdp YAML)
+# /var/lib/kernloom/iq/   — runtime state (changes frequently, not attested)
+OPT_DIR="${OPT_DIR:-/opt/kernloom}"
+ATTESTED_DIR="${ATTESTED_DIR:-$OPT_DIR/attested}"
+SHARE_DIR="${SHARE_DIR:-$ATTESTED_DIR/bpf}"
+IQ_ATTESTED_DIR="${IQ_ATTESTED_DIR:-$ATTESTED_DIR/etc}"
 IQ_VAR_DIR="${IQ_VAR_DIR:-/var/lib/kernloom/iq}"
+IQ_POLICY_DIR="${IQ_POLICY_DIR:-$ATTESTED_DIR/etc/policies}"
+IQ_PDP_DIR="${IQ_PDP_DIR:-$ATTESTED_DIR/etc/pdp}"
+
+# Keep legacy name for backward compat with ensure_iq_layout
+IQ_ETC_DIR="$IQ_ATTESTED_DIR"
 TMPDIR=""
 
 usage() {
@@ -34,10 +53,14 @@ Options:
 
 Environment:
   KERNLOOM_VERSION   Same as --version
-  PREFIX             Same as --prefix
-  SHARE_DIR          BPF install directory (default: /usr/local/share/kernloom/bpf)
-  IQ_ETC_DIR         IQ config directory (default: /etc/kernloom/iq)
-  IQ_VAR_DIR         IQ state directory (default: /var/lib/kernloom/iq)
+  OPT_DIR            Base directory    (default: /opt/kernloom)
+  ATTESTED_DIR       IMA-attested root (default: /opt/kernloom/attested)
+  PREFIX             Binaries dir      (default: /opt/kernloom/attested when root)
+  SHARE_DIR          BPF object        (default: /opt/kernloom/attested/bpf)
+  IQ_ATTESTED_DIR    Attested config   (default: /opt/kernloom/attested/etc)
+  IQ_POLICY_DIR      PolicyPack files  (default: /opt/kernloom/attested/etc/policies)
+  IQ_PDP_DIR         PDPConfig files   (default: /opt/kernloom/attested/etc/pdp)
+  IQ_VAR_DIR         Runtime state     (default: /var/lib/kernloom/iq)
 USAGE
 }
 
@@ -74,7 +97,7 @@ pick_prefix() {
   fi
 
   if [ "$(id -u)" -eq 0 ]; then
-    PREFIX="/usr/local/bin"
+    PREFIX="$OPT_DIR/attested"
   else
     PREFIX="$HOME/.local/bin"
   fi
@@ -205,18 +228,29 @@ install_binary() {
 
 ensure_iq_layout() {
   echo "==> Ensuring IQ directories"
-  mkdir -p "$IQ_ETC_DIR" "$IQ_VAR_DIR"
 
-  if [ ! -f "$IQ_ETC_DIR/whitelist.txt" ]; then
-    : > "$IQ_ETC_DIR/whitelist.txt"
+  # Attested (IMA-measurable): binaries + BPF + config under /opt/kernloom/attested/
+  mkdir -p "$ATTESTED_DIR" "$IQ_ATTESTED_DIR" "$IQ_POLICY_DIR" "$IQ_PDP_DIR"
+
+  # Runtime state: changes frequently, not attested
+  mkdir -p "$IQ_VAR_DIR"
+
+  if [ ! -f "$IQ_ATTESTED_DIR/whitelist.txt" ]; then
+    : > "$IQ_ATTESTED_DIR/whitelist.txt"
   fi
 
   if [ ! -f "$IQ_VAR_DIR/feedback.json" ] || [ ! -s "$IQ_VAR_DIR/feedback.json" ]; then
     printf '[]\n' > "$IQ_VAR_DIR/feedback.json"
   fi
 
-  chmod 755 "$IQ_ETC_DIR" "$IQ_VAR_DIR" || true
-  chmod 644 "$IQ_ETC_DIR/whitelist.txt" "$IQ_VAR_DIR/feedback.json" || true
+  chmod 755 "$ATTESTED_DIR" "$IQ_ATTESTED_DIR" "$IQ_POLICY_DIR" "$IQ_PDP_DIR" "$IQ_VAR_DIR" || true
+  chmod 644 "$IQ_ATTESTED_DIR/whitelist.txt" "$IQ_VAR_DIR/feedback.json" || true
+
+  echo "    Attested root:   $ATTESTED_DIR    (IMA-measured by Keylime)"
+  echo "    Attested config: $IQ_ATTESTED_DIR"
+  echo "    Policy files:    $IQ_POLICY_DIR   (place LocalPolicyPack YAML here)"
+  echo "    PDP configs:     $IQ_PDP_DIR      (place PDPConfig YAML here)"
+  echo "    Runtime state:   $IQ_VAR_DIR      (not attested)"
 }
 
 while [ "$#" -gt 0 ]; do
@@ -269,8 +303,9 @@ case "$OS" in
 esac
 
 case "$ARCH_RAW" in
-  x86_64|amd64) ARCH="amd64" ;;
-  aarch64|arm64) ARCH="arm64" ;;
+  x86_64|amd64)           ARCH="amd64"  ;;
+  aarch64|arm64)           ARCH="arm64"  ;;
+  armv7l|armv7|armhf)     ARCH="arm_v7" ;;  # Synology DS218+ (Marvell ARMv7 Cortex-A9)
   *)
     echo "Error: unsupported architecture: $ARCH_RAW" >&2
     exit 1
@@ -326,5 +361,7 @@ echo "Installed files:"
 
 echo
 echo "Examples:"
-echo "  sudo klshield attach-xdp -iface eth0 -obj $SHARE_DIR/xdp_kernloom_shield.bpf.o"
-echo "  sudo kliq --help"
+echo "  sudo $PREFIX/klshield attach-xdp -iface eth0 -obj $SHARE_DIR/xdp_kernloom_shield.bpf.o"
+echo "  sudo $PREFIX/kliq --help"
+echo "  sudo $PREFIX/kliq --pdp-config=$IQ_PDP_DIR/ziti-controller.yaml \\"
+echo "                    --policy-file=$IQ_POLICY_DIR/ziti-controller.yaml"
