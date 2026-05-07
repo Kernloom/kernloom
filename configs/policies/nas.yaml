@@ -1,8 +1,7 @@
 # LocalPolicyPack — Kernloom IQ
 #
-# NAS profile: Synology, QNAP, TrueNAS.
-# Burst-tolerant for SMB/NFS file transfers, strict on SYN/scan.
-# Long block TTL: ransomware / brute-force scanners stay blocked.
+# NAS: Synology, QNAP, TrueNAS.
+# Use with: --adapter-config=configs/adapters/shield-pep-nas.yaml
 
 apiVersion: kernloom.io/v1alpha1
 kind: LocalPolicyPack
@@ -17,7 +16,7 @@ spec:
     match_labels:
       role: nas
 
-  capabilities:
+  capabilities_required:
     - network.observe_flow
     - network.rate_limit_source
     - network.block_source
@@ -26,47 +25,64 @@ spec:
     dry_run: false
     max_action: block
     allow_local_block: true
-    min_severity_for_block: 85
 
-  heuristic:
-    trig_pps:  1500
-    trig_syn:  30
-    trig_scan: 8
-    w_pps:     0.30
-    w_syn:     0.35
-    w_scan:    0.35
-    sev_cap:   3.0
+  heuristics:
+    pps_trigger:  1500.0
+    syn_trigger:  30.0
+    scan_trigger: 8.0
+    weights:
+      pps:  0.30
+      syn:  0.35
+      scan: 0.35
+      cap:  3.0
+    progressive_enforcement:
+      soft_at:       2
+      hard_at:       5
+      block_at:      14
+      up_need:       2
+      down_need:     8
+      block_min_sev: 2.5
+      block_min_dur: "30s"
+      min_hold_soft: "1m"
+      min_hold_hard: "5m"
+    non_compliance:
+      at:    10
+      drop:  2.0
+      sev:   1.8
+      reset: 0.30
 
-  fsm:
-    soft_at:  2
-    hard_at:  5
-    block_at: 14
+  rules:
+    - name: soft-rate-limit
+      when:
+        fsm_level: soft
+      then:
+        action: rate_limit
+        capability: network.rate_limit_source
+        ttl: "2m"
 
-  enforcement:
-    soft_rate:  600
-    soft_burst: 1500
-    soft_ttl:   "2m"
-    hard_rate:  150
-    hard_burst: 300
-    hard_ttl:   "15m"
-    block_ttl:  "24h"
-    cooldown:   "30s"
+    - name: hard-rate-limit
+      when:
+        fsm_level: hard
+      then:
+        action: rate_limit
+        capability: network.rate_limit_source
+        ttl: "15m"
 
-  block_gate:
-    min_severity: 2.5
-    min_duration: "30s"
+    - name: block
+      when:
+        fsm_level: block
+      then:
+        action: block
+        capability: network.block_source
+        ttl: "24h"
 
-  anti_flap:
-    up_need:       2
-    down_need:     8
-    min_hold_soft: "1m"
-    min_hold_hard: "5m"
-
-  non_compliance:
-    at:    10
-    drop:  2.0
-    sev:   1.8
-    reset: 0.30
+    - name: graph-freeze-violation
+      when:
+        signal: graph.new_edge_after_freeze
+      then:
+        action: signal
+        capability: signal.emit_local_risk
+        ttl: "10m"
 
   graph:
     enabled: false

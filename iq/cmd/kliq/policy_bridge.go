@@ -5,48 +5,73 @@ package main
 
 import "github.com/adrianenderlin/kernloom/pkg/core/policy"
 
-// policyPackToProfile converts a PolicyPack loaded from a YAML file into the
-// internal profile struct. The profile type lives in the main package so this
-// conversion cannot be a method on PolicyPack itself.
+// policyPackToProfile converts the Heuristics section of a PolicyPack into the
+// internal profile struct. Only PDP-internal parameters live here (signal
+// thresholds, FSM escalation, anti-flap, block gate, non-compliance). PEP-specific
+// parameters (rate_pps, burst, cooldown) come from the adapter manifest.
 func policyPackToProfile(pp *policy.PolicyPack) profile {
-	s := pp.Spec
+	h := pp.Spec.Heuristics
+	prog := h.Progressive
+	nc := h.NonCompliance
 	return profile{
 		Name:         pp.Metadata.Name,
-		TrigPPS:      s.Heuristic.TrigPPS,
-		TrigSyn:      s.Heuristic.TrigSyn,
-		TrigScan:     s.Heuristic.TrigScan,
-		WPPS:         s.Heuristic.WPPS,
-		WSyn:         s.Heuristic.WSyn,
-		WScan:        s.Heuristic.WScan,
-		SevCap:       s.Heuristic.SevCap,
-		SoftAt:       s.FSM.SoftAt,
-		HardAt:       s.FSM.HardAt,
-		BlockAt:      s.FSM.BlockAt,
-		SoftRate:     s.Enforcement.SoftRate,
-		SoftBurst:    s.Enforcement.SoftBurst,
-		SoftTTL:      s.Enforcement.SoftTTL.D,
-		HardRate:     s.Enforcement.HardRate,
-		HardBurst:    s.Enforcement.HardBurst,
-		HardTTL:      s.Enforcement.HardTTL.D,
-		BlockTTL:     s.Enforcement.BlockTTL.D,
-		Cooldown:     s.Enforcement.Cooldown.D,
-		BlockMinSev:  s.BlockGate.MinSeverity,
-		BlockMinDur:  s.BlockGate.MinDuration.D,
-		UpNeed:       s.AntiFlap.UpNeed,
-		DownNeed:     s.AntiFlap.DownNeed,
-		MinHoldSoft:  s.AntiFlap.MinHoldSoft.D,
-		MinHoldHard:  s.AntiFlap.MinHoldHard.D,
-		NonCompAt:    s.NonCompliance.At,
-		NonCompDrop:  s.NonCompliance.Drop,
-		NonCompSev:   s.NonCompliance.Sev,
-		NonCompReset: s.NonCompliance.Reset,
+		TrigPPS:      h.PPSTrigger,
+		TrigSyn:      h.SynTrigger,
+		TrigScan:     h.ScanTrigger,
+		WPPS:         h.Weights.PPS,
+		WSyn:         h.Weights.Syn,
+		WScan:        h.Weights.Scan,
+		SevCap:       h.Weights.Cap,
+		SoftAt:       prog.SoftAt,
+		HardAt:       prog.HardAt,
+		BlockAt:      prog.BlockAt,
+		BlockMinSev:  prog.BlockMinSev,
+		BlockMinDur:  prog.BlockMinDur.D,
+		UpNeed:       prog.UpNeed,
+		DownNeed:     prog.DownNeed,
+		MinHoldSoft:  prog.MinHoldSoft.D,
+		MinHoldHard:  prog.MinHoldHard.D,
+		NonCompAt:    nc.At,
+		NonCompDrop:  nc.Drop,
+		NonCompSev:   nc.Sev,
+		NonCompReset: nc.Reset,
+	}
+}
+
+// rulesFromPolicyPack extracts enforcement TTLs and action types from the
+// Rules section and writes them into cfg. The PEP-specific rate/burst values
+// are NOT here — those come from the adapter manifest.
+func rulesFromPolicyPack(pp *policy.PolicyPack, c *cfg) {
+	for _, rule := range pp.Spec.Rules {
+		switch rule.When.FsmLevel {
+		case "soft":
+			if rule.Then.TTL.D > 0 {
+				c.SoftTTL = rule.Then.TTL.D
+			}
+		case "hard":
+			if rule.Then.TTL.D > 0 {
+				c.HardTTL = rule.Then.TTL.D
+			}
+		case "block":
+			if rule.Then.TTL.D > 0 {
+				c.BlockTTL = rule.Then.TTL.D
+			}
+		}
+		if rule.When.Signal == "graph.new_edge_after_freeze" {
+			if rule.Then.TTL.D > 0 {
+				c.GraphFreezeTTL = rule.Then.TTL.D
+			}
+			if rule.Then.Action != "" {
+				c.GraphFreezeAction = rule.Then.Action
+			}
+		}
 	}
 }
 
 // applyPolicyPackToCfg writes all policy-controlled fields from a PolicyPack
-// into cfg. This covers autonomy (dry-run, max-action, block gates) and graph
-// learning/freeze configuration. Called before applyProfileDefaults so that
-// explicit CLI flag overrides still win for any field left at its zero value.
+// into cfg: autonomy gates and graph learning/freeze configuration.
+// Called before applyProfileDefaults so that explicit CLI flag overrides
+// still win for any field left at its zero value after both calls.
 func applyPolicyPackToCfg(pp *policy.PolicyPack, c *cfg) {
 	s := pp.Spec
 
@@ -56,9 +81,6 @@ func applyPolicyPackToCfg(pp *policy.PolicyPack, c *cfg) {
 		c.GraphFreezeMaxAction = s.Autonomy.MaxAction
 	}
 	c.GraphFreezeAllowBlock = s.Autonomy.AllowLocalBlock
-	if s.Autonomy.MinSeverityForBlock > 0 {
-		c.GraphFreezeMinSeverity = s.Autonomy.MinSeverityForBlock
-	}
 
 	// --- Graph ---
 	if s.Graph.Enabled {
@@ -100,7 +122,6 @@ func applyPolicyPackToCfg(pp *policy.PolicyPack, c *cfg) {
 
 	// Graph exclusions
 	if len(s.Graph.Exclude.SourceCIDRs) > 0 {
-		// join as comma-separated string to match existing flag format
 		joined := ""
 		for i, cidr := range s.Graph.Exclude.SourceCIDRs {
 			if i > 0 {

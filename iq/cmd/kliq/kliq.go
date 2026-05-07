@@ -119,10 +119,25 @@ func main() {
 		kliqLog.Printf("Policy loaded: file=%s name=%s", c.PolicyFile, pp.Metadata.Name)
 		p = policyPackToProfile(pp)
 		applyPolicyPackToCfg(pp, &c)
+		rulesFromPolicyPack(pp, &c)
 	} else {
 		p = profileByName(c.ProfileName)
 	}
 	applyProfileDefaults(&c, p)
+
+	// Load adapter manifest for PEP-specific capability parameters (rate/burst/cooldown).
+	// These are Shield-specific and do NOT belong in the PolicyPack.
+	c.adapterParams = shieldpep.DefaultCapabilityParams()
+	if c.AdapterConfig != "" {
+		caps, err := shieldpep.LoadManifest(c.AdapterConfig)
+		if err != nil {
+			log.Fatalf("load adapter manifest: %v", err)
+		}
+		c.adapterParams = caps
+		kliqLog.Printf("Adapter manifest loaded: %s (soft=%dpps hard=%dpps cooldown=%s)",
+			c.AdapterConfig, caps.SoftRatePPS, caps.HardRatePPS, caps.Cooldown)
+	}
+	c.Cooldown = c.adapterParams.Cooldown
 
 	// Load persisted state (may override trig-*)
 	var stFile *stateFile

@@ -108,15 +108,19 @@ type cfg struct {
 	HardAt  int
 	BlockAt int
 
-	// Enforcement actions
-	SoftRate  uint64
-	SoftBurst uint64
-	SoftTTL   time.Duration
-	HardRate  uint64
-	HardBurst uint64
-	HardTTL   time.Duration
-	BlockTTL  time.Duration
-	Cooldown  time.Duration
+	// Enforcement TTLs: how long the PDP holds each level (PDP scheduling).
+	// Set from policy rules or profile defaults; no longer CLI flags.
+	SoftTTL  time.Duration
+	HardTTL  time.Duration
+	BlockTTL time.Duration
+	// Cooldown: min time between FSM level changes. Set from adapter manifest.
+	Cooldown time.Duration
+
+	// AdapterConfig is an optional path to an adapter manifest YAML file.
+	// If empty, built-in defaults from shieldpep.DefaultCapabilityParams() are used.
+	AdapterConfig string
+	// adapterParams holds the loaded adapter capability parameters.
+	adapterParams shieldpep.CapabilityParams
 
 	// Block gating
 	BlockMinSev float64
@@ -198,17 +202,19 @@ func (c cfg) toFSMConfig() fsm.Config {
 	}
 }
 
-// toPEPParams converts the relevant cfg fields to shieldpep.EnforcementParams.
+// toPEPParams assembles EnforcementParams from the adapter manifest (rate/burst/cooldown)
+// and the policy/profile (TTLs). Rate and burst values are PEP-specific and live in
+// the adapter manifest; TTLs are PDP scheduling parameters.
 func (c cfg) toPEPParams() shieldpep.EnforcementParams {
 	return shieldpep.EnforcementParams{
-		SoftRate:  c.SoftRate,
-		SoftBurst: c.SoftBurst,
+		SoftRate:  c.adapterParams.SoftRatePPS,
+		SoftBurst: c.adapterParams.SoftBurst,
 		SoftTTL:   c.SoftTTL,
-		HardRate:  c.HardRate,
-		HardBurst: c.HardBurst,
+		HardRate:  c.adapterParams.HardRatePPS,
+		HardBurst: c.adapterParams.HardBurst,
 		HardTTL:   c.HardTTL,
 		BlockTTL:  c.BlockTTL,
-		Cooldown:  c.Cooldown,
+		Cooldown:  c.adapterParams.Cooldown,
 	}
 }
 
@@ -299,14 +305,12 @@ func parseFlags() cfg {
 	flag.IntVar(&c.HardAt, "hard-at", 0, "strikes >= hard-at -> HARD (0 => from profile)")
 	flag.IntVar(&c.BlockAt, "block-at", 0, "strikes >= block-at -> BLOCK (0 => from profile)")
 
-	flag.Uint64Var(&c.SoftRate, "soft-rate", 0, "soft rate limit pps (0 => from profile)")
-	flag.Uint64Var(&c.SoftBurst, "soft-burst", 0, "soft burst tokens (0 => from profile)")
-	flag.DurationVar(&c.SoftTTL, "soft-ttl", 0, "soft TTL (0 => from profile)")
-	flag.Uint64Var(&c.HardRate, "hard-rate", 0, "hard rate limit pps (0 => from profile)")
-	flag.Uint64Var(&c.HardBurst, "hard-burst", 0, "hard burst tokens (0 => from profile)")
-	flag.DurationVar(&c.HardTTL, "hard-ttl", 0, "hard TTL (0 => from profile)")
-	flag.DurationVar(&c.BlockTTL, "block-ttl", 0, "block TTL (0 => from profile)")
-	flag.DurationVar(&c.Cooldown, "cooldown", 0, "min time between level changes (0 => from profile)")
+	// TTLs are PDP scheduling parameters set from policy rules or profile defaults.
+	flag.DurationVar(&c.SoftTTL, "soft-ttl", 0, "soft enforcement TTL (0 => from policy rule or profile)")
+	flag.DurationVar(&c.HardTTL, "hard-ttl", 0, "hard enforcement TTL (0 => from policy rule or profile)")
+	flag.DurationVar(&c.BlockTTL, "block-ttl", 0, "block TTL (0 => from policy rule or profile)")
+	// Rate/burst/cooldown come from the adapter manifest, not CLI flags.
+	flag.StringVar(&c.AdapterConfig, "adapter-config", "", "path to adapter manifest YAML (empty = built-in defaults)")
 
 	c.BlockMinSev = math.NaN() // sentinel: use profile default
 	flag.Float64Var(&c.BlockMinSev, "block-min-sev", math.NaN(), "only allow BLOCK if severity >= this (NaN => from profile, 0 disables)")
@@ -388,20 +392,9 @@ func applyProfileDefaults(c *cfg, p profile) {
 	if c.BlockAt == 0 {
 		c.BlockAt = p.BlockAt
 	}
-	if c.SoftRate == 0 {
-		c.SoftRate = p.SoftRate
-	}
-	if c.SoftBurst == 0 {
-		c.SoftBurst = p.SoftBurst
-	}
+	// TTLs: from policy rules (set before applyProfileDefaults) or profile defaults.
 	if c.SoftTTL == 0 {
 		c.SoftTTL = p.SoftTTL
-	}
-	if c.HardRate == 0 {
-		c.HardRate = p.HardRate
-	}
-	if c.HardBurst == 0 {
-		c.HardBurst = p.HardBurst
 	}
 	if c.HardTTL == 0 {
 		c.HardTTL = p.HardTTL
@@ -409,9 +402,7 @@ func applyProfileDefaults(c *cfg, p profile) {
 	if c.BlockTTL == 0 {
 		c.BlockTTL = p.BlockTTL
 	}
-	if c.Cooldown == 0 {
-		c.Cooldown = p.Cooldown
-	}
+	// Cooldown is populated from the adapter manifest in kliq.go after this call.
 	if math.IsNaN(c.BlockMinSev) {
 		c.BlockMinSev = p.BlockMinSev
 	}

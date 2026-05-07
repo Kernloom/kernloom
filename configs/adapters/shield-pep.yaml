@@ -1,0 +1,30 @@
+# Shield PEP Adapter Manifest
+#
+# This file declares the Shield-specific parameters for each abstract capability.
+# These are PEP implementation details — they do NOT belong in the PolicyPack.
+# The PolicyPack says "rate_limit via network.rate_limit_source";
+# this manifest says "rate_limit means 20 pps / 40 burst for the soft level".
+#
+# Usage:
+#   sudo kliq --policy-file=configs/policies/ziti-controller.yaml \
+#             --adapter-config=configs/adapters/shield-pep.yaml
+#
+# These defaults match the former ziti-controller profile values.
+
+kind: AdapterManifest
+adapter: shield-pep
+version: "1"
+
+capabilities:
+  network.rate_limit_source:
+    params:
+      soft:
+        rate_pps: 20
+        burst:    40
+      hard:
+        rate_pps: 5
+        burst:    10
+
+  network.block_source:
+    params:
+      cooldown: "5s"
