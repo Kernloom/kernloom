@@ -65,19 +65,11 @@ type Spec struct {
 	// approval. In managed mode Forge can further restrict these.
 	Autonomy AutonomySpec `yaml:"autonomy"`
 
-	// Heuristics consolidates all PDP (kliq) evaluation parameters: signal
-	// thresholds, weights, FSM escalation, anti-flap, block gate, non-compliance.
-	// These are PDP-internal and do not belong in the adapter manifest.
-	Heuristics HeuristicsSpec `yaml:"heuristics"`
-
 	// Rules express the enforcement policy as when/then pairs:
 	// "when the FSM reaches level X, apply abstract action Y via capability Z".
 	// The PDP evaluates rules and the PEP adapter translates the abstract action
 	// into its concrete implementation.
 	Rules []RuleSpec `yaml:"rules"`
-
-	// Graph covers graph learning and freeze-enforcement policy.
-	Graph GraphSpec `yaml:"graph"`
 
 	// Exports configures where kliq sends telemetry, decisions and receipts.
 	// All targets are disabled by default in standalone mode.
@@ -101,61 +93,6 @@ type AutonomySpec struct {
 	// AllowLocalBlock permits block decisions without Forge approval.
 	// When false MaxAction is effectively capped at rate_limit.
 	AllowLocalBlock bool `yaml:"allow_local_block"`
-}
-
-// HeuristicsSpec consolidates all PDP evaluation parameters.
-type HeuristicsSpec struct {
-	// Signal engine baseline trigger levels. Autotune will override these
-	// once enough samples are collected; these are the cold-start defaults.
-	PPSTrigger  float64     `yaml:"pps_trigger"`
-	SynTrigger  float64     `yaml:"syn_trigger"`
-	ScanTrigger float64     `yaml:"scan_trigger"`
-	Weights     WeightsSpec `yaml:"weights"`
-
-	// Progressive enforcement defines how the FSM escalates through levels.
-	Progressive ProgressiveSpec `yaml:"progressive_enforcement"`
-
-	// NonCompliance defines escalation for sources that ignore rate limits.
-	NonCompliance NonComplianceSpec `yaml:"non_compliance"`
-}
-
-// WeightsSpec controls how each signal type contributes to the composite severity.
-type WeightsSpec struct {
-	PPS  float64 `yaml:"pps"`
-	Syn  float64 `yaml:"syn"`
-	Scan float64 `yaml:"scan"`
-	// Cap is the maximum composite severity score (e.g. 3.0).
-	Cap float64 `yaml:"cap"`
-}
-
-// ProgressiveSpec defines FSM escalation thresholds and guard conditions.
-type ProgressiveSpec struct {
-	// FSM escalation thresholds (strike counts — PDP internal).
-	SoftAt  int `yaml:"soft_at"`
-	HardAt  int `yaml:"hard_at"`
-	BlockAt int `yaml:"block_at"`
-
-	// Anti-flap: consecutive ticks required before escalating or de-escalating.
-	UpNeed   int `yaml:"up_need"`
-	DownNeed int `yaml:"down_need"`
-
-	// Block gate: the FSM only transitions to BLOCK if severity has been above
-	// BlockMinSev for at least BlockMinDur. Prevents block on transient spikes.
-	BlockMinSev float64  `yaml:"block_min_sev"`
-	BlockMinDur Duration `yaml:"block_min_dur"`
-
-	// Minimum time the FSM must hold a level before de-escalating.
-	MinHoldSoft Duration `yaml:"min_hold_soft"`
-	MinHoldHard Duration `yaml:"min_hold_hard"`
-}
-
-// NonComplianceSpec defines escalation for sources that continue sending
-// traffic despite an active rate limit.
-type NonComplianceSpec struct {
-	At    int     `yaml:"at"`
-	Drop  float64 `yaml:"drop"`
-	Sev   float64 `yaml:"sev"`
-	Reset float64 `yaml:"reset"`
 }
 
 // RuleSpec expresses a single enforcement rule as a when/then pair.
@@ -186,37 +123,6 @@ type ThenSpec struct {
 	TTL Duration `yaml:"ttl,omitempty"`
 	// Params are optional capability-specific parameters (passed to the adapter).
 	Params map[string]string `yaml:"params,omitempty"`
-}
-
-// GraphSpec covers graph learning and freeze-enforcement policy.
-type GraphSpec struct {
-	Enabled   bool               `yaml:"enabled"`
-	Mode      string             `yaml:"mode"`
-	Store     string             `yaml:"store,omitempty"`
-	Promotion GraphPromotionSpec `yaml:"promotion"`
-	Freeze    GraphFreezeSpec    `yaml:"freeze"`
-	Exclude   GraphExcludeSpec   `yaml:"exclude,omitempty"`
-}
-
-type GraphPromotionSpec struct {
-	MinSeenCount int      `yaml:"min_seen_count"`
-	MinWindows   int      `yaml:"min_windows"`
-	MinAge       Duration `yaml:"min_age"`
-	ExpireTTL    Duration `yaml:"expire_ttl,omitempty"`
-}
-
-type GraphFreezeSpec struct {
-	Action              string   `yaml:"action"`
-	TTL                 Duration `yaml:"ttl"`
-	MaxAction           string   `yaml:"max_action"`
-	AllowBlock          bool     `yaml:"allow_block"`
-	MinSeverityForBlock int      `yaml:"min_severity_for_block"`
-}
-
-type GraphExcludeSpec struct {
-	SourceCIDRs []string `yaml:"source_cidrs,omitempty"`
-	Broadcast   bool     `yaml:"broadcast"`
-	Loopback    bool     `yaml:"loopback"`
 }
 
 // ExportsSpec configures telemetry export destinations.
@@ -267,20 +173,9 @@ func (p *PolicyPack) Validate() error {
 	if p.Metadata.Name == "" {
 		return fmt.Errorf("metadata.name is required")
 	}
-	if p.Spec.Heuristics.PPSTrigger <= 0 {
-		return fmt.Errorf("spec.heuristics.pps_trigger must be > 0")
-	}
-	prog := p.Spec.Heuristics.Progressive
-	if prog.SoftAt <= 0 || prog.HardAt <= 0 || prog.BlockAt <= 0 {
-		return fmt.Errorf("spec.heuristics.progressive_enforcement.soft_at, hard_at, block_at must all be > 0")
-	}
 	validActions := map[string]bool{"observe": true, "signal": true, "rate_limit": true, "block": true, "": true}
 	if !validActions[p.Spec.Autonomy.MaxAction] {
 		return fmt.Errorf("spec.autonomy.max_action %q is not valid (observe|signal|rate_limit|block)", p.Spec.Autonomy.MaxAction)
-	}
-	validModes := map[string]bool{"learn": true, "frozen-observe": true, "frozen-enforce": true, "": true}
-	if !validModes[p.Spec.Graph.Mode] {
-		return fmt.Errorf("spec.graph.mode %q is not valid (learn|frozen-observe|frozen-enforce)", p.Spec.Graph.Mode)
 	}
 	if len(p.Spec.Rules) == 0 {
 		return fmt.Errorf("spec.rules must contain at least one rule")

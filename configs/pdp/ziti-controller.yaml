@@ -1,0 +1,87 @@
+# PDPConfig — Kernloom IQ
+#
+# Everything kliq needs to operate: signal engine, progressive enforcement,
+# graph learning, and Shield PEP adapter parameters.
+#
+# This is NOT the policy (what to enforce) — that is configs/policies/ziti-controller.yaml.
+# Forge will distribute both files, signed, to registered nodes.
+#
+# Usage (all files):
+#   sudo kliq \
+#     --pdp-config=configs/pdp/ziti-controller.yaml \
+#     --policy-file=configs/policies/ziti-controller.yaml
+#
+# Standalone (built-in profile, no files):
+#   sudo kliq --profile=ziti-controller
+
+apiVersion: kernloom.io/v1alpha1
+kind: PDPConfig
+metadata:
+  name: ziti-controller
+  description: "Public OpenZiti controller / enrolment endpoint"
+
+spec:
+  # --- Signal engine ---
+  # Cold-start defaults; autotune overwrites these as it learns normal traffic.
+  signal_engine:
+    pps_trigger:  80.0
+    syn_trigger:  20.0
+    scan_trigger: 5.0
+    weights:
+      pps:  0.35
+      syn:  0.40
+      scan: 0.25
+      cap:  3.0
+
+  # --- Progressive enforcement ---
+  # Controls when kliq escalates (observe → soft → hard → block) and
+  # how long it holds each level before de-escalating.
+  progressive_enforcement:
+    soft_at:       1
+    hard_at:       3
+    block_at:      9
+    up_need:       2
+    down_need:     6
+    block_min_sev: 2.0
+    block_min_dur: "15s"
+    min_hold_soft: "15s"
+    min_hold_hard: "30s"
+
+  # --- Non-compliance ---
+  # Escalation for sources that keep sending traffic despite an active rate limit.
+  non_compliance:
+    at:    8
+    drop:  1.0
+    sev:   1.5
+    reset: 0.30
+
+  # --- Graph ---
+  # Graph learning and freeze-violation detection.
+  # The enforcement action for violations is in the PolicyPack rules.
+  graph:
+    enabled: false
+    mode: learn
+    store: /var/lib/kernloom/iq/graph.db
+    promotion:
+      min_seen_count: 5
+      min_windows:    3
+      min_age:        "10m"
+      expire_ttl:     "720h"
+    freeze:
+      max_action:            rate_limit
+      allow_block:           false
+      min_severity_for_block: 70
+    exclude:
+      broadcast: true
+      loopback:  true
+
+  # --- Adapters ---
+  # Concrete parameters for built-in PEP adapters.
+  # These translate abstract policy actions into Shield-specific values.
+  adapters:
+    shield_pep:
+      soft_rate_pps: 20
+      soft_burst:    40
+      hard_rate_pps: 5
+      hard_burst:    10
+      cooldown:      "5s"

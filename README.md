@@ -49,7 +49,14 @@ Official docs: https://kernloom.com/
 - replace the locally configured `LocalPolicy` with Forge-issued, cryptographically signed policy
 - receive enforcement receipts back from each node for fleet-wide audit
 
-Until Forge is available, `kliq` operates in **standalone mode**: policy is set entirely through CLI flags and built-in profiles. The `LocalPolicy` struct in `pkg/decisionengine/engine.go` is intentionally forward-compatible with the Forge PolicyPack format.
+Until Forge is available, `kliq` operates in **standalone mode**: policy is configured through CLI flags, built-in profiles, or local YAML files. The configuration is split into two Forge-compatible files:
+
+| File | Kind | Controls |
+|---|---|---|
+| `configs/policies/*.yaml` | `LocalPolicyPack` | **What** to enforce: abstract rules, capability requirements, autonomy gates. PEP-agnostic, Forge-distributable. |
+| `configs/pdp/*.yaml` | `PDPConfig` | **How** kliq operates: signal engine thresholds, progressive enforcement, graph learning, Shield PEP adapter parameters. Also Forge-distributable. |
+
+When Forge is integrated it will sign and distribute both files to registered `kliq` nodes.
 
 ---
 
@@ -83,7 +90,9 @@ kernloom/
     │   ├── reason/             # standardised reason code constants
     │   ├── capability/         # Capability model
     │   ├── graph/              # GraphEdge, EdgeState, PromotionConfig
-    │   └── fsm/                # FSM levels, State, Config, Advance()
+    │   ├── fsm/                # FSM levels, State, Config, Advance()
+    │   ├── policy/             # LocalPolicyPack schema + loader (abstract enforcement rules)
+    │   └── pdp/                # PDPConfig schema + loader (signal engine, progressive enforcement, graph, adapters)
     ├── adapterruntime/         # Adapter interface, EventBus, well-known capabilities
     ├── adapters/
     │   ├── graphlearner/       # Graph learning adapter
@@ -379,27 +388,76 @@ kliq graph deny-ip     <ip> [store] [node-id]
 
 | Flag | Default | Description |
 |---|---|---|
+| `--mode` | `standalone` | `standalone` or `managed` (Forge integration pending) |
+| `--policy-file` | `""` | Path to `LocalPolicyPack` YAML — abstract enforcement rules |
+| `--pdp-config` | `""` | Path to `PDPConfig` YAML — signal engine, progressive enforcement, graph, adapter params |
+| `--profile` | `ziti-controller` | Built-in PDP behavior profile; ignored when `--pdp-config` is set |
 | `--dry-run` | `true` | Observe only; no eBPF map writes |
 | `--interval` | `1s` | Telemetry poll interval |
-| `--profile` | `ziti-controller` | Initial config profile (see profiles.go) |
 | `--state-file` | `/var/lib/kernloom/iq/state.json` | Autotune state |
 | `--whitelist` | `/etc/kernloom/iq/whitelist.txt` | FSM whitelist (bypasses enforcement) |
 | `--feedback-file` | `/var/lib/kernloom/iq/feedback.json` | Temporary exemptions |
 | `--bootstrap` | `true` | Accelerated autotune at startup |
-| `--graph` | `false` | Enable graph learning |
-| `--graph-mode` | `learn` | `learn`, `frozen-observe`, `frozen-enforce` |
-| `--graph-node-id` | hostname | Node identifier in graph DB |
-| `--graph-store` | `/var/lib/kernloom/iq/graph.db` | SQLite graph database |
-| `--graph-min-seen` | `5` | Min observations before promotion to learned |
-| `--graph-min-windows` | `3` | Min distinct tick windows before promotion |
-| `--graph-min-age` | `10m` | Min edge age before promotion |
-| `--graph-expire-ttl` | `720h` | Idle TTL before expiry (0 = disabled) |
-| `--graph-exclude-source-cidrs` | `""` | CIDRs excluded from graph learning |
-| `--graph-freeze-action` | `signal` | `signal`, `rate_limit`, or `block` |
-| `--graph-freeze-allow-block` | `false` | Permit block in freeze policy |
-| `--graph-freeze-min-severity` | `70` | Min score for freeze block escalation |
+| `--graph` | `false` | Enable graph learning (CLI override; prefer `pdp.graph.enabled`) |
+| `--graph-mode` | `learn` | `learn`, `frozen-observe`, `frozen-enforce` (CLI override) |
 
 Full flag list: `kliq --help`
+
+### Configuration files (preferred over flags)
+
+**Two files per node role**, both forward-compatible with Kernloom Forge:
+
+```bash
+# Full file-based configuration:
+sudo kliq \
+  --pdp-config=configs/pdp/ziti-controller.yaml \
+  --policy-file=configs/policies/ziti-controller.yaml
+
+# Standalone (built-in profile, no files):
+sudo kliq --profile=ziti-controller
+```
+
+| File | `kind` | What it controls |
+|---|---|---|
+| `configs/policies/ziti-controller.yaml` | `LocalPolicyPack` | Autonomy, enforcement rules (when FSM level → action + capability + TTL), exports |
+| `configs/pdp/ziti-controller.yaml` | `PDPConfig` | Signal engine, progressive enforcement, graph learning, Shield adapter params |
+
+The **PolicyPack** is PEP-agnostic — it references abstract capability IDs (`network.rate_limit_source`, `network.block_source`) not Shield-specific values. The concrete rate/burst values live in `PDPConfig.adapters.shield_pep`.
+
+### PolicyPack — enforcement rules
+
+```yaml
+rules:
+  - name: soft-rate-limit
+    when: {fsm_level: soft}
+    then: {action: rate_limit, capability: network.rate_limit_source, ttl: "60s"}
+  - name: block
+    when: {fsm_level: block}
+    then: {action: block, capability: network.block_source, ttl: "30m"}
+  - name: graph-freeze-violation
+    when: {signal: graph.new_edge_after_freeze}
+    then: {action: signal, capability: signal.emit_local_risk, ttl: "10m"}
+```
+
+### PDPConfig — progressive enforcement + Shield adapter
+
+```yaml
+progressive_enforcement:    # was: fsm (renamed for clarity)
+  soft_at: 1
+  hard_at: 3
+  block_at: 9
+  block_min_sev: 2.0
+  block_min_dur: "15s"
+  ...
+
+adapters:
+  shield_pep:               # Shield-specific rate/burst values
+    soft_rate_pps: 20
+    soft_burst:    40
+    hard_rate_pps: 5
+    hard_burst:    10
+    cooldown:      "5s"
+```
 
 ### Built-in profiles
 

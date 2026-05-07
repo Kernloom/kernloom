@@ -3,43 +3,66 @@
 
 package main
 
-import "github.com/adrianenderlin/kernloom/pkg/core/policy"
+import (
+	"github.com/adrianenderlin/kernloom/pkg/adapters/shieldpep"
+	"github.com/adrianenderlin/kernloom/pkg/core/pdp"
+	"github.com/adrianenderlin/kernloom/pkg/core/policy"
+)
 
-// policyPackToProfile converts the Heuristics section of a PolicyPack into the
-// internal profile struct. Only PDP-internal parameters live here (signal
-// thresholds, FSM escalation, anti-flap, block gate, non-compliance). PEP-specific
-// parameters (rate_pps, burst, cooldown) come from the adapter manifest.
-func policyPackToProfile(pp *policy.PolicyPack) profile {
-	h := pp.Spec.Heuristics
-	prog := h.Progressive
-	nc := h.NonCompliance
+// pdpConfigToProfile converts a PDPConfig into the internal profile struct.
+func pdpConfigToProfile(c *pdp.Config) profile {
+	s := c.Spec
+	pe := s.ProgressiveEnforcement
 	return profile{
-		Name:         pp.Metadata.Name,
-		TrigPPS:      h.PPSTrigger,
-		TrigSyn:      h.SynTrigger,
-		TrigScan:     h.ScanTrigger,
-		WPPS:         h.Weights.PPS,
-		WSyn:         h.Weights.Syn,
-		WScan:        h.Weights.Scan,
-		SevCap:       h.Weights.Cap,
-		SoftAt:       prog.SoftAt,
-		HardAt:       prog.HardAt,
-		BlockAt:      prog.BlockAt,
-		BlockMinSev:  prog.BlockMinSev,
-		BlockMinDur:  prog.BlockMinDur.D,
-		UpNeed:       prog.UpNeed,
-		DownNeed:     prog.DownNeed,
-		MinHoldSoft:  prog.MinHoldSoft.D,
-		MinHoldHard:  prog.MinHoldHard.D,
-		NonCompAt:    nc.At,
-		NonCompDrop:  nc.Drop,
-		NonCompSev:   nc.Sev,
-		NonCompReset: nc.Reset,
+		Name:         c.Metadata.Name,
+		TrigPPS:      s.SignalEngine.PPSTrigger,
+		TrigSyn:      s.SignalEngine.SynTrigger,
+		TrigScan:     s.SignalEngine.ScanTrigger,
+		WPPS:         s.SignalEngine.Weights.PPS,
+		WSyn:         s.SignalEngine.Weights.Syn,
+		WScan:        s.SignalEngine.Weights.Scan,
+		SevCap:       s.SignalEngine.Weights.Cap,
+		SoftAt:       pe.SoftAt,
+		HardAt:       pe.HardAt,
+		BlockAt:      pe.BlockAt,
+		BlockMinSev:  pe.BlockMinSev,
+		BlockMinDur:  pe.BlockMinDur.D,
+		UpNeed:       pe.UpNeed,
+		DownNeed:     pe.DownNeed,
+		MinHoldSoft:  pe.MinHoldSoft.D,
+		MinHoldHard:  pe.MinHoldHard.D,
+		NonCompAt:    s.NonCompliance.At,
+		NonCompDrop:  s.NonCompliance.Drop,
+		NonCompSev:   s.NonCompliance.Sev,
+		NonCompReset: s.NonCompliance.Reset,
 	}
 }
 
+// adapterParamsFromPDPConfig extracts Shield PEP adapter parameters from the
+// PDPConfig. Returns defaults for any field that is zero (not configured).
+func adapterParamsFromPDPConfig(c *pdp.Config) shieldpep.CapabilityParams {
+	p := shieldpep.DefaultCapabilityParams()
+	a := c.Spec.Adapters.ShieldPEP
+	if a.SoftRatePPS > 0 {
+		p.SoftRatePPS = a.SoftRatePPS
+	}
+	if a.SoftBurst > 0 {
+		p.SoftBurst = a.SoftBurst
+	}
+	if a.HardRatePPS > 0 {
+		p.HardRatePPS = a.HardRatePPS
+	}
+	if a.HardBurst > 0 {
+		p.HardBurst = a.HardBurst
+	}
+	if a.Cooldown.D > 0 {
+		p.Cooldown = a.Cooldown.D
+	}
+	return p
+}
+
 // rulesFromPolicyPack extracts enforcement TTLs and action types from the
-// Rules section and writes them into cfg. The PEP-specific rate/burst values
+// Rules section and writes them into cfg. PEP-specific rate/burst values
 // are NOT here — those come from the adapter manifest.
 func rulesFromPolicyPack(pp *policy.PolicyPack, c *cfg) {
 	for _, rule := range pp.Spec.Rules {
@@ -68,62 +91,53 @@ func rulesFromPolicyPack(pp *policy.PolicyPack, c *cfg) {
 	}
 }
 
-// applyPolicyPackToCfg writes all policy-controlled fields from a PolicyPack
-// into cfg: autonomy gates and graph learning/freeze configuration.
-// Called before applyProfileDefaults so that explicit CLI flag overrides
-// still win for any field left at its zero value after both calls.
+// applyPolicyPackToCfg writes policy-controlled fields from a PolicyPack into
+// cfg. Only autonomy gates live here — graph config moved to PDPConfig.
 func applyPolicyPackToCfg(pp *policy.PolicyPack, c *cfg) {
 	s := pp.Spec
-
-	// --- Autonomy ---
 	c.DryRun = s.Autonomy.DryRun
 	if s.Autonomy.MaxAction != "" {
 		c.GraphFreezeMaxAction = s.Autonomy.MaxAction
 	}
 	c.GraphFreezeAllowBlock = s.Autonomy.AllowLocalBlock
+}
 
-	// --- Graph ---
-	if s.Graph.Enabled {
+// applyPDPGraphToCfg writes graph learning and freeze configuration from a
+// PDPConfig into cfg. Separated from pdpConfigToProfile because graph params
+// are operational config, not profile (signal engine / FSM) behavior.
+func applyPDPGraphToCfg(dc *pdp.Config, c *cfg) {
+	g := dc.Spec.Graph
+	if g.Enabled {
 		c.GraphEnabled = true
 	}
-	if s.Graph.Mode != "" {
-		c.GraphMode = s.Graph.Mode
+	if g.Mode != "" {
+		c.GraphMode = g.Mode
 	}
-	if s.Graph.Store != "" {
-		c.GraphStorePath = s.Graph.Store
+	if g.Store != "" {
+		c.GraphStorePath = g.Store
 	}
-	if s.Graph.Promotion.MinSeenCount > 0 {
-		c.GraphMinSeenCount = uint64(s.Graph.Promotion.MinSeenCount)
+	if g.Promotion.MinSeenCount > 0 {
+		c.GraphMinSeenCount = uint64(g.Promotion.MinSeenCount)
 	}
-	if s.Graph.Promotion.MinWindows > 0 {
-		c.GraphMinWindows = s.Graph.Promotion.MinWindows
+	if g.Promotion.MinWindows > 0 {
+		c.GraphMinWindows = g.Promotion.MinWindows
 	}
-	if s.Graph.Promotion.MinAge.D > 0 {
-		c.GraphMinAge = s.Graph.Promotion.MinAge.D
+	if g.Promotion.MinAge.D > 0 {
+		c.GraphMinAge = g.Promotion.MinAge.D
 	}
-	if s.Graph.Promotion.ExpireTTL.D > 0 {
-		c.GraphExpireTTL = s.Graph.Promotion.ExpireTTL.D
+	if g.Promotion.ExpireTTL.D > 0 {
+		c.GraphExpireTTL = g.Promotion.ExpireTTL.D
 	}
-
-	// Graph freeze enforcement
-	if s.Graph.Freeze.Action != "" {
-		c.GraphFreezeAction = s.Graph.Freeze.Action
+	if g.Freeze.MaxAction != "" {
+		c.GraphFreezeMaxAction = g.Freeze.MaxAction
 	}
-	if s.Graph.Freeze.TTL.D > 0 {
-		c.GraphFreezeTTL = s.Graph.Freeze.TTL.D
+	c.GraphFreezeAllowBlock = g.Freeze.AllowBlock
+	if g.Freeze.MinSeverityForBlock > 0 {
+		c.GraphFreezeMinSeverity = g.Freeze.MinSeverityForBlock
 	}
-	if s.Graph.Freeze.MaxAction != "" {
-		c.GraphFreezeMaxAction = s.Graph.Freeze.MaxAction
-	}
-	c.GraphFreezeAllowBlock = s.Graph.Freeze.AllowBlock
-	if s.Graph.Freeze.MinSeverityForBlock > 0 {
-		c.GraphFreezeMinSeverity = s.Graph.Freeze.MinSeverityForBlock
-	}
-
-	// Graph exclusions
-	if len(s.Graph.Exclude.SourceCIDRs) > 0 {
+	if len(g.Exclude.SourceCIDRs) > 0 {
 		joined := ""
-		for i, cidr := range s.Graph.Exclude.SourceCIDRs {
+		for i, cidr := range g.Exclude.SourceCIDRs {
 			if i > 0 {
 				joined += ","
 			}
@@ -131,10 +145,10 @@ func applyPolicyPackToCfg(pp *policy.PolicyPack, c *cfg) {
 		}
 		c.GraphExcludeSourceCIDR = joined
 	}
-	if s.Graph.Exclude.Broadcast {
+	if g.Exclude.Broadcast {
 		c.GraphExcludeBcast = true
 	}
-	if s.Graph.Exclude.Loopback {
+	if g.Exclude.Loopback {
 		c.GraphExcludeLoopback = true
 	}
 }

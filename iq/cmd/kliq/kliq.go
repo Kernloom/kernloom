@@ -52,6 +52,7 @@ import (
 	"github.com/adrianenderlin/kernloom/pkg/core/fsm"
 	"github.com/adrianenderlin/kernloom/pkg/core/graph"
 	"github.com/adrianenderlin/kernloom/pkg/core/observation"
+	corepdp "github.com/adrianenderlin/kernloom/pkg/core/pdp"
 	corepolicy "github.com/adrianenderlin/kernloom/pkg/core/policy"
 	"github.com/adrianenderlin/kernloom/pkg/core/signal"
 	"github.com/adrianenderlin/kernloom/pkg/decisionengine"
@@ -109,34 +110,36 @@ func main() {
 		log.Fatalf("unknown --mode %q: must be standalone or managed", c.Mode)
 	}
 
-	// Policy resolution: --policy-file takes precedence over --profile.
+	// PDP config: signal engine + progressive enforcement + graph + adapter params.
+	// --pdp-config file takes precedence over --profile.
 	var p profile
+	if c.PDPConfig != "" {
+		pdpc, err := corepdp.LoadFromFile(c.PDPConfig)
+		if err != nil {
+			log.Fatalf("load pdp config: %v", err)
+		}
+		kliqLog.Printf("PDP config loaded: file=%s name=%s", c.PDPConfig, pdpc.Metadata.Name)
+		p = pdpConfigToProfile(pdpc)
+		applyPDPGraphToCfg(pdpc, &c)
+		c.adapterParams = adapterParamsFromPDPConfig(pdpc)
+	} else {
+		p = profileByName(c.ProfileName)
+		c.adapterParams = shieldpep.DefaultCapabilityParams()
+	}
+
+	// Policy: abstract enforcement rules (autonomy, when/then, exports).
+	// Optional — without a policy file, profile defaults + CLI flags apply.
 	if c.PolicyFile != "" {
 		pp, err := corepolicy.LoadFromFile(c.PolicyFile)
 		if err != nil {
 			log.Fatalf("load policy file: %v", err)
 		}
 		kliqLog.Printf("Policy loaded: file=%s name=%s", c.PolicyFile, pp.Metadata.Name)
-		p = policyPackToProfile(pp)
 		applyPolicyPackToCfg(pp, &c)
 		rulesFromPolicyPack(pp, &c)
-	} else {
-		p = profileByName(c.ProfileName)
 	}
-	applyProfileDefaults(&c, p)
 
-	// Load adapter manifest for PEP-specific capability parameters (rate/burst/cooldown).
-	// These are Shield-specific and do NOT belong in the PolicyPack.
-	c.adapterParams = shieldpep.DefaultCapabilityParams()
-	if c.AdapterConfig != "" {
-		caps, err := shieldpep.LoadManifest(c.AdapterConfig)
-		if err != nil {
-			log.Fatalf("load adapter manifest: %v", err)
-		}
-		c.adapterParams = caps
-		kliqLog.Printf("Adapter manifest loaded: %s (soft=%dpps hard=%dpps cooldown=%s)",
-			c.AdapterConfig, caps.SoftRatePPS, caps.HardRatePPS, caps.Cooldown)
-	}
+	applyProfileDefaults(&c, p)
 	c.Cooldown = c.adapterParams.Cooldown
 
 	// Load persisted state (may override trig-*)

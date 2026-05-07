@@ -1,73 +1,44 @@
 # LocalPolicyPack — Kernloom IQ
 #
-# Abstract, PEP-agnostic enforcement policy for a public OpenZiti controller.
-# PEP-specific parameters (rate_pps, burst, cooldown) are NOT here —
-# they live in the adapter manifest (configs/adapters/shield-pep.yaml).
+# Abstract, PEP-agnostic enforcement policy.
+# Contains ONLY: autonomy gates, capability requirements, enforcement rules, exports.
+# No signal thresholds, no FSM params, no graph config, no rate/burst values.
+#
+# What belongs where:
+#   enforcement rules + autonomy  → this file (PolicyPack)
+#   signal engine + FSM + graph   → configs/pdp/ziti-controller.yaml (PDPConfig)
+#   rate/burst/cooldown           → configs/adapters/shield-pep.yaml (AdapterManifest)
 #
 # Usage:
-#   sudo kliq --policy-file=configs/policies/ziti-controller.yaml
-#   sudo kliq --policy-file=configs/policies/ziti-controller.yaml \
-#             --adapter-config=configs/adapters/shield-pep.yaml
+#   sudo kliq \
+#     --pdp-config=configs/pdp/ziti-controller.yaml \
+#     --policy-file=configs/policies/ziti-controller.yaml \
+#     --adapter-config=configs/adapters/shield-pep.yaml
 
 apiVersion: kernloom.io/v1alpha1
 kind: LocalPolicyPack
 metadata:
   name: ziti-controller
-  description: "Public OpenZiti controller / enrolment endpoint. SYN-sensitive, cautious blocking."
+  description: "Public OpenZiti controller / enrolment endpoint"
   labels:
     role: ziti-controller
     environment: production
 
 spec:
-  # Forge: which nodes this policy targets (informational in standalone mode)
   target_selector:
     match_labels:
       role: ziti-controller
 
-  # Abstract capabilities this policy requires.
-  # Forge validates these against the node's registered PEP adapter capabilities.
   capabilities_required:
     - network.observe_flow
     - network.rate_limit_source
     - network.block_source
 
-  # Autonomy: what kliq is permitted to enforce locally without Forge approval.
   autonomy:
     dry_run: false
     max_action: block
     allow_local_block: true
 
-  # Heuristics: PDP-internal evaluation parameters.
-  # Signal thresholds, FSM escalation, anti-flap, block gate.
-  # These are NOT PEP-specific — they control how kliq evaluates signals.
-  heuristics:
-    pps_trigger:  80.0
-    syn_trigger:  20.0
-    scan_trigger: 5.0
-    weights:
-      pps:  0.35
-      syn:  0.40
-      scan: 0.25
-      cap:  3.0
-    progressive_enforcement:
-      soft_at:       1
-      hard_at:       3
-      block_at:      9
-      up_need:       2
-      down_need:     6
-      block_min_sev: 2.0
-      block_min_dur: "15s"
-      min_hold_soft: "15s"
-      min_hold_hard: "30s"
-    non_compliance:
-      at:    8
-      drop:  1.0
-      sev:   1.5
-      reset: 0.30
-
-  # Rules: when [condition] → then [abstract action via capability].
-  # The PDP evaluates the condition; the PEP adapter implements the action.
-  # Concrete parameters (rate_pps, burst) are in the adapter manifest.
   rules:
     - name: soft-rate-limit
       when:
@@ -101,27 +72,6 @@ spec:
         capability: signal.emit_local_risk
         ttl: "10m"
 
-  # Graph learning and freeze enforcement.
-  graph:
-    enabled: false
-    mode: learn
-    store: /var/lib/kernloom/iq/graph.db
-    promotion:
-      min_seen_count: 5
-      min_windows:    3
-      min_age:        "10m"
-      expire_ttl:     "720h"
-    freeze:
-      action:                signal
-      ttl:                   "10m"
-      max_action:            rate_limit
-      allow_block:           false
-      min_severity_for_block: 70
-    exclude:
-      broadcast: true
-      loopback:  true
-
-  # Export destinations (stubs — enabled when Correlate/Forge are available).
   exports:
     correlate:
       enabled: false

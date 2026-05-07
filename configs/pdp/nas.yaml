@@ -1,0 +1,60 @@
+# PDPConfig — NAS (Synology, QNAP, TrueNAS)
+
+apiVersion: kernloom.io/v1alpha1
+kind: PDPConfig
+metadata:
+  name: nas
+  description: "NAS: burst-tolerant for file transfers, strict on SYN/scan"
+
+spec:
+  signal_engine:
+    pps_trigger:  1500.0
+    syn_trigger:  30.0
+    scan_trigger: 8.0
+    weights:
+      pps:  0.30
+      syn:  0.35
+      scan: 0.35
+      cap:  3.0
+
+  progressive_enforcement:
+    soft_at:       2
+    hard_at:       5
+    block_at:      14
+    up_need:       2
+    down_need:     8
+    block_min_sev: 2.5
+    block_min_dur: "30s"
+    min_hold_soft: "1m"
+    min_hold_hard: "5m"
+
+  non_compliance:
+    at:    10
+    drop:  2.0
+    sev:   1.8
+    reset: 0.30
+
+  graph:
+    enabled: false
+    mode: learn
+    store: /var/lib/kernloom/iq/graph.db
+    promotion:
+      min_seen_count: 5
+      min_windows:    3
+      min_age:        "10m"
+      expire_ttl:     "720h"
+    freeze:
+      max_action:            rate_limit
+      allow_block:           false
+      min_severity_for_block: 70
+    exclude:
+      broadcast: true
+      loopback:  true
+
+  adapters:
+    shield_pep:
+      soft_rate_pps: 600
+      soft_burst:    1500
+      hard_rate_pps: 150
+      hard_burst:    300
+      cooldown:      "30s"

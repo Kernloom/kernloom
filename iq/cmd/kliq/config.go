@@ -21,9 +21,10 @@ type cfg struct {
 	MinPPS   float64
 	MinSev   float64
 
-	// Mode + policy
+	// Mode + policy + pdp config
 	Mode       string // "standalone" or "managed"
-	PolicyFile string // path to LocalPolicyPack YAML; overrides --profile when set
+	PolicyFile string // path to LocalPolicyPack YAML (abstract enforcement rules)
+	PDPConfig  string // path to PDPConfig YAML (kliq signal engine + FSM behavior)
 
 	// Profiles + persistence
 	ProfileName string
@@ -116,10 +117,8 @@ type cfg struct {
 	// Cooldown: min time between FSM level changes. Set from adapter manifest.
 	Cooldown time.Duration
 
-	// AdapterConfig is an optional path to an adapter manifest YAML file.
-	// If empty, built-in defaults from shieldpep.DefaultCapabilityParams() are used.
-	AdapterConfig string
-	// adapterParams holds the loaded adapter capability parameters.
+	// adapterParams holds the Shield PEP adapter capability parameters,
+	// loaded from PDPConfig.Adapters.ShieldPEP or DefaultCapabilityParams().
 	adapterParams shieldpep.CapabilityParams
 
 	// Block gating
@@ -227,8 +226,9 @@ func parseFlags() cfg {
 	flag.Float64Var(&c.MinSev, "min-sev", 0.0, "include candidates with severity >= min-sev")
 
 	flag.StringVar(&c.Mode, "mode", "standalone", `agent mode: standalone (local policy) or managed (Forge-managed; currently logs a warning and runs as standalone)`)
-	flag.StringVar(&c.PolicyFile, "policy-file", "", "path to a LocalPolicyPack YAML file; overrides --profile for enforcement parameters when set")
-	flag.StringVar(&c.ProfileName, "profile", "controller", "initial profile name (aliases apply; ignored when --policy-file is set)")
+	flag.StringVar(&c.PolicyFile, "policy-file", "", "path to a LocalPolicyPack YAML (abstract enforcement rules: autonomy, rules, graph, exports)")
+	flag.StringVar(&c.PDPConfig, "pdp-config", "", "path to a PDPConfig YAML (kliq signal engine + FSM behavior); overrides --profile when set")
+	flag.StringVar(&c.ProfileName, "profile", "controller", "built-in PDP behavior profile (ignored when --pdp-config is set)")
 	// Runtime state — mutable, not under IMA measurement.
 	flag.StringVar(&c.StatePath, "state-file", "/var/lib/kernloom/iq/state.json", "autotune state file (runtime, not IMA-attested)")
 	flag.DurationVar(&c.MaxStateAge, "max-state-age", 14*24*time.Hour, "ignore persisted state older than this (0 disables)")
@@ -309,8 +309,7 @@ func parseFlags() cfg {
 	flag.DurationVar(&c.SoftTTL, "soft-ttl", 0, "soft enforcement TTL (0 => from policy rule or profile)")
 	flag.DurationVar(&c.HardTTL, "hard-ttl", 0, "hard enforcement TTL (0 => from policy rule or profile)")
 	flag.DurationVar(&c.BlockTTL, "block-ttl", 0, "block TTL (0 => from policy rule or profile)")
-	// Rate/burst/cooldown come from the adapter manifest, not CLI flags.
-	flag.StringVar(&c.AdapterConfig, "adapter-config", "", "path to adapter manifest YAML (empty = built-in defaults)")
+	// Rate/burst/cooldown come from PDPConfig.adapters.shield_pep, not CLI flags.
 
 	c.BlockMinSev = math.NaN() // sentinel: use profile default
 	flag.Float64Var(&c.BlockMinSev, "block-min-sev", math.NaN(), "only allow BLOCK if severity >= this (NaN => from profile, 0 disables)")
