@@ -1,0 +1,65 @@
+name: Weekly dependency update
+
+on:
+  schedule:
+    - cron: '0 6 * * 1'  # Every Monday 06:00 UTC
+  workflow_dispatch:       # Allow manual trigger
+
+permissions:
+  contents: write
+
+jobs:
+  update-deps:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0   # Full history needed for tag detection
+
+      - name: Setup Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+
+      - name: Update Go dependencies (patch versions only)
+        run: |
+          go get -u=patch ./...
+          go mod tidy
+
+      - name: Run tests
+        run: go test ./...
+
+      - name: Check for dependency changes
+        id: changes
+        run: |
+          if git diff --quiet go.mod go.sum; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            echo "No dependency changes detected — skipping release."
+          else
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+            echo "Dependency changes detected:"
+            git diff --stat go.mod go.sum
+          fi
+
+      - name: Commit and tag new patch release
+        if: steps.changes.outputs.changed == 'true'
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          git add go.mod go.sum
+          git commit -m "chore(deps): weekly Go module update (patch)"
+
+          # Increment patch version from latest semver tag.
+          LATEST_TAG="$(git describe --tags --abbrev=0 2>/dev/null || echo 'v0.0.0')"
+          MAJOR="$(echo "$LATEST_TAG" | sed 's/v\([0-9]*\)\..*/\1/')"
+          MINOR="$(echo "$LATEST_TAG" | sed 's/v[0-9]*\.\([0-9]*\)\..*/\1/')"
+          PATCH="$(echo "$LATEST_TAG" | sed 's/v[0-9]*\.[0-9]*\.\([0-9]*\).*/\1/')"
+          NEW_TAG="v${MAJOR}.${MINOR}.$((PATCH + 1))"
+
+          echo "Latest tag: $LATEST_TAG  →  New tag: $NEW_TAG"
+          git tag "$NEW_TAG"
+          git push origin master
+          git push origin "$NEW_TAG"
