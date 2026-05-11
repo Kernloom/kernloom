@@ -11,7 +11,8 @@ package featureset
 type RuntimeProfile string
 
 const (
-	// ProfileKLShieldLight: XDP-only, no userspace IQ needed.
+	// ProfileKLShieldLight: XDP only. No kliq process needed or useful.
+	// Run klshield attach-xdp and manage deny/allow/RL via klshield CLI directly.
 	ProfileKLShieldLight RuntimeProfile = "klshield-light"
 	// ProfileDOSLight: source heuristic + global autotune. No graph or SQLite.
 	ProfileDOSLight RuntimeProfile = "dos-light"
