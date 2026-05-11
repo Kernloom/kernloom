@@ -11,10 +11,16 @@ spec:
     pps_trigger:  1500.0
     syn_trigger:  30.0
     scan_trigger: 8.0
+    # bps_trigger: per-source bytes/s that triggers BPS scoring.
+    # SMB/NFS transfers can reach 100+ MB/s legitimately, but a single source
+    # sustaining 80 MB/s (640 Mbit) is worth flagging — exfil or ransomware pattern.
+    # Autotune will refine this from observed traffic over time.
+    bps_trigger: 80000000  # 80 MB/s cold-start
     weights:
       pps:  0.30
       syn:  0.35
       scan: 0.35
+      bps:  0.20  # additive; large-packet floods and exfil show here, not in PPS
       cap:  3.0
 
   progressive_enforcement:
@@ -50,6 +56,14 @@ spec:
     exclude:
       broadcast: true
       loopback:  true
+
+  # --- Baseline ---
+  # NAS: file transfers are bursty but infrequent — conservative alpha keeps
+  # the baseline stable across long idle periods between transfer sessions.
+  baseline:
+    min_observations:    50
+    alpha:               0.02
+    deviation_threshold: 6.0
 
   adapters:
     shield_pep:

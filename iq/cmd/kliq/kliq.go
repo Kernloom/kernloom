@@ -34,10 +34,10 @@ package main
 
 import (
 	"context"
+	"flag"
 	"fmt"
 	"log"
 	"math"
-	"net"
 	"os"
 	ossignal "os/signal"
 	"sort"
@@ -88,16 +88,19 @@ type prevV6 struct {
 }
 
 func main() {
-	// Handle graph subcommands before flag parsing so they work standalone.
-	// e.g.: kliq graph status, kliq graph export, kliq graph freeze
+	// Handle subcommands before flag parsing so they work standalone.
+	const defaultDB        = "/var/lib/kernloom/iq/kliq.db"
+	const defaultStateFile = "/var/lib/kernloom/iq/state.json"
 	if handleGraphSubcommand(
-		"/var/lib/kernloom/iq/graph.db",                // default store path
-		"/opt/kernloom/attested/etc/frozen-graph.yaml", // default frozen output
-		"", // nodeID resolved inside
+		defaultDB,
+		"/opt/kernloom/attested/etc/frozen-graph.yaml",
+		"",
 	) {
 		return
 	}
-
+	if handleStatusSubcommand(defaultStateFile, defaultDB) {
+		return
+	}
 	c := parseFlags()
 
 	// Mode handling.
@@ -121,6 +124,7 @@ func main() {
 		kliqLog.Printf("PDP config loaded: file=%s name=%s", c.PDPConfig, pdpc.Metadata.Name)
 		p = pdpConfigToProfile(pdpc)
 		applyPDPGraphToCfg(pdpc, &c)
+		applyPDPBaselineToCfg(pdpc, &c)
 		c.adapterParams = adapterParamsFromPDPConfig(pdpc)
 	} else {
 		p = profileByName(c.ProfileName)
@@ -142,23 +146,33 @@ func main() {
 	applyProfileDefaults(&c, p)
 	c.Cooldown = c.adapterParams.Cooldown
 
-	// Load persisted state (may override trig-*)
+	// Collect flags the user explicitly set on the command line.
+	// flag.Visit only visits flags that were actually provided, not those
+	// left at their default values. State (autotune) must not override these.
+	explicitFlags := make(map[string]bool)
+	flag.Visit(func(f *flag.Flag) { explicitFlags[f.Name] = true })
+
+	// Load persisted autotune state.
+	// Priority: explicit CLI flag > state (learned) > PDPConfig/profile default.
 	var stFile *stateFile
 	if c.StatePath != "" {
 		if st, err := loadState(c.StatePath, c.MaxStateAge); err == nil {
 			stFile = st
-			if st.Active.Trig.TrigPPS > 0 {
+			if st.Active.Trig.TrigPPS > 0 && !explicitFlags["trig-pps"] {
 				c.TrigPPS = st.Active.Trig.TrigPPS
 			}
-			if st.Active.Trig.TrigSyn > 0 {
+			if st.Active.Trig.TrigSyn > 0 && !explicitFlags["trig-syn"] {
 				c.TrigSyn = st.Active.Trig.TrigSyn
 			}
-			if st.Active.Trig.TrigScan > 0 {
+			if st.Active.Trig.TrigScan > 0 && !explicitFlags["trig-scan"] {
 				c.TrigScan = st.Active.Trig.TrigScan
 			}
-			kliqLog.Printf("Loaded state: profile=%s rev=%d updated=%s trig{pps=%.1f syn=%.1f scan=%.1f}",
+			if st.Active.Trig.TrigBPS > 0 && !explicitFlags["trig-bps"] {
+				c.TrigBPS = st.Active.Trig.TrigBPS
+			}
+			kliqLog.Printf("Loaded state: profile=%s rev=%d updated=%s trig{pps=%.1f syn=%.1f scan=%.1f bps=%.0f}",
 				st.Active.Profile, st.Active.Revision, st.Active.UpdatedAt.Format(time.RFC3339),
-				c.TrigPPS, c.TrigSyn, c.TrigScan)
+				c.TrigPPS, c.TrigSyn, c.TrigScan, c.TrigBPS)
 		} else {
 			kliqLog.Printf("No usable state loaded (%s): %v", c.StatePath, err)
 		}
@@ -183,7 +197,7 @@ func main() {
 						Profile:     p.Name,
 						Revision:    0,
 						UpdatedAt:   time.Time{},
-						Trig:        trigState{TrigPPS: c.TrigPPS, TrigSyn: c.TrigSyn, TrigScan: c.TrigScan},
+						Trig:        trigState{TrigPPS: c.TrigPPS, TrigSyn: c.TrigSyn, TrigScan: c.TrigScan, TrigBPS: c.TrigBPS},
 						Tune:        tuneMeta{Method: "median_mad", Window: "reservoir", K: c.AutoK, SigmaFactor: 1.4826},
 						Bootstrap:   bs,
 						SampleCount: 0,
@@ -276,9 +290,11 @@ func main() {
 		TrigPPS:   c.TrigPPS,
 		TrigSyn:   c.TrigSyn,
 		TrigScan:  c.TrigScan,
+		TrigBPS:   c.TrigBPS,
 		WPPS:      c.WPPS,
 		WSyn:      c.WSyn,
 		WScan:     c.WScan,
+		WBps:      c.WBps,
 		SevCap:    c.SevCap,
 		SignalTTL: 2 * time.Minute,
 	})
@@ -310,31 +326,20 @@ func main() {
 					kliqLog.Printf("SIGNAL decision error: %v", err)
 				}
 
-				// Graph freeze violation: translate score → FSM strike credits.
-				// score >= 90 (frozen-enforce): forceBlock=true forces the FSM
-				// directly to BLOCK level in the next tick, bypassing accumulation.
+				// Graph freeze violation → FSM strike credits.
+				// score >= 90 (frozen-enforce): forceBlock skips accumulation.
 				// score < 90 (frozen-observe): normal strike accumulation.
-				// The FSM is the single enforcement authority for both paths.
 				if sig.Type == signal.SignalGraphNewEdgeAfterFreeze && sig.Subject.ID != "" {
-					n := graphStrikesFromScore(sig.Score)
-					forceBlock := sig.Score >= 90
-					ip := net.ParseIP(sig.Subject.ID)
-					if ip != nil {
-						var msg graphStrikeMsg
-						msg.n = n
-						msg.forceBlock = forceBlock
-						if ip4 := ip.To4(); ip4 != nil {
-							copy(msg.ip4[:], ip4)
-						} else {
-							msg.isV6 = true
-							copy(msg.ip6[:], ip.To16())
-						}
-						select {
-						case graphStrikeCh <- msg:
-						default:
-							kliqLog.Printf("GRAPH-STRIKE dropped (channel full) subject=%s", sig.Subject.ID)
-						}
-					}
+					sendStrike(graphStrikeCh, sig.Subject.ID, graphStrikesFromScore(sig.Score), sig.Score >= 90)
+				}
+
+				// Edge baseline deviation → FSM strike credits (score boost only).
+				// forceBlock is always false: these signals raise the score gradually
+				// so the normal FSM path (block gate, min-sev, anti-flap) stays active.
+				if (sig.Type == signal.SignalGraphEdgeBaselinePPSDeviation ||
+					sig.Type == signal.SignalGraphEdgeBaselineBytesDeviation) &&
+					sig.Subject.ID != "" {
+					sendStrike(graphStrikeCh, sig.Subject.ID, graphStrikesFromScore(sig.Score), false)
 				}
 			}
 		}
@@ -361,6 +366,8 @@ func main() {
 
 		mode := graphlearner.ModeLearn
 		switch c.GraphMode {
+		case "learn", "":
+			mode = graphlearner.ModeLearn
 		case "frozen-observe":
 			mode = graphlearner.ModeFrozenObserve
 		case "frozen-enforce":
@@ -373,6 +380,8 @@ func main() {
 			decPolicy.MinSeverityForBlock = 90
 			decisionEng.UpdatePolicy(decPolicy)
 			kliqLog.Printf("Graph: frozen-enforce active — unknown edges will be blocked via PEP directly")
+		default:
+			log.Fatalf("unknown --graph-mode %q (valid: learn, frozen-observe, frozen-enforce)", c.GraphMode)
 		}
 
 		excludeCIDRs := parseGraphExcludeCIDRs(c.GraphExcludeSourceCIDR)
@@ -388,13 +397,19 @@ func main() {
 				MinDistinctWindows: c.GraphMinWindows,
 				MinFirstSeenAge:    c.GraphMinAge,
 			},
-			PromoteInterval:    c.GraphPromoteInterval,
-			ExpireTTL:          c.GraphExpireTTL,
-			MinPacketsPerTick:  c.GraphMinPackets,
-			MinBytesPerTick:    c.GraphMinBytes,
-			ExcludeBroadcast:   c.GraphExcludeBcast,
-			ExcludeLoopback:    c.GraphExcludeLoopback,
-			ExcludeSourceCIDRs: excludeCIDRs,
+			PromoteInterval:            c.GraphPromoteInterval,
+			ExpireTTL:                  c.GraphExpireTTL,
+			MinPacketsPerTick:          c.GraphMinPackets,
+			MinBytesPerTick:            c.GraphMinBytes,
+			ExcludeBroadcast:           c.GraphExcludeBcast,
+			ExcludeLoopback:            c.GraphExcludeLoopback,
+			ExcludeSourceCIDRs:         excludeCIDRs,
+			BaselineAlpha:              c.BaselineAlpha,
+			BaselineAlphaBootstrap:     c.BaselineAlphaBootstrap,
+			BaselineMinObservations:    c.BaselineMinObservations,
+			BaselineDeviationThreshold: c.BaselineDeviationThreshold,
+			BaselineTrigPPS:            c.TrigPPS,
+			BaselineTrigBPS:            c.TrigBPS,
 		}, graphStore)
 
 		gctx, cancel := context.WithCancel(context.Background())
@@ -413,7 +428,7 @@ func main() {
 			cancel()
 		}()
 
-		kliqLog.Printf("Graph learning started: mode=%s store=%s node=%s", c.GraphMode, c.GraphStorePath, nodeID)
+		kliqLog.Printf("Graph learning started: mode=%s store=%s node=%s", mode, c.GraphStorePath, nodeID)
 	}
 	_ = graphCtxCancel // may be nil when graph is disabled
 
@@ -428,6 +443,7 @@ func main() {
 	resPPS := newReservoir(50_000)
 	resSyn := newReservoir(50_000)
 	resScan := newReservoir(50_000)
+	resBps := newReservoir(50_000)
 
 	lastTune := time.Now()
 	if stFile != nil && !stFile.Active.UpdatedAt.IsZero() {
@@ -456,8 +472,8 @@ func main() {
 	ossignal.Notify(resetCh, syscall.SIGUSR1)
 	defer ossignal.Stop(resetCh)
 
-	kliqLog.Printf("Kernloom IQ started profile=%s interval=%s dry_run=%v top=%d trig{pps=%.1f syn=%.1f scan=%.1f} weights{pps=%.2f syn=%.2f scan=%.2f} cap=%.1f (ipv6=%v)",
-		p.Name, c.Interval.String(), c.DryRun, c.TopN, c.TrigPPS, c.TrigSyn, c.TrigScan, c.WPPS, c.WSyn, c.WScan, c.SevCap, maps.Src6 != nil)
+	kliqLog.Printf("Kernloom IQ started profile=%s interval=%s dry_run=%v top=%d trig{pps=%.1f bps=%s syn=%.1f scan=%.1f} weights{pps=%.2f bps=%.2f syn=%.2f scan=%.2f} cap=%.1f (ipv6=%v)",
+		p.Name, c.Interval.String(), c.DryRun, c.TopN, c.TrigPPS, fmtBPS(c.TrigBPS), c.TrigSyn, c.TrigScan, c.WPPS, c.WBps, c.WSyn, c.WScan, c.SevCap, maps.Src6 != nil)
 
 	for range ticker.C {
 		nowWall := time.Now()
@@ -558,6 +574,9 @@ func main() {
 				_ = mainBus.PublishSignal(context.Background(), sig)
 			}
 
+			// Baseline update and deviation check happen in the cands loop below,
+			// after `clean` is computed — same timing as the global autotune.
+
 			if dPkts > 0 || dSyn > 0 || dScan > 0 {
 				seenForLearn++
 				if fsmM4.Severity >= c.LearnSevGT {
@@ -567,7 +586,10 @@ func main() {
 
 			prev4[k4] = prevV4{Pkts: v4.Pkts, Bytes: v4.Bytes, Syn: v4.Syn, Scan: v4.DportChanges, DropRL: v4.DropRL, LastWall: nowWall}
 
-			if pps < c.MinPPS && fsmM4.Severity < c.MinSev && dropRLRate == 0 {
+			// MinSev=0 means "no severity override" — only PPS decides.
+			// MinSev>0 lets a high-severity source bypass the PPS floor.
+			sevOverride := c.MinSev > 0 && fsmM4.Severity >= c.MinSev
+			if pps < c.MinPPS && !sevOverride && dropRLRate == 0 {
 				continue
 			}
 
@@ -630,7 +652,8 @@ func main() {
 
 				prev6[ip6] = prevV6{Pkts: v6.Pkts, Bytes: v6.Bytes, Syn: v6.Syn, Scan: v6.DportChanges, DropRL: v6.DropRL, LastWall: nowWall}
 
-				if pps < c.MinPPS && fsmM6.Severity < c.MinSev && dropRLRate == 0 {
+				sevOverride6 := c.MinSev > 0 && fsmM6.Severity >= c.MinSev
+				if pps < c.MinPPS && !sevOverride6 && dropRLRate == 0 {
 					continue
 				}
 
@@ -751,12 +774,45 @@ func main() {
 			cleanLearnTicks++
 		}
 
+		// Track which IPs were processed this tick so the sweep below can skip them.
+		inCands4 := make(map[[4]byte]bool, len(cands))
+		inCands6 := make(map[[16]byte]bool)
 		for _, m := range cands {
 			if m.IPVer == 4 {
-				state4[m.IP4] = processCandidate4(m, state4[m.IP4], nowWall, c, wl, fb, pep, resPPS, resSyn, resScan, clean)
+				state4[m.IP4] = processCandidate4(m, state4[m.IP4], nowWall, c, wl, fb, pep, resPPS, resSyn, resScan, resBps, clean)
+				inCands4[m.IP4] = true
 			} else {
-				state6[m.IP6] = processCandidate6(m, state6[m.IP6], nowWall, c, wl, fb, pep, resPPS, resSyn, resScan, clean)
+				state6[m.IP6] = processCandidate6(m, state6[m.IP6], nowWall, c, wl, fb, pep, resPPS, resSyn, resScan, resBps, clean)
+				inCands6[m.IP6] = true
 			}
+		}
+
+		// Maintenance sweep: advance FSM for non-OBSERVE sources that had no traffic
+		// this tick (fell below MinPPS or disappeared from the Shield map entirely).
+		// Without this, a source that goes quiet after being rate-limited stays in
+		// RATE_HARD/BLOCK forever because fsm.Advance() is never called for it and
+		// TTL-based de-escalation never fires.
+		pepParams := c.toPEPParams()
+		zeroM := fsm.Metrics{}
+		for ip4, st := range state4 {
+			if st.Level == fsm.LevelObserve || inCands4[ip4] {
+				continue
+			}
+			ip := ip4 // capture
+			doT := func(s fsm.State, target fsm.Level) fsm.State {
+				return pep.TransitionV4(ip, s, target, nowWall, pepParams)
+			}
+			state4[ip4], _ = fsm.Advance(zeroM, st, nowWall, c.toFSMConfig(), doT)
+		}
+		for ip6, st := range state6 {
+			if st.Level == fsm.LevelObserve || inCands6[ip6] {
+				continue
+			}
+			ip := ip6 // capture
+			doT := func(s fsm.State, target fsm.Level) fsm.State {
+				return pep.TransitionV6(ip, s, target, nowWall, pepParams)
+			}
+			state6[ip6], _ = fsm.Advance(zeroM, st, nowWall, c.toFSMConfig(), doT)
 		}
 
 		tickN++
@@ -785,10 +841,10 @@ func main() {
 			topSummary := "none"
 			if len(cands) > 0 {
 				top := cands[0]
-				topSummary = fmt.Sprintf("%s sev=%.2f pps=%.0f syn=%.0f scan=%.0f", top.ipString(), top.Severity, top.PPS, top.SynRate, top.ScanRate)
+				topSummary = fmt.Sprintf("%s sev=%.2f pps=%.0f bps=%s syn=%.0f scan=%.0f", top.ipString(), top.Severity, top.PPS, fmtBPS(top.Bps), top.SynRate, top.ScanRate)
 			}
-			kliqLog.Printf("TICK#%d sources=%d cands=%d clean=%v fsm{soft=%d hard=%d block=%d} trig{pps=%.0f syn=%.0f scan=%.0f} top: %s",
-				tickN, seenForLearn, len(cands), clean, softN, hardN, blockN, c.TrigPPS, c.TrigSyn, c.TrigScan, topSummary)
+			kliqLog.Printf("TICK#%d sources=%d cands=%d clean=%v fsm{soft=%d hard=%d block=%d} trig{pps=%.0f bps=%s syn=%.0f scan=%.0f} top: %s",
+				tickN, seenForLearn, len(cands), clean, softN, hardN, blockN, c.TrigPPS, fmtBPS(c.TrigBPS), c.TrigSyn, c.TrigScan, topSummary)
 		}
 
 		// Housekeeping: bound memory.
@@ -869,15 +925,31 @@ func main() {
 
 			oldPPS, oldSyn, oldScan := c.TrigPPS, c.TrigSyn, c.TrigScan
 			c.TrigPPS, c.TrigSyn, c.TrigScan = targetPPS, targetSyn, targetScan
+
+			// BPS autotune: only when AutoFloorBPS > 0 (opt-in).
+			oldBPS := c.TrigBPS
+			if c.AutoFloorBPS > 0 && len(resBps.data) >= c.AutoMinSamples {
+				mBps := median(resBps.data)
+				mdBps := mad(resBps.data, mBps)
+				targetBPS := math.Max(c.AutoFloorBPS, mBps+pol.K*mdBps)
+				targetBPS = capChangeDir(c.TrigBPS, targetBPS, pol.MaxUp, pol.MaxDown)
+				if pol.Alpha > 0 && pol.Alpha < 1 {
+					targetBPS = c.TrigBPS*(1-pol.Alpha) + targetBPS*pol.Alpha
+				}
+				c.TrigBPS = targetBPS
+			}
+
 			lastTune = time.Now()
 
 			engine.UpdateConfig(shieldheuristic.Config{
-				NodeID: nodeID, TrigPPS: c.TrigPPS, TrigSyn: c.TrigSyn, TrigScan: c.TrigScan,
-				WPPS: c.WPPS, WSyn: c.WSyn, WScan: c.WScan, SevCap: c.SevCap,
+				NodeID:  nodeID,
+				TrigPPS: c.TrigPPS, TrigSyn: c.TrigSyn, TrigScan: c.TrigScan, TrigBPS: c.TrigBPS,
+				WPPS: c.WPPS, WSyn: c.WSyn, WScan: c.WScan, WBps: c.WBps,
+				SevCap: c.SevCap,
 			})
 
-			kliqLog.Printf("AUTOTUNE applied: trig_pps %.1f->%.1f trig_syn %.1f->%.1f trig_scan %.1f->%.1f (median+MAD k=%.2f) samples=%d cleanRatio=%.4f clean=%v dropRatio=%.4f phase=%s",
-				oldPPS, c.TrigPPS, oldSyn, c.TrigSyn, oldScan, c.TrigScan, pol.K, n, cleanRatio, clean, dropRatio, pol.Phase)
+			kliqLog.Printf("AUTOTUNE applied: trig_pps %.1f->%.1f trig_syn %.1f->%.1f trig_scan %.1f->%.1f trig_bps %.0f->%.0f (median+MAD k=%.2f) samples=%d cleanRatio=%.4f clean=%v dropRatio=%.4f phase=%s",
+				oldPPS, c.TrigPPS, oldSyn, c.TrigSyn, oldScan, c.TrigScan, oldBPS, c.TrigBPS, pol.K, n, cleanRatio, clean, dropRatio, pol.Phase)
 
 			if c.StatePath != "" {
 				st := stFile
@@ -885,13 +957,16 @@ func main() {
 					st = &stateFile{Version: 1}
 				}
 				rev := st.Active.Revision + 1
+				mBpsHist := median(resBps.data)
+				mdBpsHist := mad(resBps.data, mBpsHist)
 				st.History = append(st.History, stateHistory{
-					Revision:  rev,
-					At:        time.Now(),
-					Trig:      trigState{TrigPPS: c.TrigPPS, TrigSyn: c.TrigSyn, TrigScan: c.TrigScan},
-					MedianPPS: mPPS, MadPPS: mdPPS,
-					MedianSyn: mSyn, MadSyn: mdSyn,
+					Revision:   rev,
+					At:         time.Now(),
+					Trig:       trigState{TrigPPS: c.TrigPPS, TrigSyn: c.TrigSyn, TrigScan: c.TrigScan, TrigBPS: c.TrigBPS},
+					MedianPPS:  mPPS, MadPPS: mdPPS,
+					MedianSyn:  mSyn, MadSyn: mdSyn,
 					MedianScan: mScan, MadScan: mdScan,
+					MedianBPS:   mBpsHist, MadBPS: mdBpsHist,
 					SampleCount: n,
 					CleanRatio:  cleanRatio,
 					Notes:       fmt.Sprintf("autotune median+mad dropRatio=%.4f phase=%s", dropRatio, pol.Phase),
@@ -903,7 +978,7 @@ func main() {
 					Profile:     p.Name,
 					Revision:    rev,
 					UpdatedAt:   time.Now(),
-					Trig:        trigState{TrigPPS: c.TrigPPS, TrigSyn: c.TrigSyn, TrigScan: c.TrigScan},
+					Trig:        trigState{TrigPPS: c.TrigPPS, TrigSyn: c.TrigSyn, TrigScan: c.TrigScan, TrigBPS: c.TrigBPS},
 					Tune:        tuneMeta{Method: "median_mad", Window: "reservoir", K: pol.K, SigmaFactor: 1.4826},
 					Bootstrap:   bs,
 					SampleCount: n,
@@ -919,17 +994,5 @@ func main() {
 			}
 		}
 
-		if len(cands) > 0 {
-			top := cands[0]
-			topWL := false
-			if top.IPVer == 4 {
-				topWL = wl.matchV4(top.IP4)
-			} else {
-				topWL = wl.matchV6(top.IP6)
-			}
-			fmt.Printf("TOP %-39s ipver=%d sev=%.2f pps=%.0f syn=%.0f scan=%.0f dropRL/s=%.1f trig{pps=%.0f syn=%.0f scan=%.0f} clean=%v dropRatio=%.4f wl=%v phase=%s\n",
-				top.ipString(), top.IPVer, top.Severity, top.PPS, top.SynRate, top.ScanRate, top.DropRLRate,
-				c.TrigPPS, c.TrigSyn, c.TrigScan, clean, dropRatio, topWL, pol.Phase)
-		}
 	}
 }

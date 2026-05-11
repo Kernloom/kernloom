@@ -39,18 +39,21 @@ type SignalType string
 const (
 	SignalScanSuspected           SignalType = "source.scan_suspected"             // High port diversity
 	SignalPPSHigh                 SignalType = "source.pps_high"                   // Packets per second spike
+	SignalBPSHigh                 SignalType = "source.bps_high"                   // Bytes per second spike (large-packet flood or exfil)
 	SignalSYNRateHigh             SignalType = "source.syn_rate_high"              // SYN flood pattern
 	SignalRateLimitDropsSustained SignalType = "source.rate_limit_drops_sustained" // RL drops continue
 )
 
 // Graph signals (local, from KLIQ graph learner)
 const (
-	SignalGraphNewEdgeAfterFreeze  SignalType = "graph.new_edge_after_freeze" // New edge detected post-freeze
-	SignalGraphNewDestinationPort  SignalType = "graph.new_destination_port"  // Known peer, new port
-	SignalGraphNewPeer             SignalType = "graph.new_peer"              // Never seen before
-	SignalGraphDirectionChange     SignalType = "graph.direction_change"      // Inbound/egress flip
-	SignalGraphVolumeDeviation     SignalType = "graph.volume_deviation"      // Unusual traffic volume
-	SignalGraphTimeWindowDeviation SignalType = "graph.time_window_deviation" // Off-hours communication
+	SignalGraphNewEdgeAfterFreeze       SignalType = "graph.new_edge_after_freeze"        // New edge detected post-freeze
+	SignalGraphNewDestinationPort       SignalType = "graph.new_destination_port"         // Known peer, new port
+	SignalGraphNewPeer                  SignalType = "graph.new_peer"                     // Never seen before
+	SignalGraphDirectionChange          SignalType = "graph.direction_change"             // Inbound/egress flip
+	SignalGraphVolumeDeviation          SignalType = "graph.volume_deviation"             // Unusual traffic volume
+	SignalGraphTimeWindowDeviation      SignalType = "graph.time_window_deviation"        // Off-hours communication
+	SignalGraphEdgeBaselinePPSDeviation SignalType = "graph.edge_baseline_pps_deviation"  // PPS far above learned edge median
+	SignalGraphEdgeBaselineBytesDeviation SignalType = "graph.edge_baseline_bytes_deviation" // Bytes/s far above learned edge median
 )
 
 // Trust signals

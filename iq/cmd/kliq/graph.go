@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"sort"
+	"strings"
 	"text/tabwriter"
 	"time"
 
@@ -17,7 +18,7 @@ import (
 )
 
 // runGraphStatus prints a summary of graph edges for the given store and nodeID.
-func runGraphStatus(storePath, nodeID string) {
+func runGraphStatus(storePath, nodeID string, showAll bool, sortBy string) {
 	s, err := gstore.Open(storePath)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: open graph store: %v\n", err)
@@ -37,26 +38,63 @@ func runGraphStatus(storePath, nodeID string) {
 		os.Exit(1)
 	}
 
-	fmt.Printf("Graph status for node: %s\n\n", nodeID)
+	fmt.Printf("Graph + Baseline status for node: %s\n\n", nodeID)
 
+	// Graph edge summary
+	fmt.Println("Graph edges:")
 	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
-	fmt.Fprintln(w, "STATE\tCOUNT")
+	fmt.Fprintln(w, "  STATE\tCOUNT")
 	for _, state := range []graph.EdgeState{
 		graph.EdgeCandidate, graph.EdgeLearned, graph.EdgeApproved,
 		graph.EdgeFrozen, graph.EdgeDenied, graph.EdgeExpired,
 	} {
 		if n := stats[state]; n > 0 {
-			fmt.Fprintf(w, "%s\t%d\n", state, n)
+			fmt.Fprintf(w, "  %s\t%d\n", state, n)
 		}
 	}
 	w.Flush()
 
-	fmt.Printf("\nRecent edges (%d total):\n\n", len(edges))
+	// Sort edges.
+	switch strings.ToLower(sortBy) {
+	case "state":
+		sort.Slice(edges, func(i, j int) bool {
+			oi, oj := stateOrder(edges[i].State), stateOrder(edges[j].State)
+			if oi != oj {
+				return oi < oj
+			}
+			return edges[i].LastSeenAt.After(edges[j].LastSeenAt)
+		})
+	case "src":
+		sort.Slice(edges, func(i, j int) bool {
+			if edges[i].Source.ID != edges[j].Source.ID {
+				return edges[i].Source.ID < edges[j].Source.ID
+			}
+			return edges[i].DestinationPort < edges[j].DestinationPort
+		})
+	case "port":
+		sort.Slice(edges, func(i, j int) bool {
+			if edges[i].DestinationPort != edges[j].DestinationPort {
+				return edges[i].DestinationPort < edges[j].DestinationPort
+			}
+			return edges[i].Source.ID < edges[j].Source.ID
+		})
+	case "seen":
+		sort.Slice(edges, func(i, j int) bool {
+			return edges[i].SeenCount > edges[j].SeenCount
+		})
+	default: // "last"
+		sort.Slice(edges, func(i, j int) bool {
+			return edges[i].LastSeenAt.After(edges[j].LastSeenAt)
+		})
+	}
+
+	const defaultCap = 30
+	fmt.Printf("\nEdges (%d total):\n\n", len(edges))
 	w = tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
 	fmt.Fprintln(w, "STATE\tSRC\tDST\tPROTO\tPORT\tSEEN\tLAST SEEN")
 	shown := edges
-	if len(shown) > 30 {
-		shown = shown[:30]
+	if !showAll && len(shown) > defaultCap {
+		shown = shown[:defaultCap]
 	}
 	for _, e := range shown {
 		fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%d\t%d\t%s\n",
@@ -70,8 +108,8 @@ func runGraphStatus(storePath, nodeID string) {
 		)
 	}
 	w.Flush()
-	if len(edges) > 30 {
-		fmt.Printf("\n... and %d more (use --graph-export for full list)\n", len(edges)-30)
+	if !showAll && len(edges) > defaultCap {
+		fmt.Printf("\n... and %d more (use --all or 'kliq graph export' for full list)\n", len(edges)-defaultCap)
 	}
 }
 
@@ -218,6 +256,17 @@ func stateOrder(s graph.EdgeState) int {
 	}
 }
 
+const graphUsage = `usage: kliq graph <subcommand> [flags] [store] [node-id]
+
+  edges    [--all] [--sort=last|state|src|port|seen]  show graph edges
+  baselines [--all] [--sort=obs|state|src|port|pps|bps]  show edge baselines
+  baselines reset                                      zero baseline stats
+  export   [--format=json]                             export full graph as YAML/JSON
+  freeze   [frozen-file]                               freeze learned edges
+  reset    [--all]                                     delete edges (--all: incl. frozen/approved)
+  approve-ip <ip>                                      mark all edges from IP as approved
+  deny-ip  <ip>                                        mark all edges from IP as denied`
+
 // handleGraphSubcommand checks os.Args for graph subcommands and runs them
 // without starting the main kliq loop. Returns true if a subcommand was handled.
 //
@@ -240,6 +289,37 @@ func handleGraphSubcommand(storePath, frozenPath, nodeID string) bool {
 		}
 	}
 
+	// Strip flags before positional arg parsing — any --flag that lands in the
+	// wrong position would otherwise be treated as a store path or node-id.
+	// Unknown --flags are silently dropped (they may come from shell completion
+	// or old hints in error messages like the former --graph-export suggestion).
+	showAll := false
+	format := "yaml"
+	sortBy := "last"
+	filtered := args[:0]
+	for _, a := range args {
+		switch {
+		case a == "--all" || a == "-all":
+			showAll = true
+		case a == "--format=json" || a == "-json":
+			format = "json"
+		case a == "--format=yaml":
+			format = "yaml"
+		case strings.HasPrefix(a, "--sort="):
+			sortBy = strings.TrimPrefix(a, "--sort=")
+		case len(a) > 1 && a[0] == '-':
+			// unknown flag — drop silently
+		default:
+			filtered = append(filtered, a)
+		}
+	}
+	args = filtered
+
+	if len(args) < 2 {
+		fmt.Fprintln(os.Stderr, graphUsage)
+		os.Exit(1)
+	}
+
 	getArg := func(idx int, def string) string {
 		if len(args) > idx {
 			return args[idx]
@@ -248,17 +328,19 @@ func handleGraphSubcommand(storePath, frozenPath, nodeID string) bool {
 	}
 
 	switch args[1] {
-	case "status":
-		runGraphStatus(getArg(2, storePath), getArg(3, nodeID))
+	case "edges", "status": // "status" kept as backward-compat alias
+		runGraphStatus(getArg(2, storePath), getArg(3, nodeID), showAll, sortBy)
+		return true
+
+	case "baselines":
+		if len(args) > 2 && args[2] == "reset" {
+			runBaselineReset(getArg(3, storePath), getArg(4, nodeID))
+		} else {
+			runBaselineStatus(getArg(2, storePath), getArg(3, nodeID), showAll, sortBy)
+		}
 		return true
 
 	case "export":
-		format := "yaml"
-		for _, a := range args[2:] {
-			if a == "--format=json" || a == "-json" {
-				format = "json"
-			}
-		}
 		runGraphExport(getArg(2, storePath), getArg(3, nodeID), format)
 		return true
 
@@ -267,8 +349,6 @@ func handleGraphSubcommand(storePath, frozenPath, nodeID string) bool {
 		return true
 
 	case "approve-ip":
-		// approve-ip <ip> [store] [node-id]
-		// Marks all edges from <ip> as approved so frozen-enforce stops signalling them.
 		if len(args) < 3 {
 			fmt.Fprintln(os.Stderr, "usage: kliq graph approve-ip <ip> [store] [node-id]")
 			os.Exit(1)
@@ -277,8 +357,6 @@ func handleGraphSubcommand(storePath, frozenPath, nodeID string) bool {
 		return true
 
 	case "deny-ip":
-		// deny-ip <ip> [store] [node-id]
-		// Marks all edges from <ip> as denied.
 		if len(args) < 3 {
 			fmt.Fprintln(os.Stderr, "usage: kliq graph deny-ip <ip> [store] [node-id]")
 			os.Exit(1)
@@ -286,9 +364,13 @@ func handleGraphSubcommand(storePath, frozenPath, nodeID string) bool {
 		runGraphSetIPState(args[2], getArg(3, storePath), getArg(4, nodeID), graph.EdgeDenied, "denied")
 		return true
 
+	case "reset":
+		runGraphReset(getArg(2, storePath), getArg(3, nodeID), showAll)
+		return true
+
 	default:
 		fmt.Fprintf(os.Stderr, "unknown graph subcommand: %s\n", args[1])
-		fmt.Fprintln(os.Stderr, "usage: kliq graph {status|export|freeze|approve-ip|deny-ip} [args]")
+		fmt.Fprintln(os.Stderr, graphUsage)
 		os.Exit(1)
 	}
 	return false
@@ -368,6 +450,34 @@ func runGraphExportToFile(storePath, nodeID, path string) {
 	if err := os.Rename(tmp, path); err != nil {
 		fmt.Fprintf(os.Stderr, "error: rename to %s: %v\n", path, err)
 		os.Exit(1)
+	}
+}
+
+// runGraphReset removes graph edges for a node. By default only candidate,
+// learned and expired edges are deleted — frozen and approved edges (explicit
+// admin decisions) are kept. Pass --all to wipe everything.
+func runGraphReset(storePath, nodeID string, all bool) {
+	s, err := gstore.Open(storePath)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: open graph store: %v\n", err)
+		os.Exit(1)
+	}
+	defer s.Close()
+
+	keepAdminStates := !all
+	n, err := s.ResetEdges(nodeID, keepAdminStates)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: reset graph: %v\n", err)
+		os.Exit(1)
+	}
+
+	if keepAdminStates {
+		fmt.Printf("Deleted %d edge(s) for node %s (frozen/approved kept).\n", n, nodeID)
+		fmt.Println("Graph will re-learn from the next observed traffic.")
+		fmt.Println("Use --all to also wipe frozen and approved edges.")
+	} else {
+		fmt.Printf("Deleted %d edge(s) for node %s (full wipe).\n", n, nodeID)
+		fmt.Println("Graph will re-learn from scratch.")
 	}
 }
 

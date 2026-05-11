@@ -8,12 +8,19 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/adrianenderlin/kernloom/pkg/core/graph"
 	"github.com/adrianenderlin/kernloom/pkg/core/observation"
 	_ "modernc.org/sqlite"
 )
+
+// isDuplicateColumn returns true when a SQLite ALTER TABLE error is caused by
+// an already-existing column — the expected outcome when migrating an older DB.
+func isDuplicateColumn(err error) bool {
+	return err != nil && strings.Contains(err.Error(), "duplicate column name")
+}
 
 const schema = `
 CREATE TABLE IF NOT EXISTS graph_edges (
@@ -35,7 +42,15 @@ CREATE TABLE IF NOT EXISTS graph_edges (
 	confidence        INTEGER NOT NULL DEFAULT 0,
 	state             TEXT    NOT NULL,
 	learned_by        TEXT    NOT NULL,
-	attributes_json   TEXT    NOT NULL DEFAULT '{}'
+	attributes_json   TEXT    NOT NULL DEFAULT '{}',
+	-- Per-edge traffic baseline (EWMA). Populated automatically while the edge
+	-- is in the graph learner's observation loop.
+	bl_pps_median     REAL    NOT NULL DEFAULT 0,
+	bl_pps_mad        REAL    NOT NULL DEFAULT 0,
+	bl_bytes_median   REAL    NOT NULL DEFAULT 0,
+	bl_bytes_mad      REAL    NOT NULL DEFAULT 0,
+	bl_obs            INTEGER NOT NULL DEFAULT 0,
+	bl_state          TEXT    NOT NULL DEFAULT 'candidate'
 );
 
 CREATE UNIQUE INDEX IF NOT EXISTS idx_graph_edges_key ON graph_edges (
@@ -64,7 +79,24 @@ func Open(path string) (*Store, error) {
 	db.SetMaxOpenConns(1) // SQLite does not support concurrent writers
 	if _, err := db.Exec(schema); err != nil {
 		db.Close()
-		return nil, fmt.Errorf("apply schema: %w", err)
+		return nil, fmt.Errorf("apply graph schema: %w", err)
+	}
+	// Migrate existing DBs: add baseline columns if they don't exist yet.
+	for _, col := range []string{
+		"ALTER TABLE graph_edges ADD COLUMN bl_pps_median   REAL    NOT NULL DEFAULT 0",
+		"ALTER TABLE graph_edges ADD COLUMN bl_pps_mad      REAL    NOT NULL DEFAULT 0",
+		"ALTER TABLE graph_edges ADD COLUMN bl_bytes_median REAL    NOT NULL DEFAULT 0",
+		"ALTER TABLE graph_edges ADD COLUMN bl_bytes_mad    REAL    NOT NULL DEFAULT 0",
+		"ALTER TABLE graph_edges ADD COLUMN bl_obs          INTEGER NOT NULL DEFAULT 0",
+		"ALTER TABLE graph_edges ADD COLUMN bl_state        TEXT    NOT NULL DEFAULT 'candidate'",
+	} {
+		if _, err := db.Exec(col); err != nil {
+			// "duplicate column name" is expected on fresh DBs — ignore it.
+			if !isDuplicateColumn(err) {
+				db.Close()
+				return nil, fmt.Errorf("migrate baseline columns: %w", err)
+			}
+		}
 	}
 	return &Store{db: db}, nil
 }
@@ -72,6 +104,30 @@ func Open(path string) (*Store, error) {
 // Close closes the underlying database connection.
 func (s *Store) Close() error {
 	return s.db.Close()
+}
+
+// ResetEdges deletes graph edges for nodeID. When keepAdminStates is true only
+// candidate, learned and expired edges are removed — frozen and approved edges
+// (explicit admin decisions) are preserved. Pass keepAdminStates=false to wipe
+// everything.
+func (s *Store) ResetEdges(nodeID string, keepAdminStates bool) (int, error) {
+	var res sql.Result
+	var err error
+	if keepAdminStates {
+		res, err = s.db.Exec(`
+			DELETE FROM graph_edges
+			WHERE node_id=? AND state NOT IN (?,?)`,
+			nodeID,
+			string(graph.EdgeFrozen), string(graph.EdgeApproved),
+		)
+	} else {
+		res, err = s.db.Exec(`DELETE FROM graph_edges WHERE node_id=?`, nodeID)
+	}
+	if err != nil {
+		return 0, err
+	}
+	n, _ := res.RowsAffected()
+	return int(n), nil
 }
 
 // Upsert inserts a new edge or, if the edge key already exists, merges the
@@ -217,14 +273,22 @@ func (s *Store) PromoteCandidates(nodeID string, cfg graph.PromotionConfig, now 
 }
 
 // MarkExpired marks as expired all edges not seen since before cutoff.
-func (s *Store) MarkExpired(nodeID string, cutoff time.Time) (int, error) {
+// Admin decisions (approved, denied, frozen) are never auto-expired.
+// Candidate edges that have not yet reached minSeenCount are also protected:
+// they are still being learned and should not be discarded before they have
+// had a fair chance to accumulate enough observations for promotion.
+func (s *Store) MarkExpired(nodeID string, cutoff time.Time, minSeenCount uint64) (int, error) {
 	res, err := s.db.Exec(`
 		UPDATE graph_edges SET state=?
-		WHERE node_id=? AND last_seen_at < ? AND state NOT IN (?,?,?)
+		WHERE node_id=? AND last_seen_at < ?
+		  AND state NOT IN (?,?,?,?)
+		  AND (state != ? OR seen_count >= ?)
 	`,
 		string(graph.EdgeExpired),
 		nodeID, cutoff.UnixNano(),
-		string(graph.EdgeDenied), string(graph.EdgeExpired), string(graph.EdgeFrozen),
+		string(graph.EdgeApproved), string(graph.EdgeDenied),
+		string(graph.EdgeExpired), string(graph.EdgeFrozen),
+		string(graph.EdgeCandidate), minSeenCount,
 	)
 	if err != nil {
 		return 0, err
@@ -233,17 +297,20 @@ func (s *Store) MarkExpired(nodeID string, cutoff time.Time) (int, error) {
 	return int(n), nil
 }
 
-// ExpireCandidatesBySource marks as expired all candidate edges for nodeID
-// whose source_id matches sourceID. Used to remove attack traffic that created
-// candidates before the heuristic signal arrived.
-func (s *Store) ExpireCandidatesBySource(nodeID, sourceID string) (int, error) {
+// ExpireCandidatesBySource marks as expired fresh candidate edges for nodeID
+// whose source_id matches sourceID. Only candidates with seen_count < minSeenCount
+// are removed — these are the edges that "snuck in" during an attack burst before
+// the signal fired. Established candidates (seen_count >= minSeenCount) represent
+// real historical traffic from the source and are preserved even when the source
+// momentarily triggers a suspicious signal.
+func (s *Store) ExpireCandidatesBySource(nodeID, sourceID string, minSeenCount uint64) (int, error) {
 	res, err := s.db.Exec(`
 		UPDATE graph_edges SET state=?
-		WHERE node_id=? AND source_id=? AND state=?
+		WHERE node_id=? AND source_id=? AND state=? AND seen_count < ?
 	`,
 		string(graph.EdgeExpired),
 		nodeID, sourceID,
-		string(graph.EdgeCandidate),
+		string(graph.EdgeCandidate), minSeenCount,
 	)
 	if err != nil {
 		return 0, err
@@ -269,6 +336,164 @@ func (s *Store) Stats(nodeID string) (map[graph.EdgeState]int, error) {
 			return nil, err
 		}
 		out[graph.EdgeState(st)] = n
+	}
+	return out, rows.Err()
+}
+
+// UpdateEdgeBaseline updates the EWMA baseline stats for a specific edge.
+// alphaStable is the long-run adaptation speed (e.g. 0.02).
+// alphaBootstrap is used while obs < minObs (candidate phase) to converge
+// faster during initial learning (e.g. 0.10). Pass 0 to always use alphaStable.
+// Only call this when the source is NOT flagged as suspicious (anti-poisoning).
+func (s *Store) UpdateEdgeBaseline(key graph.EdgeKey, pps, bytesPS, alphaStable, alphaBootstrap float64, minObs uint64) error {
+	// Load current stats.
+	row := s.db.QueryRow(`
+		SELECT bl_pps_median, bl_pps_mad, bl_bytes_median, bl_bytes_mad, bl_obs, bl_state, id
+		FROM graph_edges
+		WHERE node_id=? AND source_kind=? AND source_id=?
+		  AND destination_kind=? AND destination_id=?
+		  AND protocol=? AND destination_port=? AND direction=?`,
+		key.NodeID, string(key.SourceKind), key.SourceID,
+		string(key.DestinationKind), key.DestinationID,
+		key.Protocol, key.DestinationPort, string(key.Direction),
+	)
+	var ppsMedian, ppsMad, bytesMedian, bytesMad float64
+	var obs uint64
+	var blState, edgeID string
+	if err := row.Scan(&ppsMedian, &ppsMad, &bytesMedian, &bytesMad, &obs, &blState, &edgeID); err != nil {
+		return nil // edge not found yet — upsert hasn't run, skip
+	}
+
+	// Choose alpha: bootstrap phase uses faster adaptation until min_observations
+	// is reached, then switches to the stable (slower) alpha.
+	a := alphaStable
+	if alphaBootstrap > alphaStable && obs < minObs {
+		a = alphaBootstrap
+	}
+
+	// EWMA update.
+	if obs == 0 {
+		ppsMedian, bytesMedian = pps, bytesPS
+	} else {
+		ppsMad = (1-a)*ppsMad + a*abs64(pps-ppsMedian)
+		ppsMedian = (1-a)*ppsMedian + a*pps
+		bytesMad = (1-a)*bytesMad + a*abs64(bytesPS-bytesMedian)
+		bytesMedian = (1-a)*bytesMedian + a*bytesPS
+	}
+	obs++
+
+	newState := blState
+	if blState == "candidate" && obs >= minObs {
+		newState = "learned"
+	}
+
+	_, err := s.db.Exec(`
+		UPDATE graph_edges SET
+			bl_pps_median=?, bl_pps_mad=?, bl_bytes_median=?, bl_bytes_mad=?,
+			bl_obs=?, bl_state=?
+		WHERE id=?`,
+		ppsMedian, ppsMad, bytesMedian, bytesMad, obs, newState, edgeID,
+	)
+	return err
+}
+
+// EdgeBaselineDeviation returns deviation factors for a specific edge's current
+// traffic vs its learned baseline. Returns 0,0 if not yet learned.
+func (s *Store) EdgeBaselineDeviation(key graph.EdgeKey, pps, bytesPS float64) (devPPS, devBytes float64) {
+	row := s.db.QueryRow(`
+		SELECT bl_pps_median, bl_pps_mad, bl_bytes_median, bl_bytes_mad, bl_state
+		FROM graph_edges
+		WHERE node_id=? AND source_kind=? AND source_id=?
+		  AND destination_kind=? AND destination_id=?
+		  AND protocol=? AND destination_port=? AND direction=?`,
+		key.NodeID, string(key.SourceKind), key.SourceID,
+		string(key.DestinationKind), key.DestinationID,
+		key.Protocol, key.DestinationPort, string(key.Direction),
+	)
+	var ppsMedian, ppsMad, bytesMedian, bytesMad float64
+	var blState string
+	if err := row.Scan(&ppsMedian, &ppsMad, &bytesMedian, &bytesMad, &blState); err != nil {
+		return 0, 0
+	}
+	if blState != "learned" {
+		return 0, 0
+	}
+	if ppsMad > 0.001 {
+		devPPS = abs64(pps-ppsMedian) / ppsMad
+	}
+	if bytesMad > 0.001 {
+		devBytes = abs64(bytesPS-bytesMedian) / bytesMad
+	}
+	return
+}
+
+func abs64(x float64) float64 {
+	if x < 0 {
+		return -x
+	}
+	return x
+}
+
+// EdgeBaselineSummary holds the per-edge baseline stats alongside the edge key
+// fields needed for display (source, destination, protocol, port, direction).
+type EdgeBaselineSummary struct {
+	SourceID        string
+	DestinationID   string
+	Protocol        string
+	DestinationPort uint16
+	Direction       string
+	GraphState      string
+	BLState         string
+	BLObs           uint64
+	BLPPSMedian     float64
+	BLPPSMad        float64
+	BLBytesMedian   float64
+	BLBytesMad      float64
+}
+
+// ResetEdgeBaselines zeros the bl_* columns for all edges belonging to nodeID.
+// Graph state, seen counts and other edge fields are preserved.
+func (s *Store) ResetEdgeBaselines(nodeID string) (int, error) {
+	res, err := s.db.Exec(`
+		UPDATE graph_edges
+		SET bl_pps_median=0, bl_pps_mad=0, bl_bytes_median=0, bl_bytes_mad=0,
+		    bl_obs=0, bl_state='candidate'
+		WHERE node_id=?`, nodeID)
+	if err != nil {
+		return 0, err
+	}
+	n, _ := res.RowsAffected()
+	return int(n), nil
+}
+
+// ListEdgeBaselines returns all edges for nodeID that have at least one
+// baseline observation, ordered by bl_state (learned first) then by obs count.
+func (s *Store) ListEdgeBaselines(nodeID string) ([]EdgeBaselineSummary, error) {
+	rows, err := s.db.Query(`
+		SELECT source_id, destination_id, protocol, destination_port, direction,
+		       state, bl_state, bl_obs,
+		       bl_pps_median, bl_pps_mad, bl_bytes_median, bl_bytes_mad
+		FROM graph_edges
+		WHERE node_id=? AND bl_obs > 0
+		ORDER BY
+			CASE bl_state WHEN 'learned' THEN 0 ELSE 1 END,
+			bl_obs DESC
+	`, nodeID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []EdgeBaselineSummary
+	for rows.Next() {
+		var e EdgeBaselineSummary
+		if err := rows.Scan(
+			&e.SourceID, &e.DestinationID, &e.Protocol, &e.DestinationPort, &e.Direction,
+			&e.GraphState, &e.BLState, &e.BLObs,
+			&e.BLPPSMedian, &e.BLPPSMad, &e.BLBytesMedian, &e.BLBytesMad,
+		); err != nil {
+			return nil, err
+		}
+		out = append(out, e)
 	}
 	return out, rows.Err()
 }

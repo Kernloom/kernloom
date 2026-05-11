@@ -18,9 +18,11 @@ func pdpConfigToProfile(c *pdp.Config) profile {
 		TrigPPS:      s.SignalEngine.PPSTrigger,
 		TrigSyn:      s.SignalEngine.SynTrigger,
 		TrigScan:     s.SignalEngine.ScanTrigger,
+		TrigBPS:      s.SignalEngine.BPSTrigger,
 		WPPS:         s.SignalEngine.Weights.PPS,
 		WSyn:         s.SignalEngine.Weights.Syn,
 		WScan:        s.SignalEngine.Weights.Scan,
+		WBps:         s.SignalEngine.Weights.BPS,
 		SevCap:       s.SignalEngine.Weights.Cap,
 		SoftAt:       pe.SoftAt,
 		HardAt:       pe.HardAt,
@@ -100,6 +102,24 @@ func applyPolicyPackToCfg(pp *policy.PolicyPack, c *cfg) {
 		c.GraphFreezeMaxAction = s.Autonomy.MaxAction
 	}
 	c.GraphFreezeAllowBlock = s.Autonomy.AllowLocalBlock
+}
+
+// applyPDPBaselineToCfg writes baseline engine configuration from a PDPConfig.
+func applyPDPBaselineToCfg(dc *pdp.Config, c *cfg) {
+	b := dc.Spec.Baseline
+	// BaselineEnabled removed — baseline is always active when graph is enabled.
+	if b.MinObservations > 0 {
+		c.BaselineMinObservations = b.MinObservations
+	}
+	if b.Alpha > 0 {
+		c.BaselineAlpha = b.Alpha
+	}
+	if b.AlphaBootstrap > 0 {
+		c.BaselineAlphaBootstrap = b.AlphaBootstrap
+	}
+	if b.DeviationThreshold > 0 {
+		c.BaselineDeviationThreshold = b.DeviationThreshold
+	}
 }
 
 // applyPDPGraphToCfg writes graph learning and freeze configuration from a

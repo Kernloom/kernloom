@@ -4,6 +4,7 @@
 package main
 
 import (
+	"fmt"
 	"log"
 	"net"
 	"strings"
@@ -11,6 +12,15 @@ import (
 )
 
 /* ---------------- misc helpers ---------------- */
+
+// fmtBPS formats a bytes/s trigger for log output.
+// Returns "off" when the trigger is disabled (0), otherwise the numeric value.
+func fmtBPS(v float64) string {
+	if v <= 0 {
+		return "off"
+	}
+	return fmt.Sprintf("%.0f", v)
+}
 
 func ip4String(k [4]byte) string  { return net.IPv4(k[0], k[1], k[2], k[3]).String() }
 func ip6String(k [16]byte) string { return net.IP(k[:]).String() }
@@ -121,6 +131,29 @@ func graphStrikesFromScore(score int) int {
 		return 2
 	default:
 		return 1
+	}
+}
+
+// sendStrike parses subjectID as an IP address and sends a graphStrikeMsg to ch.
+// No-op if the IP cannot be parsed or the channel is full.
+func sendStrike(ch chan<- graphStrikeMsg, subjectID string, n int, forceBlock bool) {
+	ip := net.ParseIP(subjectID)
+	if ip == nil {
+		return
+	}
+	var msg graphStrikeMsg
+	msg.n = n
+	msg.forceBlock = forceBlock
+	if ip4 := ip.To4(); ip4 != nil {
+		copy(msg.ip4[:], ip4)
+	} else {
+		msg.isV6 = true
+		copy(msg.ip6[:], ip.To16())
+	}
+	select {
+	case ch <- msg:
+	default:
+		kliqLog.Printf("STRIKE dropped (channel full) subject=%s", subjectID)
 	}
 }
 
