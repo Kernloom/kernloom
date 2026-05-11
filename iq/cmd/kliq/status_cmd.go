@@ -203,8 +203,24 @@ func min3(a, b int) int {
 // runRuntimeStatus prints the active FeatureSet for a given profile.
 // Usage: kliq runtime status [profile]
 func runRuntimeStatus(profile featureset.RuntimeProfile) {
+	// klshield-light means XDP only — KLIQ is not part of this setup at all.
+	if profile == featureset.ProfileKLShieldLight {
+		fmt.Println("Profile: klshield-light")
+		fmt.Println()
+		fmt.Println("  This profile runs klshield (XDP) only — no kliq needed.")
+		fmt.Println("  Static deny lists, optional default rate limit, no autotune.")
+		fmt.Println()
+		fmt.Println("  Setup:")
+		fmt.Println("    sudo klshield attach-xdp --iface eth0")
+		fmt.Println("    sudo klshield set-default-rl --rate 1000 --burst 2000  # optional")
+		fmt.Println("    sudo klshield add-deny-ip <ip>                          # manual blocks")
+		fmt.Println()
+		fmt.Println("  Do not start kliq — it is not needed and adds no value here.")
+		return
+	}
+
 	fs := featureset.FeaturesFor(profile)
-	fmt.Printf("Kernloom IQ — runtime profile: %s\n\n", profile)
+	fmt.Printf("Profile: %s\n\n", profile)
 	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
 	enabled := func(b bool) string {
 		if b {
@@ -213,7 +229,7 @@ func runRuntimeStatus(profile featureset.RuntimeProfile) {
 		return "disabled"
 	}
 	fmt.Fprintln(w, "  Shield XDP:\t"+enabled(fs.ShieldXDP))
-	fmt.Fprintln(w, "  Userspace IQ:\t"+enabled(fs.UserspaceIQ))
+	fmt.Fprintln(w, "  Userspace IQ (kliq):\t"+enabled(fs.UserspaceIQ))
 	fmt.Fprintln(w, "  Source heuristic:\t"+enabled(fs.SourceHeuristic))
 	fmt.Fprintln(w, "  Global autotune:\t"+enabled(fs.GlobalAutotune))
 	fmt.Fprintln(w, "  Source baseline:\t"+enabled(fs.SourceBaseline))
@@ -224,5 +240,12 @@ func runRuntimeStatus(profile featureset.RuntimeProfile) {
 	fmt.Fprintln(w, "  Tuple enforcement:\t"+enabled(fs.TupleEnforcement))
 	w.Flush()
 	fmt.Println()
-	fmt.Println("Available profiles: dos-light  iq-learning  graph-learning  graph-enforce  klshield-light")
+	fmt.Println("kliq profiles (all require kliq + klshield):")
+	fmt.Println("  dos-light      source heuristic + autotune, no graph, no SQLite")
+	fmt.Println("  iq-learning    dos-light + per-source EWMA baseline")
+	fmt.Println("  graph-learning iq-learning + flow telemetry + graph + edge baseline + SQLite")
+	fmt.Println("  graph-enforce  graph-learning + XDP tuple enforcement")
+	fmt.Println()
+	fmt.Println("klshield-only profile (no kliq needed):")
+	fmt.Println("  klshield-light XDP only — static deny/allow, optional default RL")
 }
