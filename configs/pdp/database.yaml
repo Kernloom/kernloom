@@ -1,4 +1,10 @@
 # PDPConfig — Database Server (Production)
+# Feature profile:  minimum graph-learning
+#                   recommended graph-learning
+#
+# Start command:
+#   sudo kliq --pdp-config=<this-file> --graph --graph-mode=frozen-observe --dry-run=false
+#
 
 apiVersion: kernloom.io/v1alpha1
 kind: PDPConfig

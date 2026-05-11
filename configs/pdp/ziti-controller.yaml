@@ -1,4 +1,10 @@
 # PDPConfig — OpenZiti Controller (Production)
+# Feature profile:  minimum dos-light
+#                   recommended iq-learning
+#
+# Start command:
+#   sudo kliq --pdp-config=<this-file> --dry-run=false
+#
 #
 # Use AFTER completing the bootstrap phase:
 #   1. kliq status shows "steady" or bootstrap-3 with stable triggers

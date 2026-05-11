@@ -1,4 +1,10 @@
 # PDPConfig — Reverse Proxy / Load Balancer (Production)
+# Feature profile:  minimum dos-light
+#                   recommended iq-learning
+#
+# Start command:
+#   sudo kliq --pdp-config=<this-file> --dry-run=false
+#
 
 apiVersion: kernloom.io/v1alpha1
 kind: PDPConfig

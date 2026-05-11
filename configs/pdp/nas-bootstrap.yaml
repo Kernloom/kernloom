@@ -1,4 +1,10 @@
 # PDPConfig — NAS / Storage Node (Bootstrap, 14 days)
+# Feature profile:  minimum graph-learning
+#                   recommended graph-learning
+#
+# Start command:
+#   sudo kliq --pdp-config=<this-file> --graph --graph-mode=learn --dry-run=true --whitelist-learn=true
+#
 #
 # Covers: Synology, TrueNAS, QNAP, MinIO, and similar storage nodes.
 #

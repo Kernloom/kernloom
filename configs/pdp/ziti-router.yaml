@@ -1,4 +1,10 @@
 # PDPConfig — OpenZiti Router / Edge Router (Production)
+# Feature profile:  minimum dos-light
+#                   recommended iq-learning
+#
+# Start command:
+#   sudo kliq --pdp-config=<this-file> --dry-run=false
+#
 #
 # Use after completing the router bootstrap. Expects learned trigger values
 # in state.json. Graph should be in frozen-observe or frozen-enforce mode.
