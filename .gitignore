@@ -48,4 +48,7 @@ coverage.out
 .env
 .env.*
 
+# Internal / AI collaboration docs — never committed
+_docs/
+
 .claude
