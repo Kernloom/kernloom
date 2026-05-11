@@ -43,7 +43,7 @@ spec:
     reset: 0.20
 
   graph:
-    enabled: true
+    enabled: false
     mode:    learn
     store:   /var/lib/kernloom/iq/kliq.db
     promotion:
