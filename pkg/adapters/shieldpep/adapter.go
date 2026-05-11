@@ -8,6 +8,7 @@ package shieldpep
 
 import (
 	"context"
+	"fmt"
 	"log"
 	"net"
 	"os"
@@ -191,6 +192,72 @@ func (a *Adapter) TransitionV6(
 
 	return applyStateFields(st, target, now, p)
 }
+
+/* ---------------- Tuple (edge) enforcement -------------------------------- */
+
+// DenyEdge4 inserts an edge4_deny entry so XDP drops all future packets
+// matching (srcIP, dstPort, proto) before they reach userspace.
+// Returns ErrTupleUnavailable when the Shield BPF version does not have
+// edge maps (run `klshield attach-xdp` with the new .bpf.o to activate).
+func (a *Adapter) DenyEdge4(key shieldclient.Edge4Key) error {
+	if a.dryRun {
+		logger.Printf("[dry-run] DenyEdge4 src=%v port=%d proto=%d", key.SrcIP, key.DstPort, key.Proto)
+		return nil
+	}
+	if a.maps.Edge4Deny == nil {
+		return ErrTupleUnavailable
+	}
+	return a.maps.WriteEdge4Deny(key)
+}
+
+// RevokeEdgeDeny4 removes an edge4_deny entry — the XDP deny is lifted.
+func (a *Adapter) RevokeEdgeDeny4(key shieldclient.Edge4Key) error {
+	if a.dryRun || a.maps.Edge4Deny == nil {
+		return nil
+	}
+	return a.maps.DeleteEdge4Deny(key)
+}
+
+// RateLimitEdge4 installs a per-edge XDP token-bucket rate limit.
+func (a *Adapter) RateLimitEdge4(key shieldclient.Edge4Key, ratePPS, burst uint64) error {
+	if a.dryRun {
+		logger.Printf("[dry-run] RateLimitEdge4 src=%v port=%d proto=%d rate=%d burst=%d",
+			key.SrcIP, key.DstPort, key.Proto, ratePPS, burst)
+		return nil
+	}
+	if a.maps.Edge4RL == nil {
+		return ErrTupleUnavailable
+	}
+	return a.maps.WriteEdge4RL(key, ratePPS, burst)
+}
+
+// RevokeEdgeRL4 removes a per-edge rate-limit entry.
+func (a *Adapter) RevokeEdgeRL4(key shieldclient.Edge4Key) error {
+	if a.dryRun || a.maps.Edge4RL == nil {
+		return nil
+	}
+	return a.maps.DeleteEdge4RL(key)
+}
+
+// SetTupleEnforce enables or disables XDP tuple enforcement globally.
+func (a *Adapter) SetTupleEnforce(on bool) error {
+	if a.dryRun {
+		logger.Printf("[dry-run] SetTupleEnforce on=%v", on)
+		return nil
+	}
+	return a.maps.SetTupleEnforce(on)
+}
+
+// TupleAvailable reports whether the edge maps are present (Shield reloaded
+// with XDP tuple support).
+func (a *Adapter) TupleAvailable() bool {
+	return a.maps.Edge4Deny != nil && a.maps.Edge4RL != nil
+}
+
+// ErrTupleUnavailable is returned when edge maps are not present.
+// Solution: reload klshield with the new .bpf.o that includes edge maps.
+var ErrTupleUnavailable = fmt.Errorf(
+	"XDP tuple maps not available — reload klshield: klshield attach-xdp --force")
 
 // applyStateFields sets Level, CooldownUntil and ExpiresAt on the state after a transition.
 func applyStateFields(st fsm.State, target fsm.Level, now time.Time, p EnforcementParams) fsm.State {

@@ -248,6 +248,63 @@ struct {
     __type(value, struct xdp_cfg_t);
 } xdp_cfg SEC(".maps");
 
+/* ==================== Tuple (edge) enforcement ==================== */
+/*
+ * edge4_key identifies an ingress flow by source IP, destination port and
+ * protocol. Matches the graph edge model: src_ip -> this_node:dst_port/proto.
+ *
+ * SrcIP:   network byte order (as loaded from packet, same as src4_stats key).
+ * DstPort: HOST byte order (converted via bpf_ntohs, matches flow4_key).
+ * Proto:   IPPROTO_TCP=6, UDP=17, ICMP=1.
+ * Pad:     must be zero for correct map lookup.
+ */
+struct edge4_key {
+    __u32 src_ip;
+    __u16 dst_port;
+    __u8  proto;
+    __u8  _pad;
+};
+
+/* Deny map: drop all traffic matching (src_ip, dst_port, proto). */
+struct {
+    __uint(type, BPF_MAP_TYPE_LRU_HASH);
+    __uint(max_entries, 65536);
+    __type(key,   struct edge4_key);
+    __type(value, __u8);
+} edge4_deny SEC(".maps");
+
+/* Per-edge rate-limit policy (src_ip, dst_port, proto) → rl_cfg_t. */
+struct {
+    __uint(type, BPF_MAP_TYPE_HASH);
+    __uint(max_entries, 65536);
+    __type(key,   struct edge4_key);
+    __type(value, struct rl_cfg_t);
+} edge4_rl_policy SEC(".maps");
+
+/* Per-edge token-bucket state. LRU so old entries evict automatically. */
+struct {
+    __uint(type, BPF_MAP_TYPE_LRU_HASH);
+    __uint(max_entries, 65536);
+    __type(key,   struct edge4_key);
+    __type(value, struct rl_state_t);
+} edge4_rl_state SEC(".maps");
+
+/*
+ * Tuple enforcement config (separate from xdp_cfg to preserve ABI).
+ *   enforce: 0 = disabled, 1 = deny+rl mode active.
+ */
+struct edge4_cfg_t {
+    __u32 enforce;
+    __u32 _pad;
+};
+
+struct {
+    __uint(type, BPF_MAP_TYPE_ARRAY);
+    __uint(max_entries, 1);
+    __type(key, __u32);
+    __type(value, struct edge4_cfg_t);
+} edge4_cfg SEC(".maps");
+
 /* ==================== Rate limiting (XDP) ==================== */
 struct rl_cfg_t {
     __u64 rate_pps;
@@ -439,6 +496,18 @@ static __always_inline const struct rl_cfg_t *select_rl_v4(__be32 saddr)
     if (ovr && ovr->rate_pps && ovr->burst) use = ovr;
 
     return use;
+}
+
+/* Tuple (edge) rate-limit selection for IPv4. Returns NULL when no entry. */
+static __always_inline const struct rl_cfg_t *select_edge_rl_v4(
+        __be32 saddr, __u16 dst_port_host, __u8 proto)
+{
+    struct edge4_key ek = {};
+    ek.src_ip   = saddr;
+    ek.dst_port = dst_port_host;
+    ek.proto    = proto;
+    ek._pad     = 0;
+    return bpf_map_lookup_elem(&edge4_rl_policy, &ek);
 }
 
 static __always_inline const struct rl_cfg_t *select_rl_v6(const __u8 *saddr16)
@@ -847,6 +916,43 @@ int xdp_klshield(struct xdp_md *ctx)
                 } else {
                     if (!tb_allow_and_update(st, use, now))
                         drop_rl = true;
+                }
+            }
+        }
+
+        /* ---- Tuple (edge) enforcement ---- */
+        /* Runs after source-level checks. Only when edge4_cfg.enforce == 1. */
+        if (!drop_allow && !drop_deny && !drop_rl && dport != 0) {
+            __u32 ecfg_idx = 0;
+            struct edge4_cfg_t *ecfg = bpf_map_lookup_elem(&edge4_cfg, &ecfg_idx);
+            if (ecfg && ecfg->enforce) {
+                struct edge4_key ek = {};
+                ek.src_ip   = saddr;
+                ek.dst_port = bpf_ntohs(dport);
+                ek.proto    = l4proto;
+                ek._pad     = 0;
+
+                /* Edge deny check */
+                if (bpf_map_lookup_elem(&edge4_deny, &ek)) {
+                    drop_deny = true;
+                    if (t) t->deny_hits++;
+                }
+
+                /* Edge rate limit (only when not denied) */
+                if (!drop_deny) {
+                    const struct rl_cfg_t *erl = select_edge_rl_v4(saddr, ek.dst_port, l4proto);
+                    if (erl && erl->rate_pps && erl->burst) {
+                        if (t) t->rl_hits++;
+                        struct rl_state_t *est = bpf_map_lookup_elem(&edge4_rl_state, &ek);
+                        if (!est) {
+                            __u64 init_toks = (erl->burst > 0) ? (erl->burst - 1) : 0;
+                            struct rl_state_t init = { .last_ns = now, .tokens = init_toks };
+                            bpf_map_update_elem(&edge4_rl_state, &ek, &init, BPF_ANY);
+                        } else {
+                            if (!tb_allow_and_update(est, erl, now))
+                                drop_rl = true;
+                        }
+                    }
                 }
             }
         }
