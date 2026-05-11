@@ -12,6 +12,7 @@ package shieldclient
 import (
 	"fmt"
 	"log"
+	"net"
 	"os"
 	"path/filepath"
 
@@ -30,6 +31,11 @@ const (
 	MapPinDeny6     = "kernloom_deny6_hash"
 	MapPinRLPolicy4 = "kernloom_rl_policy4"
 	MapPinRLPolicy6 = "kernloom_rl_policy6"
+
+	// Tuple (edge) enforcement maps — Sprint 8 / XDP tuple map integration.
+	MapPinEdge4Deny = "kernloom_edge4_deny"
+	MapPinEdge4RL   = "kernloom_edge4_rl_policy"
+	MapPinEdge4Cfg  = "kernloom_edge4_cfg"
 )
 
 /* ---------------- eBPF struct types (MUST match Shield C layouts) --------- */
@@ -158,24 +164,90 @@ type Src6Key struct{ IP [16]byte }
 // Key6Bytes is the map key for kernloom_deny6_hash.
 type Key6Bytes struct{ IP [16]byte }
 
+// Edge4Key matches struct edge4_key in the Shield BPF program.
+// It identifies an ingress flow by (src_ip, dst_port, proto).
+//
+// SrcIP:   4-byte network-byte-order IPv4 address (as loaded from packet).
+// DstPort: destination port in HOST byte order (0 for ICMP).
+// Proto:   IP protocol number (IPPROTO_TCP=6, UDP=17, ICMP=1).
+// Pad:     must be zero — BPF verifier requires consistent key bytes.
+type Edge4Key struct {
+	SrcIP   [4]byte
+	DstPort uint16
+	Proto   uint8
+	Pad     uint8
+}
+
+// ProtoTCP, ProtoUDP, ProtoICMP are convenience constants for Edge4Key.Proto.
+const (
+	ProtoTCP  uint8 = 6
+	ProtoUDP  uint8 = 17
+	ProtoICMP uint8 = 1
+)
+
+// NewEdge4Key builds an Edge4Key from a parsed IPv4 address string, port and
+// proto string ("tcp", "udp", "icmp"). Returns false when the IP cannot be
+// parsed as IPv4.
+func NewEdge4Key(srcIP string, dstPort uint16, proto string) (Edge4Key, bool) {
+	ip := parseIPv4(srcIP)
+	if ip == nil {
+		return Edge4Key{}, false
+	}
+	var p uint8
+	switch proto {
+	case "tcp":
+		p = ProtoTCP
+	case "udp":
+		p = ProtoUDP
+	case "icmp":
+		p = ProtoICMP
+	default:
+		return Edge4Key{}, false
+	}
+	var k Edge4Key
+	copy(k.SrcIP[:], ip)
+	k.DstPort = dstPort
+	k.Proto = p
+	return k, true
+}
+
+func parseIPv4(s string) []byte {
+	ip := net.ParseIP(s)
+	if ip == nil {
+		return nil
+	}
+	return ip.To4()
+}
+
 /* ---------------- Maps struct --------------------------------------------- */
 
 // Maps holds handles to all Shield pinned eBPF maps.
-// Optional maps (Src6, Flow4, Totals, Deny6, RL6) may be nil when not available.
+// Optional maps (Src6, Flow4, Totals, Deny6, RL6, Edge4*) may be nil when not available.
 type Maps struct {
 	Src4   *ebpf.Map // mandatory telemetry map (IPv4)
 	Src6   *ebpf.Map // optional telemetry map (IPv6)
-	Flow4  *ebpf.Map // optional per-flow telemetry map (Option B, LRU_HASH)
+	Flow4  *ebpf.Map // optional per-flow telemetry map (LRU_HASH)
 	Deny4  *ebpf.Map // mandatory enforcement map (IPv4 deny) when !dryRun
 	RL4    *ebpf.Map // mandatory enforcement map (IPv4 rate-limit) when !dryRun
 	Deny6  *ebpf.Map // optional enforcement map (IPv6 deny)
 	RL6    *ebpf.Map // optional enforcement map (IPv6 rate-limit)
 	Totals *ebpf.Map // optional totals/per-cpu array
+
+	// Tuple (edge) enforcement maps — nil when TupleEnforcement feature is disabled
+	// or when the Shield BPF version does not yet have these maps loaded.
+	Edge4Deny *ebpf.Map // edge4_deny LRU hash: Edge4Key → u8
+	Edge4RL   *ebpf.Map // edge4_rl_policy hash: Edge4Key → RLConfig
+	Edge4Cfg  *ebpf.Map // edge4_cfg array: index 0 → {enforce u32, _pad u32}
 }
 
 // Close closes all non-nil map handles.
 func (m *Maps) Close() {
-	for _, mp := range []*ebpf.Map{m.Src4, m.Src6, m.Flow4, m.Deny4, m.RL4, m.Deny6, m.RL6, m.Totals} {
+	for _, mp := range []*ebpf.Map{
+		m.Src4, m.Src6, m.Flow4,
+		m.Deny4, m.RL4, m.Deny6, m.RL6,
+		m.Totals,
+		m.Edge4Deny, m.Edge4RL, m.Edge4Cfg,
+	} {
 		if mp != nil {
 			mp.Close()
 		}
@@ -240,7 +312,104 @@ func Open(root string, dryRun bool) (*Maps, error) {
 		logger.Printf("IPv6 rl policy map not available (optional): %v", err)
 	}
 
+	// Tuple (edge) enforcement maps — optional; only present when Shield has been
+	// built with XDP tuple support and the program reloaded.
+	if em, err := OpenPinnedMap(filepath.Join(root, MapPinEdge4Deny)); err == nil {
+		m.Edge4Deny = em
+	} else {
+		logger.Printf("edge4_deny map not available (tuple enforcement disabled): %v", err)
+	}
+	if em, err := OpenPinnedMap(filepath.Join(root, MapPinEdge4RL)); err == nil {
+		m.Edge4RL = em
+	} else {
+		logger.Printf("edge4_rl_policy map not available (tuple enforcement disabled): %v", err)
+	}
+	if em, err := OpenPinnedMap(filepath.Join(root, MapPinEdge4Cfg)); err == nil {
+		m.Edge4Cfg = em
+	}
+
 	return m, nil
+}
+
+/* ---------------- Edge enforcement helpers -------------------------------- */
+
+// WriteEdge4Deny inserts or overwrites an edge4_deny entry.
+// After this call every packet matching (srcIP, dstPort, proto) is dropped
+// in XDP before reaching userspace — regardless of source-level RL/allow.
+func (m *Maps) WriteEdge4Deny(key Edge4Key) error {
+	if m.Edge4Deny == nil {
+		return fmt.Errorf("edge4_deny map not available (reload Shield with tuple support)")
+	}
+	v := uint8(1)
+	return m.Edge4Deny.Update(&key, &v, ebpf.UpdateAny)
+}
+
+// DeleteEdge4Deny removes an edge deny entry. No-op if the key is not present.
+func (m *Maps) DeleteEdge4Deny(key Edge4Key) error {
+	if m.Edge4Deny == nil {
+		return fmt.Errorf("edge4_deny map not available")
+	}
+	err := m.Edge4Deny.Delete(&key)
+	if err != nil && err.Error() == "key does not exist" {
+		return nil
+	}
+	return err
+}
+
+// WriteEdge4RL sets a per-edge token-bucket rate limit.
+// The XDP token bucket kicks in immediately for matching flows.
+func (m *Maps) WriteEdge4RL(key Edge4Key, ratePPS, burst uint64) error {
+	if m.Edge4RL == nil {
+		return fmt.Errorf("edge4_rl_policy map not available")
+	}
+	cfg := RLConfig{RatePPS: ratePPS, Burst: burst}
+	return m.Edge4RL.Update(&key, &cfg, ebpf.UpdateAny)
+}
+
+// DeleteEdge4RL removes a per-edge rate-limit entry.
+func (m *Maps) DeleteEdge4RL(key Edge4Key) error {
+	if m.Edge4RL == nil {
+		return fmt.Errorf("edge4_rl_policy map not available")
+	}
+	err := m.Edge4RL.Delete(&key)
+	if err != nil && err.Error() == "key does not exist" {
+		return nil
+	}
+	return err
+}
+
+// edge4CfgValue is the value stored in the edge4_cfg ARRAY map.
+type edge4CfgValue struct {
+	Enforce uint32
+	Pad     uint32
+}
+
+// SetTupleEnforce enables (true) or disables (false) XDP tuple enforcement.
+// When disabled the edge deny/rl maps are present but not consulted in the
+// packet path — useful for loading entries before activating enforcement.
+func (m *Maps) SetTupleEnforce(on bool) error {
+	if m.Edge4Cfg == nil {
+		return fmt.Errorf("edge4_cfg map not available (reload Shield with tuple support)")
+	}
+	var k uint32 = 0
+	v := edge4CfgValue{}
+	if on {
+		v.Enforce = 1
+	}
+	return m.Edge4Cfg.Update(&k, &v, ebpf.UpdateAny)
+}
+
+// TupleEnforceActive returns true when XDP tuple enforcement is currently active.
+func (m *Maps) TupleEnforceActive() bool {
+	if m.Edge4Cfg == nil {
+		return false
+	}
+	var k uint32 = 0
+	var v edge4CfgValue
+	if err := m.Edge4Cfg.Lookup(&k, &v); err != nil {
+		return false
+	}
+	return v.Enforce != 0
 }
 
 // OpenPinnedMap is a thin wrapper around ebpf.LoadPinnedMap.
