@@ -26,6 +26,7 @@ import (
 	"github.com/adrianenderlin/kernloom/pkg/core/graph"
 	"github.com/adrianenderlin/kernloom/pkg/core/observation"
 	"github.com/adrianenderlin/kernloom/pkg/core/signal"
+	"github.com/adrianenderlin/kernloom/pkg/core/suspicious"
 )
 
 var logger = log.New(os.Stderr, "[graph-learner] ", log.LstdFlags)
@@ -54,9 +55,16 @@ type Store interface {
 	ExpireCandidatesBySource(nodeID, sourceID string, minSeenCount uint64) (int, error)
 	// UpdateEdgeBaseline updates the EWMA traffic baseline for a specific edge.
 	// Must only be called when the source is not suspicious (anti-poisoning).
-	UpdateEdgeBaseline(key graph.EdgeKey, pps, bytesPS, alphaStable, alphaBootstrap float64, minObs uint64) error
-	// EdgeBaselineDeviation returns deviation factors vs the learned baseline.
+	UpdateEdgeBaseline(key graph.EdgeKey, pps, bytesPS, alphaStable, alphaBootstrap float64, minObs, minObsTimeBased uint64, minAge time.Duration) error
+	// UpdateEdgeBaselineDecay is UpdateEdgeBaseline with optional half-life peak decay.
+	UpdateEdgeBaselineDecay(key graph.EdgeKey, pps, bytesPS, alphaStable, alphaBootstrap float64, minObs, minObsTimeBased uint64, minAge time.Duration, peakDecayHalfLife time.Duration) error
+	// EdgeBaselineDeviation returns EWMA deviation factors vs the learned baseline.
 	EdgeBaselineDeviation(key graph.EdgeKey, pps, bytesPS float64) (devPPS, devBytes float64)
+	// EdgeBaselinePeakDeviation returns pps/peak and bps/peak ratios.
+	// > peakTolerance means the edge exceeded its learned maximum.
+	EdgeBaselinePeakDeviation(key graph.EdgeKey, pps, bytesPS float64) (factorPPS, factorBPS float64)
+	// ListSourcesWithLearnedEdges returns source IPs with learned/approved/frozen edges.
+	ListSourcesWithLearnedEdges(nodeID string) (map[string]struct{}, error)
 }
 
 // Config configures the graph learner adapter.
@@ -103,13 +111,29 @@ type Config struct {
 	// BaselineAlpha is the stable long-run EWMA adaptation speed (e.g. 0.02).
 	BaselineAlpha float64
 	// BaselineAlphaBootstrap is the faster alpha used while obs < BaselineMinObservations.
-	// Allows quick initial convergence before switching to the stable alpha.
-	// Default 0.10 when unset.
 	BaselineAlphaBootstrap float64
-	// BaselineMinObservations before a profile is used for anomaly detection.
+	// BaselineMinObservations before a profile is promoted to learned (observation-based).
 	BaselineMinObservations uint64
+	// BaselineMinObsTimeBased is the lower observation threshold for time-based promotion.
+	// An edge is promoted when obs >= BaselineMinObsTimeBased AND age >= BaselineMinAge.
+	// Useful for low-frequency traffic (weekly cron jobs etc.). 0 = disabled.
+	BaselineMinObsTimeBased uint64
+	// BaselineMinAge is the minimum edge age for time-based promotion.
+	BaselineMinAge time.Duration
 	// BaselineDeviationThreshold is the MAD multiplier that triggers a signal.
 	BaselineDeviationThreshold float64
+
+	// BaselineMinUpdatePPS / BaselineMinUpdateBPS filter out very-low-traffic
+	// ticks (keepalives, noise) from EWMA updates. Without this, bimodal sources
+	// (idle keepalives + response bursts) converge to the idle level and trigger
+	// deviation signals on every burst. 0 = disabled.
+	BaselineMinUpdatePPS float64
+	BaselineMinUpdateBPS float64
+
+	// BaselinePeakTolerance is the multiplier applied to the learned peak before
+	// emitting a peak-exceeded signal. Default 1.5 (50% above learned maximum).
+	// Lower = more sensitive; 1.0 = any new maximum triggers.
+	BaselinePeakTolerance float64
 
 	// BaselineTrigPPS and BaselineTrigBPS are the host-level trigger thresholds
 	// from the signal engine. Observations that exceed these values are by
@@ -119,25 +143,52 @@ type Config struct {
 	// 0 = disabled (no cap).
 	BaselineTrigPPS float64
 	BaselineTrigBPS float64
+
+	// BaselinePeakDecayHalfLife is the Sprint-5 decaying peak configuration.
+	// 0 = disabled (running maximum, original behaviour).
+	// Recommended: 336h (14 days) — a spike from two weeks ago decays to 50% of its
+	// original value, preventing it from permanently capping legitimate burst detection.
+	BaselinePeakDecayHalfLife time.Duration
 }
 
-// suspiciousEntry tracks an IP flagged by the heuristic signal engine.
-type suspiciousEntry struct {
-	expiresAt time.Time
+// pendingBaselineUpdate buffers a baseline observation for the delayed-commit
+// anti-poisoning pattern (Sprint 4). Updates are committed only after
+// CommitDelay has elapsed and neither the source nor the edge became suspicious
+// in the interim.
+type pendingBaselineUpdate struct {
+	Key        graph.EdgeKey
+	PPS        float64
+	BPS        float64
+	ObservedAt time.Time
+	CommitAt   time.Time
 }
 
 // Adapter is the graph learner adapter.
 type Adapter struct {
 	cfg          Config
 	store        Store
-	excludeCIDRs []net.IPNet // parsed once from cfg.ExcludeSourceCIDRs
+	excludeCIDRs []net.IPNet
 	healthy      atomic.Bool
 	cancel       context.CancelFunc
 	wg           sync.WaitGroup
 
-	suspMu     sync.Mutex
-	suspicious map[string]suspiciousEntry // key: IP string
+	// susp is the shared source+edge suspicious registry (Sprint 4).
+	susp *suspicious.Registry
+
+	// knownSources caches source IPs with learned/approved/frozen edges.
+	// Refreshed every promote cycle so the isSuspicious bypass kicks in quickly.
+	knownMu      sync.RWMutex
+	knownSources map[string]struct{}
+
+	// pendingMu guards pendingUpdates.
+	pendingMu      sync.Mutex
+	pendingUpdates []pendingBaselineUpdate
 }
+
+// CommitDelay is how long a baseline update is held in the pending buffer before
+// being committed. Long enough for a signal to fire and mark the source suspicious,
+// but short enough not to lag the learning curve significantly.
+const CommitDelay = 30 * time.Second
 
 // New creates a new graph learner adapter.
 func New(cfg Config, store Store) *Adapter {
@@ -145,7 +196,8 @@ func New(cfg Config, store Store) *Adapter {
 		cfg:          cfg,
 		store:        store,
 		excludeCIDRs: cfg.ExcludeSourceCIDRs,
-		suspicious:   make(map[string]suspiciousEntry),
+		susp:         suspicious.New(),
+		knownSources: make(map[string]struct{}),
 	}
 	a.healthy.Store(false)
 	return a
@@ -227,20 +279,45 @@ func (a *Adapter) handleSignal(sig signal.Signal) {
 		signal.SignalScanSuspected,
 		signal.SignalRateLimitDropsSustained,
 		signal.SignalGraphEdgeBaselinePPSDeviation,
-		signal.SignalGraphEdgeBaselineBytesDeviation:
+		signal.SignalGraphEdgeBaselineBytesDeviation,
+		signal.SignalGraphEdgeBaselinePPSPeakExceeded,
+		signal.SignalGraphEdgeBaselineBPSPeakExceeded:
 	default:
 		return
 	}
 	if sig.Subject.ID == "" {
 		return
 	}
+
+	// For sources with established learned/approved/frozen edges, PPS- and
+	// BPS-based global trigger signals should not block edge baseline learning.
+	// The edge baseline (peak model + EWMA) is the relevant detector for known
+	// sources. SYN, scan and RL signals still apply — these indicate threats
+	// even for known sources.
+	if a.sourceIsKnown(sig.Subject.ID) {
+		switch sig.Type {
+		case signal.SignalPPSHigh, signal.SignalBPSHigh:
+			return // edge baseline handles known sources
+		}
+	}
 	ttl := sig.TTL
 	if ttl <= 0 {
 		ttl = 5 * time.Minute
 	}
-	a.suspMu.Lock()
-	a.suspicious[sig.Subject.ID] = suspiciousEntry{expiresAt: time.Now().Add(ttl)}
-	a.suspMu.Unlock()
+	a.susp.MarkSource(sig.Subject.ID, ttl)
+
+	// For freeze-violation signals, also mark the specific edge suspicious so
+	// other edges from the same source continue learning (edge-level granularity).
+	if sig.Type == signal.SignalGraphNewEdgeAfterFreeze {
+		if port, err := strconv.ParseUint(sig.Attributes["destination_port"], 10, 16); err == nil {
+			a.susp.MarkEdge(suspicious.EdgeKey{
+				SourceID:        sig.Subject.ID,
+				DestinationID:   sig.Object.ID,
+				Protocol:        sig.Attributes["protocol"],
+				DestinationPort: uint16(port),
+			}, ttl)
+		}
+	}
 
 	// Expire only fresh candidate edges (seen_count < minSeen) that snuck in
 	// during the attack burst. Established candidates survive — they represent
@@ -256,20 +333,31 @@ func (a *Adapter) handleSignal(sig signal.Signal) {
 	}
 }
 
-// isSuspicious returns true when the given IP is currently flagged.
-// Expired entries are evicted lazily on access.
+// sourceIsKnown returns true when the source has learned/approved/frozen edges.
+// Thread-safe; reads from the periodically refreshed knownSources cache.
+func (a *Adapter) sourceIsKnown(sourceID string) bool {
+	a.knownMu.RLock()
+	_, ok := a.knownSources[sourceID]
+	a.knownMu.RUnlock()
+	return ok
+}
+
+// refreshKnownSources updates the known-sources cache from the DB.
+// Called after every promote cycle so newly learned edges take effect quickly.
+func (a *Adapter) refreshKnownSources() {
+	known, err := a.store.ListSourcesWithLearnedEdges(a.cfg.NodeID)
+	if err != nil {
+		logger.Printf("refresh known sources: %v", err)
+		return
+	}
+	a.knownMu.Lock()
+	a.knownSources = known
+	a.knownMu.Unlock()
+}
+
+// isSuspicious returns true when the given source IP is currently flagged.
 func (a *Adapter) isSuspicious(ip string) bool {
-	a.suspMu.Lock()
-	defer a.suspMu.Unlock()
-	e, ok := a.suspicious[ip]
-	if !ok {
-		return false
-	}
-	if time.Now().After(e.expiresAt) {
-		delete(a.suspicious, ip)
-		return false
-	}
-	return true
+	return a.susp.IsSourceSuspicious(ip)
 }
 
 // observationLoop drains flow observations from the bus and updates the graph.
@@ -401,6 +489,17 @@ func (a *Adapter) handleObservation(ctx context.Context, bus adapterruntime.Even
 	if a.cfg.BaselineTrigBPS > 0 && bps > a.cfg.BaselineTrigBPS {
 		baselineClean = false
 	}
+	// Skip very-low-traffic ticks (keepalives, noise) that would drag the
+	// EWMA median down below the typical active traffic level. This is
+	// important for bimodal traffic (idle keepalives + response bursts):
+	// without this filter the median converges to the idle level, causing
+	// every burst to trigger a deviation signal.
+	if a.cfg.BaselineMinUpdatePPS > 0 && pps < a.cfg.BaselineMinUpdatePPS {
+		baselineClean = false
+	}
+	if a.cfg.BaselineMinUpdateBPS > 0 && bps < a.cfg.BaselineMinUpdateBPS {
+		baselineClean = false
+	}
 
 	alpha := a.cfg.BaselineAlpha
 	if alpha <= 0 {
@@ -411,13 +510,20 @@ func (a *Adapter) handleObservation(ctx context.Context, bus adapterruntime.Even
 		minObs = 30
 	}
 	if baselineClean {
-		alphaBootstrap := a.cfg.BaselineAlphaBootstrap
-		if alphaBootstrap <= 0 {
-			alphaBootstrap = 0.10
-		}
-		if err := a.store.UpdateEdgeBaseline(current.Key(), pps, bps, alpha, alphaBootstrap, minObs); err != nil {
-			logger.Printf("edge baseline update %s: %v", current.ID, err)
-		}
+		// Sprint 4: buffer the update. It will be committed after CommitDelay
+		// only if neither the source nor the edge became suspicious in the interim.
+		// This closes the race window where the first attack observation reaches
+		// the baseline before the signal fires.
+		now := time.Now()
+		a.pendingMu.Lock()
+		a.pendingUpdates = append(a.pendingUpdates, pendingBaselineUpdate{
+			Key:        current.Key(),
+			PPS:        pps,
+			BPS:        bps,
+			ObservedAt: now,
+			CommitAt:   now.Add(CommitDelay),
+		})
+		a.pendingMu.Unlock()
 	}
 
 	thresh := a.cfg.BaselineDeviationThreshold
@@ -444,6 +550,37 @@ func (a *Adapter) handleObservation(ctx context.Context, bus adapterruntime.Even
 			SetAttribute("edge", strconv.Itoa(int(dstPort))+"/"+proto).
 			SetAttribute("deviation_pps", strconv.FormatFloat(devPPS, 'f', 1, 64)).
 			SetAttribute("deviation_bytes", strconv.FormatFloat(devBytes, 'f', 1, 64))
+		_ = bus.PublishSignal(ctx, *sig)
+	}
+
+	// Peak deviation check: signal when current traffic exceeds the learned
+	// maximum by more than BaselinePeakTolerance. Unlike the EWMA check (which
+	// detects "above average"), this catches traffic that genuinely exceeds the
+	// historic maximum — even for bimodal sources where average is misleading.
+	peakTol := a.cfg.BaselinePeakTolerance
+	if peakTol <= 0 {
+		peakTol = 1.5
+	}
+	factorPPS, factorBPS := a.store.EdgeBaselinePeakDeviation(current.Key(), pps, bps)
+	if factorPPS > peakTol || factorBPS > peakTol {
+		factor := factorPPS
+		sigType := signal.SignalGraphEdgeBaselinePPSPeakExceeded
+		if factorBPS > factorPPS {
+			factor = factorBPS
+			sigType = signal.SignalGraphEdgeBaselineBPSPeakExceeded
+		}
+		score := 60 + int((factor-peakTol)*20)
+		if score > 99 {
+			score = 99
+		}
+		sig := signal.NewSignal(signal.ProducerKLIQ, signal.ScopeLocal, sigType, obs.Subject).
+			SetScore(score).
+			SetConfidence(85).
+			SetTTL(2*time.Minute).
+			AddReasonCode("baseline_edge_peak_exceeded").
+			SetAttribute("edge", strconv.Itoa(int(dstPort))+"/"+proto).
+			SetAttribute("peak_factor_pps", strconv.FormatFloat(factorPPS, 'f', 2, 64)).
+			SetAttribute("peak_factor_bps", strconv.FormatFloat(factorBPS, 'f', 2, 64))
 		_ = bus.PublishSignal(ctx, *sig)
 	}
 
@@ -485,15 +622,23 @@ func (a *Adapter) emitNewEdgeSignal(ctx context.Context, bus adapterruntime.Even
 	_ = bus.PublishSignal(ctx, *sig)
 }
 
-// maintenanceLoop periodically promotes candidates and marks expired edges.
+// maintenanceLoop periodically promotes candidates, marks expired edges, and
+// commits the pending baseline buffer.
 func (a *Adapter) maintenanceLoop(ctx context.Context) {
 	defer a.wg.Done()
 	ticker := time.NewTicker(a.cfg.PromoteInterval)
+	// Commit pending baseline updates more frequently (every 10s) so the 30s
+	// commit delay is honoured without waiting a full PromoteInterval.
+	commitTicker := time.NewTicker(10 * time.Second)
 	defer ticker.Stop()
+	defer commitTicker.Stop()
 	for {
 		select {
 		case <-ctx.Done():
 			return
+		case <-commitTicker.C:
+			a.commitPendingBaselines()
+			a.susp.Evict() // lazy TTL cleanup
 		case now := <-ticker.C:
 			n, err := a.store.PromoteCandidates(a.cfg.NodeID, a.cfg.Promotion, now)
 			if err != nil {
@@ -501,6 +646,9 @@ func (a *Adapter) maintenanceLoop(ctx context.Context) {
 			} else if n > 0 {
 				logger.Printf("promoted %d candidate(s) to learned", n)
 			}
+			// Refresh known-sources cache after promotion so newly learned edges
+			// immediately protect their source IPs from isSuspicious marking.
+			a.refreshKnownSources()
 			if a.cfg.ExpireTTL > 0 {
 				minSeen := a.cfg.Promotion.MinSeenCount
 				if minSeen == 0 {
@@ -513,6 +661,76 @@ func (a *Adapter) maintenanceLoop(ctx context.Context) {
 				}
 			}
 		}
+	}
+}
+
+// commitPendingBaselines writes ready pending updates to the store, dropping
+// any whose source or edge was marked suspicious since the observation time.
+func (a *Adapter) commitPendingBaselines() {
+	now := time.Now()
+	a.pendingMu.Lock()
+	remaining := a.pendingUpdates[:0]
+	ready := make([]pendingBaselineUpdate, 0, len(a.pendingUpdates))
+	for _, u := range a.pendingUpdates {
+		if now.Before(u.CommitAt) {
+			remaining = append(remaining, u) // not ready yet
+		} else {
+			ready = append(ready, u)
+		}
+	}
+	// Replace slice with only the not-yet-ready entries.
+	if len(remaining) == 0 {
+		a.pendingUpdates = a.pendingUpdates[:0]
+	} else {
+		a.pendingUpdates = remaining
+	}
+	a.pendingMu.Unlock()
+
+	alphaBootstrap := a.cfg.BaselineAlphaBootstrap
+	if alphaBootstrap <= 0 {
+		alphaBootstrap = 0.10
+	}
+	alpha := a.cfg.BaselineAlpha
+	if alpha <= 0 {
+		alpha = 0.1
+	}
+	minObs := a.cfg.BaselineMinObservations
+	if minObs == 0 {
+		minObs = 30
+	}
+
+	committed, dropped := 0, 0
+	for _, u := range ready {
+		// Drop if source became suspicious after we observed this packet.
+		if a.susp.WasSourceSuspiciousSince(u.Key.SourceID, u.ObservedAt) {
+			dropped++
+			continue
+		}
+		// Drop if the specific edge became suspicious (freeze violation, Sprint 4).
+		edgeKey := suspicious.EdgeKey{
+			SourceID:        u.Key.SourceID,
+			DestinationID:   u.Key.DestinationID,
+			Protocol:        u.Key.Protocol,
+			DestinationPort: u.Key.DestinationPort,
+		}
+		if a.susp.WasEdgeSuspiciousSince(edgeKey, u.ObservedAt) {
+			dropped++
+			continue
+		}
+		if err := a.store.UpdateEdgeBaselineDecay(
+			u.Key, u.PPS, u.BPS,
+			alpha, alphaBootstrap,
+			minObs, a.cfg.BaselineMinObsTimeBased,
+			a.cfg.BaselineMinAge,
+			a.cfg.BaselinePeakDecayHalfLife,
+		); err != nil {
+			logger.Printf("pending baseline commit %s→%s: %v", u.Key.SourceID, u.Key.DestinationID, err)
+		} else {
+			committed++
+		}
+	}
+	if committed+dropped > 0 {
+		logger.Printf("baseline commit: committed=%d dropped=%d (anti-poisoning)", committed, dropped)
 	}
 }
 
