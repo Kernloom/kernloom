@@ -44,6 +44,10 @@ func processCandidate4(m metrics, st fsm.State, nowWall time.Time, c cfg,
 	}
 
 	doTransition := func(st fsm.State, target fsm.Level) fsm.State {
+		// Bootstrap safety: cap enforcement at RATE_HARD unless explicitly allowed.
+		if c.BootstrapActive && !c.BootstrapAllowBlock && target == fsm.LevelBlock {
+			target = fsm.LevelHard
+		}
 		return pep.TransitionV4(m.IP4, st, target, nowWall, pepParams)
 	}
 
@@ -96,6 +100,9 @@ func processCandidate6(m metrics, st fsm.State, nowWall time.Time, c cfg,
 	}
 
 	doTransition := func(st fsm.State, target fsm.Level) fsm.State {
+		if c.BootstrapActive && !c.BootstrapAllowBlock && target == fsm.LevelBlock {
+			target = fsm.LevelHard
+		}
 		return pep.TransitionV6(m.IP6, st, target, nowWall, pepParams)
 	}
 
