@@ -312,12 +312,13 @@ func main() {
 			if err := pep.SetTupleEnforce(true); err != nil {
 				kliqLog.Printf("WARNING: tuple enforce activate failed: %v", err)
 			} else {
-				kliqLog.Printf("Tuple enforcement: XDP edge maps active")
+				kliqLog.Printf("Tuple enforcement: XDP edge maps active (deny-mode)")
 			}
 		} else {
 			kliqLog.Printf("WARNING: feature-profile=graph-enforce but edge maps not available. Reload klshield with new .bpf.o")
 		}
 	}
+
 
 	// Decision engine: adds audit trail for FSM transitions and enforces graph-freeze signals.
 	decPolicy := decisionengine.LocalPolicy{
@@ -555,6 +556,44 @@ func main() {
 			prevTotals = t
 			prevTotalsWall = time.Now()
 		}
+	}
+
+	// syncEdge4Allow writes all frozen/approved graph edges into edge4_allow so
+	// the XDP allowlist reflects the current frozen graph. Must be called before
+	// activating allow-mode (tuple-enforce allow). Also run periodically so newly
+	// approved edges are picked up without restarting KLIQ.
+	syncEdge4Allow := func() {
+		if graphStore == nil || !pep.TupleAvailable() {
+			return
+		}
+		edges, err := graphStore.ListByNode(nodeID, "")
+		if err != nil {
+			kliqLog.Printf("syncEdge4Allow: list edges: %v", err)
+			return
+		}
+		n := 0
+		for _, e := range edges {
+			if e.State != graph.EdgeFrozen && e.State != graph.EdgeApproved {
+				continue
+			}
+			ekey, ok := shieldclient.NewEdge4Key(e.Source.ID, e.DestinationPort, e.Protocol)
+			if !ok {
+				continue
+			}
+			if err := pep.AllowEdge4(ekey); err != nil {
+				kliqLog.Printf("syncEdge4Allow: %s:%d/%s: %v", e.Source.ID, e.DestinationPort, e.Protocol, err)
+			} else {
+				n++
+			}
+		}
+		if n > 0 {
+			kliqLog.Printf("syncEdge4Allow: synced %d frozen/approved edges to XDP allowlist", n)
+		}
+	}
+
+	// Populate allowlist on startup (idempotent: LRU map, duplicate writes are fine).
+	if features.TupleEnforcement {
+		syncEdge4Allow()
 	}
 
 	ticker := time.NewTicker(c.Interval)
@@ -978,6 +1017,11 @@ func main() {
 		// Housekeeping: bound memory.
 		if srcBL != nil && tickN%300 == 1 { // evict every ~5 min at 1s interval
 			srcBL.Evict(nowWall.Add(-24 * time.Hour))
+		}
+		// Re-sync XDP allowlist every 5 min so newly approved/frozen edges
+		// are picked up without a restart.
+		if features.TupleEnforcement && tickN%300 == 1 {
+			syncEdge4Allow()
 		}
 		for ip, pv := range prev4 {
 			if nowWall.Sub(pv.LastWall) > c.PrevTTL {
