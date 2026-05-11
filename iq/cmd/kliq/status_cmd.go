@@ -10,15 +10,30 @@ import (
 	"text/tabwriter"
 	"time"
 
+	"github.com/adrianenderlin/kernloom/pkg/core/featureset"
 	"github.com/adrianenderlin/kernloom/pkg/core/graph"
 	gstore "github.com/adrianenderlin/kernloom/pkg/graphstore/sqlite"
 )
 
-// handleStatusSubcommand handles "kliq status [state-file] [db]" without
-// starting the main kliq loop. Returns true if handled.
+// handleStatusSubcommand handles "kliq status" and "kliq runtime status"
+// without starting the main kliq loop. Returns true if handled.
 func handleStatusSubcommand(defaultStateFile, defaultDB string) bool {
 	args := os.Args[1:]
-	if len(args) < 1 || args[0] != "status" {
+	if len(args) < 1 {
+		return false
+	}
+
+	// "kliq runtime status [profile]"
+	if args[0] == "runtime" && len(args) >= 2 && args[1] == "status" {
+		profile := featureset.ProfileDOSLight
+		if len(args) >= 3 {
+			profile = featureset.RuntimeProfile(args[2])
+		}
+		runRuntimeStatus(profile)
+		return true
+	}
+
+	if args[0] != "status" {
 		return false
 	}
 
@@ -183,4 +198,31 @@ func min3(a, b int) int {
 		return a
 	}
 	return b
+}
+
+// runRuntimeStatus prints the active FeatureSet for a given profile.
+// Usage: kliq runtime status [profile]
+func runRuntimeStatus(profile featureset.RuntimeProfile) {
+	fs := featureset.FeaturesFor(profile)
+	fmt.Printf("Kernloom IQ — runtime profile: %s\n\n", profile)
+	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
+	enabled := func(b bool) string {
+		if b {
+			return "enabled"
+		}
+		return "disabled"
+	}
+	fmt.Fprintln(w, "  Shield XDP:\t"+enabled(fs.ShieldXDP))
+	fmt.Fprintln(w, "  Userspace IQ:\t"+enabled(fs.UserspaceIQ))
+	fmt.Fprintln(w, "  Source heuristic:\t"+enabled(fs.SourceHeuristic))
+	fmt.Fprintln(w, "  Global autotune:\t"+enabled(fs.GlobalAutotune))
+	fmt.Fprintln(w, "  Source baseline:\t"+enabled(fs.SourceBaseline))
+	fmt.Fprintln(w, "  Flow telemetry:\t"+enabled(fs.FlowTelemetry))
+	fmt.Fprintln(w, "  Graph learning:\t"+enabled(fs.GraphLearning))
+	fmt.Fprintln(w, "  Edge baseline:\t"+enabled(fs.EdgeBaseline))
+	fmt.Fprintln(w, "  SQLite:\t"+enabled(fs.SQLite))
+	fmt.Fprintln(w, "  Tuple enforcement:\t"+enabled(fs.TupleEnforcement))
+	w.Flush()
+	fmt.Println()
+	fmt.Println("Available profiles: dos-light  iq-learning  graph-learning  graph-enforce  klshield-light")
 }
