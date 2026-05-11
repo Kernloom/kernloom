@@ -1,0 +1,120 @@
+# PDPConfig — NAS / Storage Node (Bootstrap, 14 days)
+#
+# Covers: Synology, TrueNAS, QNAP, MinIO, and similar storage nodes.
+#
+# NAS traffic profile:
+#   - Long idle periods between file transfers
+#   - Sudden large bursts (SMB, NFS, iSCSI): very high BPS, moderate PPS
+#   - Admin console: low SYN, small payloads
+#   - Backup jobs: sustained high BPS from few known sources
+#
+# BPS scoring is enabled because exfil and ransomware show up in byte volume,
+# not packet counts (large packets, few connections).
+
+apiVersion: kernloom.io/v1alpha1
+kind: PDPConfig
+metadata:
+  name: nas-bootstrap
+  description: "NAS bootstrap — BPS-aware, burst-tolerant, 14-day learning window"
+
+spec:
+
+  signal_engine:
+    pps_trigger:  1500.0
+    syn_trigger:  50.0       # NAS admins rarely SYN-flood; low tolerance
+    scan_trigger: 10.0
+    bps_trigger:  160000000  # 160 MB/s cold-start — above what a single backup job sustains
+    weights:
+      pps:  0.25
+      syn:  0.30
+      scan: 0.25
+      bps:  0.20             # additive; large-packet floods and exfil show here
+      cap:  3.0
+
+  progressive_enforcement:
+    soft_at:       2
+    hard_at:       5
+    block_at:      14
+    up_need:       2
+    down_need:     8
+    block_min_sev: 2.5
+    block_min_dur: "30s"
+    min_hold_soft: "1m"
+    min_hold_hard: "5m"
+
+  non_compliance:
+    at:    10
+    drop:  2.0
+    sev:   1.8
+    reset: 0.30
+
+  graph:
+    enabled: true
+    mode:    learn
+    store:   /var/lib/kernloom/iq/kliq.db
+    promotion:
+      min_seen_count: 5
+      min_windows:    3
+      min_age:        "10m"
+      expire_ttl:     "720h"
+    freeze:
+      max_action:             rate_limit
+      allow_block:            false
+      min_severity_for_block: 70
+    exclude:
+      broadcast: true
+      loopback:  true
+
+  baseline:
+    # NAS transfers are very bursty and infrequent; wait for many observations
+    # before promoting an edge baseline to "learned".
+    min_observations:    50
+    alpha:               0.02
+    alpha_bootstrap:     0.08    # slower bootstrap alpha — NAS has rare large bursts
+    deviation_threshold: 7.0    # higher tolerance for NAS burst patterns
+    min_update_pps:      5.0    # skip keepalive-only ticks
+    peak_tolerance:      2.0    # 100% above peak before alerting (backup = legitimate burst)
+    peak_decay_half_life: "672h" # 28 days — NAS peaks persist; rare but expected
+
+  autotune:
+    enabled: true
+    min_samples: 500
+    floors:
+      pps:  200.0
+      syn:  30.0
+      scan: 8.0
+      bps:  10000000   # 10 MB/s BPS floor — autotune learns real backup levels
+    bootstrap:
+      window:     "336h"
+      k_start:    4.5         # extra conservative for NAS — rare traffic is hard to learn fast
+      k_final:    3.5
+      phase1_end: "48h"
+      phase2_end: "120h"
+      phase1:
+        interval: "1h"
+        max_up:   0.15
+        max_down: 0.10
+        alpha:    0.08
+      phase2:
+        interval: "6h"
+        max_up:   0.10
+        max_down: 0.08
+        alpha:    0.12
+      phase3:
+        interval: "24h"
+        max_up:   0.05
+        max_down: 0.05
+        alpha:    0.18
+      steady:
+        interval: "168h"    # weekly — NAS traffic patterns are very stable
+        max_up:   0.05
+        max_down: 0.05
+        alpha:    0.20
+
+  adapters:
+    shield_pep:
+      soft_rate_pps: 600
+      soft_burst:    1500
+      hard_rate_pps: 150
+      hard_burst:    300
+      cooldown:      "30s"

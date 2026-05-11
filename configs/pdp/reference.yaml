@@ -1,0 +1,236 @@
+# PDPConfig — Kernloom IQ reference configuration
+#
+# This file documents every available PDPConfig option.
+# Options that make sense for most deployments are uncommented.
+# Advanced or situational options are commented out with explanations.
+#
+# Usage:
+#   sudo kliq --pdp-config=configs/pdp/reference.yaml \
+#             --policy-file=configs/policies/your-policy.yaml
+#
+# Forge distributes this file signed. Changes require a new signed pack.
+
+apiVersion: kernloom.io/v1alpha1
+kind: PDPConfig
+metadata:
+  name: reference
+  description: "Reference PDPConfig with all options documented"
+
+spec:
+
+  # ---------------------------------------------------------------------------
+  # Signal Engine
+  # Controls how raw telemetry (PPS, SYN/s, scan/s, BPS) is translated into
+  # severity scores. Cold-start defaults; autotune refines these at runtime.
+  #
+  # Severity = WPPS*(pps/pps_trigger) + WSyn*(syn/syn_trigger)
+  #           + WScan*(scan/scan_trigger) + WBps*(bps/bps_trigger)
+  # Each term is capped at weights.cap before weighting.
+  #
+  # Set triggers to 0 to defer entirely to the autotune state file.
+  # ---------------------------------------------------------------------------
+  signal_engine:
+    pps_trigger:  200.0   # cold-start packets/s threshold; autotune learns the real value
+    syn_trigger:   50.0   # SYN/s threshold; lower = more SYN-flood sensitive
+    scan_trigger:  10.0   # distinct destination port changes/s
+
+    # bps_trigger: 0      # bytes/s trigger (0 = disabled)
+    #                     # Enable for: NAS, large-file hosts, exfil detection
+    #                     # Example for NAS: 80000000 (80 MB/s per source)
+
+    weights:
+      pps:  0.35          # weight of PPS in composite severity
+      syn:  0.40          # weight of SYN/s — higher = more sensitive to floods
+      scan: 0.25          # weight of scan rate
+      # bps: 0.00         # weight of BPS (0 = disabled; only active if bps_trigger > 0)
+      cap:  3.0           # max normalized value per component before weighting
+
+  # ---------------------------------------------------------------------------
+  # Progressive Enforcement
+  # Controls when kliq escalates (OBSERVE → SOFT → HARD → BLOCK) and
+  # when it de-escalates. The FSM is the single enforcement authority.
+  #
+  # Strike thresholds: how many strikes before level transition.
+  # Anti-flap: consecutive ticks required before escalating/de-escalating.
+  # Block gate: sustained high severity required before entering BLOCK.
+  # Hold times: minimum time at each level before stepping down.
+  # ---------------------------------------------------------------------------
+  progressive_enforcement:
+    soft_at:  2           # strikes to enter RATE_SOFT
+    hard_at:  5           # strikes to enter RATE_HARD
+    block_at: 12          # strikes to enter BLOCK
+
+    up_need:   2          # consecutive high ticks before escalating (anti-flap)
+    down_need: 6          # consecutive low ticks before de-escalating
+
+    # Block gate: only enter BLOCK if severity has been above block_min_sev
+    # for at least block_min_dur. Prevents blocking on short spikes.
+    block_min_sev: 2.5    # minimum severity to qualify for BLOCK
+    block_min_dur: "30s"  # must sustain block_min_sev for this long
+
+    # Minimum hold time before de-escalating from each level.
+    min_hold_soft: "30s"
+    min_hold_hard: "2m"
+
+    # Note: SoftTTL / HardTTL / BlockTTL come from the PolicyPack rules,
+    # not from PDPConfig. The TTLs control how long the PDP holds each level
+    # before TTL-based stepdown is allowed.
+
+  # ---------------------------------------------------------------------------
+  # Non-Compliance
+  # Escalates faster when a source continues sending traffic despite an
+  # active rate limit (DropRL/s > drop threshold while in RATE_HARD).
+  # ---------------------------------------------------------------------------
+  non_compliance:
+    at:    10             # non-compliance ticks before forced escalation to BLOCK
+    drop:   5.0           # DropRL/s that counts as non-compliance
+    sev:    1.8           # OR: severity above this counts as non-compliance
+    reset:  0.30          # reset counter when severity drops below this
+
+  # ---------------------------------------------------------------------------
+  # Graph Learning
+  # Learns normal communication edges (src→dst:port/proto) and detects
+  # deviations after freeze. Requires --graph flag at runtime.
+  #
+  # Modes:
+  #   learn           — accumulate edges, promote candidates to learned
+  #   frozen-observe  — flag new post-freeze edges as signals (no enforcement)
+  #   frozen-enforce  — block new post-freeze edges via PEP
+  # ---------------------------------------------------------------------------
+  graph:
+    enabled: true
+    mode:    learn        # change to frozen-observe after 'kliq graph freeze'
+    store:   /var/lib/kernloom/iq/kliq.db
+
+    promotion:
+      min_seen_count: 5   # observations before candidate → learned
+      min_windows:    3   # distinct tick windows required
+      min_age:        "10m"
+      expire_ttl:     "720h"  # 30 days idle → expired (0 = never)
+
+    freeze:
+      max_action:             rate_limit  # upper bound when enforcing freeze violations
+      allow_block:            false       # set true only in frozen-enforce mode
+      min_severity_for_block: 70         # signal score required before enforcement
+
+    exclude:
+      broadcast: true     # skip broadcast/multicast destinations
+      loopback:  true     # skip loopback addresses
+
+      # source_cidrs:
+      #   - "172.16.0.0/12"   # exclude NAT gateways / internal routers
+      #   - "192.168.0.0/16"
+
+  # ---------------------------------------------------------------------------
+  # Baseline Engine
+  # Per-edge EWMA traffic baseline. Active when graph is enabled.
+  # Learns normal PPS and BPS per src→dst:port/proto edge.
+  #
+  # Two-phase EWMA: bootstrap alpha during candidate phase (fast convergence),
+  # stable alpha after promotion (resistant to short-term changes).
+  # Peak tracking: learns the running maximum; signals if exceeded × tolerance.
+  # ---------------------------------------------------------------------------
+  baseline:
+    min_observations:    30     # observations before edge is promoted to learned (EWMA path)
+    alpha:               0.02   # stable EWMA speed (post-promotion); ~35 obs half-life
+    alpha_bootstrap:     0.10   # faster EWMA during candidate phase; ~7 obs half-life
+    deviation_threshold: 5.0    # MAD multiplier for EWMA deviation signal
+
+    # Time-based promotion: promote even if obs < min_observations, as long as
+    # the edge has been around for min_age_time_based. Useful for weekly jobs.
+    min_obs_time_based: 5       # lower obs threshold for time-based path
+    min_age_time_based: "168h"  # edge must be at least 7 days old
+
+    # Idle-traffic filter: skip EWMA update when traffic is below this floor.
+    # Prevents bimodal sources (keepalives + response bursts) from converging
+    # to the idle level and triggering spurious deviation signals.
+    # min_update_pps: 5.0       # skip update when pps < this (0 = disabled)
+    # min_update_bps: 0         # skip update when bps < this (0 = disabled)
+
+    # Peak tolerance: signal when pps or bps exceeds learned maximum × this factor.
+    # 1.5 = 50% above the highest value ever observed during clean learning.
+    peak_tolerance: 1.5
+
+    # Peak decay: half-life for the running peak. A spike from one half-life ago
+    # decays to 50% of its original value so historical outliers don't permanently
+    # block burst detection. 0 (default) disables decay — original running-max behaviour.
+    # peak_decay_half_life: "336h"   # 14 days (recommended starting value)
+
+  # ---------------------------------------------------------------------------
+  # Adapters
+  # Concrete parameters for built-in PEP adapters.
+  # These translate abstract policy actions (rate_limit, block) into
+  # Shield-specific XDP/eBPF map values.
+  # ---------------------------------------------------------------------------
+  # ---------------------------------------------------------------------------
+  # Autotune + Bootstrap
+  # Controls how kliq learns trigger thresholds (TrigPPS/TrigSyn/TrigScan/
+  # TrigBPS) from observed traffic and how aggressively it adapts during the
+  # initial learning window.
+  #
+  # Algorithm per cycle:
+  #   1. Compute target = max(floor, median(samples) + K × MAD(samples))
+  #   2. Cap change: target = clamp(target, current × (1-MaxDown),
+  #                                         current × (1+MaxUp))
+  #   3. Smooth:     TrigPPS = (1-Alpha) × TrigPPS + Alpha × target
+  #   4. Write to state.json
+  #
+  # K interpolates linearly from k_start (day 0) to k_final (end of window).
+  # Higher K = more conservative threshold (fewer false positives).
+  # ---------------------------------------------------------------------------
+  autotune:
+    enabled: true
+    min_samples: 5000          # reservoir samples required before applying update
+
+    floors:
+      pps:  100.0              # TrigPPS never falls below this
+      syn:   50.0
+      scan:  20.0
+      # bps: 0.0              # 0 = BPS autotune disabled
+
+    bootstrap:
+      window:     "336h"       # 14 days total bootstrap window
+      k_start:    4.0          # conservative K at day 0
+      k_final:    3.5          # final K (also used in steady state)
+
+      # Phase boundaries (measured from bootstrap start)
+      phase1_end: "48h"        # Phase 1: 0 → 48h
+      phase2_end: "120h"       # Phase 2: 48h → 5d; Phase 3: 5d → 14d
+
+      phase1:
+        interval: "1h"         # recalculate every hour (fast learning)
+        max_up:   0.10         # TrigPPS may rise max 10% per cycle
+        max_down: 0.02         # falls max 2% (asymmetric: rise fast, fall slow)
+        alpha:    0.10         # smoothing (90% old, 10% new)
+
+      phase2:
+        interval: "6h"
+        max_up:   0.08
+        max_down: 0.03
+        alpha:    0.15
+
+      phase3:
+        interval: "24h"
+        max_up:   0.05
+        max_down: 0.05         # symmetric in late bootstrap
+        alpha:    0.20
+
+      steady:                  # after bootstrap window expires
+        interval: "84h"        # ~2× per week
+        max_up:   0.05
+        max_down: 0.05
+        alpha:    0.20
+
+  adapters:
+    shield_pep:
+      # RATE_SOFT: gentle rate limit applied at first escalation.
+      # Size relative to expected normal PPS (rule of thumb: ~10–20× normal).
+      soft_rate_pps: 200
+      soft_burst:    400
+
+      # RATE_HARD: stricter rate limit when soft is insufficient.
+      hard_rate_pps: 50
+      hard_burst:    100
+
+      # Minimum time between FSM level transitions (prevents rapid flip-flop).
+      cooldown: "5s"

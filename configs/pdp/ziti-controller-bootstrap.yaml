@@ -1,0 +1,134 @@
+# PDPConfig — OpenZiti Controller (Bootstrap, 14 days)
+#
+# Phase 0→Phase 1 of the getting-started guide.
+# Use during initial deployment: graph learns communication edges,
+# autotune learns real trigger thresholds from observed traffic.
+#
+# Cold-start triggers are conservative (high) so no false positives
+# while learning begins. Autotune lowers them toward the floor over 14 days.
+#
+# After bootstrap (kliq status shows steady):
+#   → switch to configs/pdp/ziti-controller.yaml
+#   → freeze graph: kliq graph freeze
+#
+# Usage:
+#   sudo kliq \
+#     --pdp-config=configs/pdp/ziti-controller-bootstrap.yaml \
+#     --graph --graph-mode=learn \
+#     --dry-run=true --whitelist-learn=true
+
+apiVersion: kernloom.io/v1alpha1
+kind: PDPConfig
+metadata:
+  name: ziti-controller-bootstrap
+  description: "OpenZiti controller bootstrap — conservative cold-start, graph learning active"
+
+spec:
+
+  signal_engine:
+    # Conservative cold-start values. Autotune will learn the real thresholds
+    # and lower these during the bootstrap window.
+    # Controllers see modest PPS (API requests) but sharp SYN spikes on enrolment.
+    pps_trigger:  400.0
+    syn_trigger:  120.0
+    scan_trigger: 30.0
+    # bps_trigger: disabled — controllers handle small JSON payloads
+    weights:
+      pps:  0.35
+      syn:  0.40
+      scan: 0.25
+      cap:  3.0
+
+  progressive_enforcement:
+    # During bootstrap: lenient escalation, no eager blocking.
+    # Autotune hasn't converged yet; false positives are more likely.
+    soft_at:       2
+    hard_at:       6
+    block_at:      16
+    up_need:       3          # need 3 consecutive dirty ticks before escalating
+    down_need:     8
+    block_min_sev: 2.5
+    block_min_dur: "45s"
+    min_hold_soft: "30s"
+    min_hold_hard: "2m"
+
+  non_compliance:
+    at:    12
+    drop:  2.0
+    sev:   2.0
+    reset: 0.25
+
+  graph:
+    enabled: true
+    mode:    learn
+    store:   /var/lib/kernloom/iq/kliq.db
+    promotion:
+      min_seen_count: 5
+      min_windows:    3
+      min_age:        "10m"
+      expire_ttl:     "720h"   # 30 days
+    freeze:
+      max_action:             rate_limit
+      allow_block:            false
+      min_severity_for_block: 70
+    exclude:
+      broadcast: true
+      loopback:  true
+
+  baseline:
+    min_observations:    30
+    alpha:               0.02    # stable post-promotion EWMA
+    alpha_bootstrap:     0.10    # fast initial convergence during candidate phase
+    deviation_threshold: 5.0
+    min_update_pps:      3.0     # skip EWMA update for keepalive-only ticks
+    peak_tolerance:      1.5
+    peak_decay_half_life: "336h" # 14 days — spikes decay; doesn't permanently cap detection
+
+  autotune:
+    enabled: true
+    min_samples: 500
+
+    floors:
+      pps:  80.0    # TrigPPS never falls below this
+      syn:  20.0
+      scan: 5.0
+
+    bootstrap:
+      window:     "336h"   # 14 days total
+      k_start:    4.0      # conservative K on day 0
+      k_final:    3.5      # converges to this K at day 14
+
+      phase1_end: "48h"    # Phase 1: 0h → 48h
+      phase2_end: "120h"   # Phase 2: 48h → 5d; Phase 3: 5d → 14d
+
+      phase1:
+        interval: "1h"
+        max_up:   0.10     # TrigPPS may rise max 10% per cycle (fast upscaling)
+        max_down: 0.10     # may also fall max 10% — allows convergence within 48h
+        alpha:    0.10
+
+      phase2:
+        interval: "6h"
+        max_up:   0.08
+        max_down: 0.08
+        alpha:    0.15
+
+      phase3:
+        interval: "24h"
+        max_up:   0.05
+        max_down: 0.05
+        alpha:    0.20
+
+      steady:
+        interval: "84h"    # ~2× per week after bootstrap
+        max_up:   0.05
+        max_down: 0.05
+        alpha:    0.20
+
+  adapters:
+    shield_pep:
+      soft_rate_pps: 50     # controller: gentle rate limit on API sources
+      soft_burst:    100
+      hard_rate_pps: 10
+      hard_burst:    20
+      cooldown:      "5s"

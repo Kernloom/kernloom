@@ -1,0 +1,108 @@
+# PDPConfig — API Server (Bootstrap, 14 days)
+#
+# Covers: REST APIs, gRPC services, microservice backends.
+# API servers see moderate PPS but very high SYN rates during client reconnect storms.
+# BPS is typically low (JSON/Protobuf payloads); scan rate is very low (single port).
+
+apiVersion: kernloom.io/v1alpha1
+kind: PDPConfig
+metadata:
+  name: api-server-bootstrap
+  description: "API server bootstrap — high SYN tolerance, low scan baseline, 14-day learning"
+
+spec:
+
+  signal_engine:
+    pps_trigger:  4000.0
+    syn_trigger:  2000.0    # API clients reconnect aggressively; high SYN is normal
+    scan_trigger: 20.0      # legitimate APIs are single-port; low scan tolerance
+    weights:
+      pps:  0.30
+      syn:  0.35
+      scan: 0.35            # scan is a strong anomaly signal for API servers
+      cap:  3.0
+
+  progressive_enforcement:
+    soft_at:       2
+    hard_at:       5
+    block_at:      14
+    up_need:       2
+    down_need:     7
+    block_min_sev: 2.3
+    block_min_dur: "25s"
+    min_hold_soft: "20s"
+    min_hold_hard: "1m"
+
+  non_compliance:
+    at:    10
+    drop:  2.0
+    sev:   1.8
+    reset: 0.25
+
+  graph:
+    enabled: true
+    mode:    learn
+    store:   /var/lib/kernloom/iq/kliq.db
+    promotion:
+      min_seen_count: 5
+      min_windows:    3
+      min_age:        "10m"
+      expire_ttl:     "720h"
+    freeze:
+      max_action:             rate_limit
+      allow_block:            false
+      min_severity_for_block: 70
+    exclude:
+      broadcast: true
+      loopback:  true
+
+  baseline:
+    min_observations:    30
+    alpha:               0.02
+    alpha_bootstrap:     0.10
+    deviation_threshold: 4.5    # stricter: API traffic is more predictable
+    min_update_pps:      5.0
+    peak_tolerance:      1.5
+    peak_decay_half_life: "336h"
+
+  autotune:
+    enabled: true
+    min_samples: 500
+    floors:
+      pps:  1000.0
+      syn:  200.0
+      scan: 10.0
+    bootstrap:
+      window:     "336h"
+      k_start:    4.0
+      k_final:    3.5
+      phase1_end: "48h"
+      phase2_end: "120h"
+      phase1:
+        interval: "1h"
+        max_up:   0.15
+        max_down: 0.10
+        alpha:    0.10
+      phase2:
+        interval: "6h"
+        max_up:   0.10
+        max_down: 0.08
+        alpha:    0.15
+      phase3:
+        interval: "24h"
+        max_up:   0.05
+        max_down: 0.05
+        alpha:    0.20
+      steady:
+        interval: "84h"
+        max_up:   0.05
+        max_down: 0.05
+        alpha:    0.20
+
+  adapters:
+    shield_pep:
+      soft_rate_pps: 500
+      soft_burst:    1000
+      hard_rate_pps: 100
+      hard_burst:    200
+      cooldown:      "5s"

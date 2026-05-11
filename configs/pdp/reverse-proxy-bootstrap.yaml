@@ -1,0 +1,114 @@
+# PDPConfig — Reverse Proxy / Load Balancer (Bootstrap, 14 days)
+#
+# Covers: Nginx reverse proxy, HAProxy, Traefik, Caddy as proxy.
+# Reverse proxies see the highest PPS and SYN rates of any role — they face
+# the internet directly and forward to many backends.
+#
+# Very high cold-start values to avoid false positives during learning.
+# Strict scan detection because proxies rarely scan ports themselves.
+
+apiVersion: kernloom.io/v1alpha1
+kind: PDPConfig
+metadata:
+  name: reverse-proxy-bootstrap
+  description: "Reverse proxy bootstrap — very high PPS/SYN tolerance, 14-day learning"
+
+spec:
+
+  signal_engine:
+    pps_trigger:  8000.0
+    syn_trigger:  4000.0
+    scan_trigger: 30.0
+    weights:
+      pps:  0.35
+      syn:  0.40
+      scan: 0.25
+      cap:  3.0
+
+  progressive_enforcement:
+    soft_at:       3
+    hard_at:       8
+    block_at:      20
+    up_need:       3
+    down_need:     10
+    block_min_sev: 2.8
+    block_min_dur: "60s"
+    min_hold_soft: "30s"
+    min_hold_hard: "3m"
+
+  non_compliance:
+    at:    15
+    drop:  5.0
+    sev:   2.2
+    reset: 0.20
+
+  graph:
+    enabled: true
+    mode:    learn
+    store:   /var/lib/kernloom/iq/kliq.db
+    promotion:
+      min_seen_count: 5
+      min_windows:    3
+      min_age:        "10m"
+      expire_ttl:     "720h"
+    freeze:
+      max_action:             rate_limit
+      allow_block:            false
+      min_severity_for_block: 75
+    exclude:
+      broadcast: true
+      loopback:  true
+      # Exclude internal backend IPs from graph learning if needed:
+      # source_cidrs:
+      #   - "10.0.0.0/8"
+
+  baseline:
+    min_observations:    30
+    alpha:               0.02
+    alpha_bootstrap:     0.10
+    deviation_threshold: 6.0
+    min_update_pps:      20.0   # proxies have high idle rate; filter low-traffic ticks
+    peak_tolerance:      2.0
+    peak_decay_half_life: "336h"
+
+  autotune:
+    enabled: true
+    min_samples: 500
+    floors:
+      pps:  2000.0
+      syn:  500.0
+      scan: 20.0
+    bootstrap:
+      window:     "336h"
+      k_start:    4.5           # very conservative for public-facing proxies
+      k_final:    3.5
+      phase1_end: "48h"
+      phase2_end: "120h"
+      phase1:
+        interval: "1h"
+        max_up:   0.20
+        max_down: 0.10
+        alpha:    0.10
+      phase2:
+        interval: "6h"
+        max_up:   0.12
+        max_down: 0.08
+        alpha:    0.15
+      phase3:
+        interval: "24h"
+        max_up:   0.05
+        max_down: 0.05
+        alpha:    0.20
+      steady:
+        interval: "84h"
+        max_up:   0.05
+        max_down: 0.05
+        alpha:    0.20
+
+  adapters:
+    shield_pep:
+      soft_rate_pps: 3000
+      soft_burst:    6000
+      hard_rate_pps: 800
+      hard_burst:    1600
+      cooldown:      "10s"
