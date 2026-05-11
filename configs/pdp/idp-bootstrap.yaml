@@ -1,0 +1,132 @@
+# PDPConfig — Identity Provider (Bootstrap, 14 days)
+#
+# Covers: Keycloak, Authentik, Authelia, Zitadel, Dex, OpenZiti IDP,
+#         LDAP/AD gateways, OIDC/SAML endpoints, SSO brokers.
+#
+# IDP traffic profile:
+#   - Moderate sustained PPS (authenticated API calls, token introspection)
+#   - Sudden SYN spikes during login storms (e.g. morning rush, SSO session renewal)
+#   - Very low scan rate — legitimate clients only use specific ports (443, 8080, 8443)
+#   - Known, small set of clients (apps, services) → graph freeze is highly valuable
+#   - Blocking an IDP = application-layer authentication fails everywhere
+#
+# Design priorities:
+#   1. Conservative block gate (auth outage is production-critical)
+#   2. Strict scan detection (no legitimate IDP client port-scans)
+#   3. Graph freeze as primary defence (known sources only)
+#   4. Source baseline to distinguish known clients from attack traffic
+
+apiVersion: kernloom.io/v1alpha1
+kind: PDPConfig
+metadata:
+  name: idp-bootstrap
+  description: "Identity Provider bootstrap — conservative blocking, strict scan, graph-learn focus"
+
+spec:
+
+  signal_engine:
+    # Cold-start conservative. Auth traffic is moderate but bursty during login storms.
+    # Autotune will lower PPS toward the floor within phase 1.
+    pps_trigger:  2000.0
+    syn_trigger:  1000.0    # login storms produce many SYNs (browser pre-connect, client retries)
+    scan_trigger: 8.0       # strict: no legitimate IDP client scans ports
+    # bps_trigger: disabled — IDP payload is small JSON/JWT; BPS adds noise here
+    weights:
+      pps:  0.25
+      syn:  0.40            # SYN-flood (credential stuffing) is the primary IDP threat
+      scan: 0.35            # any port scan of an IDP is anomalous
+      cap:  3.0
+
+  progressive_enforcement:
+    soft_at:       2
+    hard_at:       5
+    block_at:      14
+    up_need:       2
+    down_need:     8
+    # Very conservative block gate: blocking an IDP client stops authentication for
+    # that service entirely. Require high, sustained severity before blocking.
+    block_min_sev: 3.0
+    block_min_dur: "90s"
+    min_hold_soft: "30s"
+    min_hold_hard: "3m"
+
+  non_compliance:
+    at:    10
+    drop:  1.0
+    sev:   2.0
+    reset: 0.30
+
+  graph:
+    # IDPs communicate with a small, known set of clients.
+    # Graph freeze after bootstrap is the single most effective defence:
+    # only known app servers and services can authenticate.
+    enabled: true
+    mode:    learn
+    store:   /var/lib/kernloom/iq/kliq.db
+    promotion:
+      min_seen_count: 5
+      min_windows:    3
+      min_age:        "10m"
+      expire_ttl:     "720h"
+    freeze:
+      max_action:             rate_limit
+      allow_block:            false        # during bootstrap only observe violations
+      min_severity_for_block: 75
+    exclude:
+      broadcast: true
+      loopback:  true
+
+  baseline:
+    # IDP auth traffic is predictable: same services, same patterns.
+    # Strict deviation threshold catches credential-stuffing bursts early.
+    min_observations:    30
+    alpha:               0.02
+    alpha_bootstrap:     0.10
+    deviation_threshold: 4.0    # strict: auth traffic is very regular
+    min_update_pps:      3.0
+    peak_tolerance:      1.5
+    peak_decay_half_life: "336h"
+
+  autotune:
+    enabled: true
+    min_samples: 500
+    floors:
+      pps:  200.0
+      syn:  50.0
+      scan: 3.0     # scan floor is very low: IDPs should not see port scans
+    bootstrap:
+      window:     "336h"
+      k_start:    4.0
+      k_final:    3.5
+      phase1_end: "48h"
+      phase2_end: "120h"
+      phase1:
+        interval: "1h"
+        max_up:   0.15    # allow fast upscale during login storms
+        max_down: 0.10
+        alpha:    0.10
+      phase2:
+        interval: "6h"
+        max_up:   0.10
+        max_down: 0.08
+        alpha:    0.15
+      phase3:
+        interval: "24h"
+        max_up:   0.05
+        max_down: 0.05
+        alpha:    0.20
+      steady:
+        interval: "84h"
+        max_up:   0.05
+        max_down: 0.05
+        alpha:    0.20
+
+  adapters:
+    shield_pep:
+      # Generous SOFT rate limit: token refresh / OIDC polling must not be interrupted.
+      # HARD is strict: at this point traffic is clearly anomalous.
+      soft_rate_pps: 200
+      soft_burst:    500
+      hard_rate_pps: 30
+      hard_burst:    60
+      cooldown:      "10s"

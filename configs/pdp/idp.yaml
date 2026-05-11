@@ -1,0 +1,92 @@
+# PDPConfig — Identity Provider (Production)
+#
+# Use after IDP bootstrap completes and graph is frozen.
+# The frozen graph is the primary defence: only known services can authenticate.
+# Expects learned trigger values in state.json.
+#
+# Strongly recommended: kliq graph freeze after bootstrap, then:
+#   --graph --graph-mode=frozen-enforce (with feature-profile=graph-enforce)
+# so that unknown clients are blocked at the XDP tuple level immediately.
+
+apiVersion: kernloom.io/v1alpha1
+kind: PDPConfig
+metadata:
+  name: idp
+  description: "Identity Provider production — conservative blocking, expects learned state + frozen graph"
+
+spec:
+
+  signal_engine:
+    pps_trigger:  0.0        # defer to state.json
+    syn_trigger:  0.0
+    scan_trigger: 0.0
+    weights:
+      pps:  0.25
+      syn:  0.40
+      scan: 0.35
+      cap:  3.0
+
+  progressive_enforcement:
+    soft_at:       1
+    hard_at:       4
+    block_at:      12
+    up_need:       2
+    down_need:     8
+    block_min_sev: 3.0
+    block_min_dur: "90s"
+    min_hold_soft: "30s"
+    min_hold_hard: "3m"
+
+  non_compliance:
+    at:    10
+    drop:  1.0
+    sev:   2.0
+    reset: 0.30
+
+  graph:
+    enabled: true
+    mode:    frozen-enforce   # IDP: unknown clients should not authenticate
+    store:   /var/lib/kernloom/iq/kliq.db
+    promotion:
+      min_seen_count: 5
+      min_windows:    3
+      min_age:        "10m"
+      expire_ttl:     "720h"
+    freeze:
+      max_action:             block
+      allow_block:            true    # production IDP: unknown source = block
+      min_severity_for_block: 75
+    exclude:
+      broadcast: true
+      loopback:  true
+
+  baseline:
+    min_observations:    30
+    alpha:               0.02
+    alpha_bootstrap:     0.10
+    deviation_threshold: 4.0
+    min_update_pps:      3.0
+    peak_tolerance:      1.5
+    peak_decay_half_life: "336h"
+
+  autotune:
+    enabled: true
+    min_samples: 500
+    floors:
+      pps:  200.0
+      syn:  50.0
+      scan: 3.0
+    bootstrap:
+      steady:
+        interval: "84h"
+        max_up:   0.05
+        max_down: 0.05
+        alpha:    0.20
+
+  adapters:
+    shield_pep:
+      soft_rate_pps: 200
+      soft_burst:    500
+      hard_rate_pps: 30
+      hard_burst:    60
+      cooldown:      "10s"

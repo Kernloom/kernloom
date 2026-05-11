@@ -1,0 +1,117 @@
+# PDPConfig — Database Server (Bootstrap, 14 days)
+#
+# Covers: PostgreSQL, MySQL/MariaDB, MongoDB, Redis, etcd.
+# Database servers have very low external PPS — they communicate with
+# a small, known set of application servers. High BPS is normal (query results).
+#
+# Strict scan tolerance: databases should NEVER see port scans.
+# Conservative block gate: a blocked DB connection is production-impacting.
+
+apiVersion: kernloom.io/v1alpha1
+kind: PDPConfig
+metadata:
+  name: database-bootstrap
+  description: "Database bootstrap — low PPS, high BPS, very strict scan, 14-day learning"
+
+spec:
+
+  signal_engine:
+    pps_trigger:  1000.0
+    syn_trigger:  100.0     # databases see few connections per second normally
+    scan_trigger: 5.0       # any port scanning of a DB server is a red flag
+    bps_trigger:  200000000 # 200 MB/s cold-start — large result sets are legitimate
+    weights:
+      pps:  0.20
+      syn:  0.30
+      scan: 0.30            # scan detection is critical for DB servers
+      bps:  0.20
+      cap:  3.0
+
+  progressive_enforcement:
+    soft_at:       1
+    hard_at:       4
+    block_at:      12
+    up_need:       2
+    down_need:     8
+    # Conservative block gate: blocking a DB connection affects the whole app layer.
+    block_min_sev: 2.8
+    block_min_dur: "60s"
+    min_hold_soft: "30s"
+    min_hold_hard: "3m"
+
+  non_compliance:
+    at:    8
+    drop:  1.0
+    sev:   1.5
+    reset: 0.30
+
+  graph:
+    enabled: true
+    mode:    learn
+    store:   /var/lib/kernloom/iq/kliq.db
+    promotion:
+      min_seen_count: 5
+      min_windows:    3
+      min_age:        "10m"
+      expire_ttl:     "720h"
+    freeze:
+      max_action:             rate_limit
+      allow_block:            false
+      min_severity_for_block: 70
+    exclude:
+      broadcast: true
+      loopback:  true
+
+  baseline:
+    min_observations:    30
+    alpha:               0.02
+    alpha_bootstrap:     0.10
+    deviation_threshold: 4.0    # DB traffic is very predictable; be sensitive
+    min_update_pps:      2.0
+    peak_tolerance:      1.5
+    peak_decay_half_life: "336h"
+
+  autotune:
+    enabled: true
+    min_samples: 500
+    floors:
+      pps:  100.0
+      syn:  20.0
+      scan: 3.0
+      bps:  10000000    # 10 MB/s — below legitimate query result BPS
+    bootstrap:
+      window:     "336h"
+      k_start:    4.0
+      k_final:    3.5
+      phase1_end: "48h"
+      phase2_end: "120h"
+      phase1:
+        interval: "1h"
+        max_up:   0.10
+        max_down: 0.10
+        alpha:    0.10
+      phase2:
+        interval: "6h"
+        max_up:   0.08
+        max_down: 0.08
+        alpha:    0.15
+      phase3:
+        interval: "24h"
+        max_up:   0.05
+        max_down: 0.05
+        alpha:    0.20
+      steady:
+        interval: "84h"
+        max_up:   0.05
+        max_down: 0.05
+        alpha:    0.20
+
+  adapters:
+    shield_pep:
+      # Generous RL — blocking a DB connection kills app-layer queries.
+      # Alert (SOFT) quickly, rate-limit gently, block only on sustained abuse.
+      soft_rate_pps: 100
+      soft_burst:    200
+      hard_rate_pps: 30
+      hard_burst:    60
+      cooldown:      "15s"

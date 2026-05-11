@@ -1,0 +1,86 @@
+# PDPConfig — Web Server (Production)
+#
+# Use after web-server-bootstrap completes. Expects learned state.json.
+
+apiVersion: kernloom.io/v1alpha1
+kind: PDPConfig
+metadata:
+  name: web-server
+  description: "Web server production — SYN-sensitive, expects learned state"
+
+spec:
+
+  signal_engine:
+    pps_trigger:  0.0        # defer to state.json
+    syn_trigger:  0.0
+    scan_trigger: 0.0
+    weights:
+      pps:  0.30
+      syn:  0.45
+      scan: 0.25
+      cap:  3.0
+
+  progressive_enforcement:
+    soft_at:       1
+    hard_at:       4
+    block_at:      10
+    up_need:       2
+    down_need:     6
+    block_min_sev: 2.2
+    block_min_dur: "20s"
+    min_hold_soft: "20s"
+    min_hold_hard: "1m"
+
+  non_compliance:
+    at:    10
+    drop:  3.0
+    sev:   1.8
+    reset: 0.25
+
+  graph:
+    enabled: true
+    mode:    frozen-observe
+    store:   /var/lib/kernloom/iq/kliq.db
+    promotion:
+      min_seen_count: 5
+      min_windows:    3
+      min_age:        "10m"
+      expire_ttl:     "720h"
+    freeze:
+      max_action:             rate_limit
+      allow_block:            false
+      min_severity_for_block: 70
+    exclude:
+      broadcast: true
+      loopback:  true
+
+  baseline:
+    min_observations:    30
+    alpha:               0.02
+    alpha_bootstrap:     0.10
+    deviation_threshold: 5.0
+    min_update_pps:      5.0
+    peak_tolerance:      1.5
+    peak_decay_half_life: "336h"
+
+  autotune:
+    enabled: true
+    min_samples: 500
+    floors:
+      pps:  500.0
+      syn:  100.0
+      scan: 15.0
+    bootstrap:
+      steady:
+        interval: "84h"
+        max_up:   0.05
+        max_down: 0.05
+        alpha:    0.20
+
+  adapters:
+    shield_pep:
+      soft_rate_pps: 200
+      soft_burst:    500
+      hard_rate_pps: 50
+      hard_burst:    100
+      cooldown:      "5s"
