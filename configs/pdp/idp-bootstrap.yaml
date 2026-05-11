@@ -1,4 +1,10 @@
 # PDPConfig — Identity Provider (Bootstrap, 14 days)
+# Feature profile:  minimum graph-learning
+#                   recommended graph-learning
+#
+# Start command:
+#   sudo kliq --pdp-config=<this-file> --graph --graph-mode=learn --dry-run=true --whitelist-learn=true
+#
 #
 # Covers: Keycloak, Authentik, Authelia, Zitadel, Dex, OpenZiti IDP,
 #         LDAP/AD gateways, OIDC/SAML endpoints, SSO brokers.

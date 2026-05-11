@@ -1,4 +1,10 @@
 # PDPConfig — Database Server (Bootstrap, 14 days)
+# Feature profile:  minimum graph-learning
+#                   recommended graph-learning
+#
+# Start command:
+#   sudo kliq --pdp-config=<this-file> --graph --graph-mode=learn --dry-run=true --whitelist-learn=true
+#
 #
 # Covers: PostgreSQL, MySQL/MariaDB, MongoDB, Redis, etcd.
 # Database servers have very low external PPS — they communicate with

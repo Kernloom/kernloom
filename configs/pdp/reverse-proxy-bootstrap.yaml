@@ -1,4 +1,10 @@
 # PDPConfig — Reverse Proxy / Load Balancer (Bootstrap, 14 days)
+# Feature profile:  minimum dos-light
+#                   recommended iq-learning
+#
+# Start command:
+#   sudo kliq --pdp-config=<this-file> --dry-run=true --whitelist-learn=true
+#
 #
 # Covers: Nginx reverse proxy, HAProxy, Traefik, Caddy as proxy.
 # Reverse proxies see the highest PPS and SYN rates of any role — they face

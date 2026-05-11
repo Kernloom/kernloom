@@ -1,4 +1,10 @@
 # PDPConfig — NAS / Storage Node (Production)
+# Feature profile:  minimum graph-learning
+#                   recommended graph-learning
+#
+# Start command:
+#   sudo kliq --pdp-config=<this-file> --graph --graph-mode=frozen-observe --dry-run=false
+#
 #
 # Use after NAS bootstrap completes. Expects learned state.json.
 # BPS autotune is enabled — ensure backup schedules ran during bootstrap

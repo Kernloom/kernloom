@@ -1,4 +1,10 @@
 # PDPConfig — Identity Provider (Production)
+# Feature profile:  minimum graph-enforce
+#                   recommended graph-enforce (activates XDP tuple enforcement via edge4_allow)
+#
+# Start command:
+#   sudo kliq --pdp-config=<this-file> --feature-profile=graph-enforce --graph --graph-mode=frozen-enforce --dry-run=false
+#
 #
 # Use after IDP bootstrap completes and graph is frozen.
 # The frozen graph is the primary defence: only known services can authenticate.

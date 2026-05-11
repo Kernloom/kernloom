@@ -1,4 +1,10 @@
 # PDPConfig — OpenZiti Controller (Bootstrap, 14 days)
+# Feature profile:  minimum dos-light
+#                   recommended iq-learning (adds per-source EWMA baseline → fewer false positives)
+#
+# Start command:
+#   sudo kliq --pdp-config=<this-file> --dry-run=true --whitelist-learn=true
+#
 #
 # Phase 0→Phase 1 of the getting-started guide.
 # Use during initial deployment: graph learns communication edges,

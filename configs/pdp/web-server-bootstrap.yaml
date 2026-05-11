@@ -1,4 +1,10 @@
 # PDPConfig — Web Server (Bootstrap, 14 days)
+# Feature profile:  minimum dos-light
+#                   recommended iq-learning
+#
+# Start command:
+#   sudo kliq --pdp-config=<this-file> --dry-run=true --whitelist-learn=true
+#
 #
 # Covers: Nginx, Apache, Caddy, and similar HTTP/HTTPS servers.
 # Balances between SYN-flood sensitivity and tolerance for legitimate bursts

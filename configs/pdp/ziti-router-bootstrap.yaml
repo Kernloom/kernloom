@@ -1,4 +1,10 @@
 # PDPConfig — OpenZiti Router / Edge Router (Bootstrap, 14 days)
+# Feature profile:  minimum dos-light
+#                   recommended iq-learning
+#
+# Start command:
+#   sudo kliq --pdp-config=<this-file> --dry-run=true --whitelist-learn=true
+#
 #
 # Ziti routers (edge routers, transit links, NAT gateways) handle significantly
 # higher PPS than controllers: many concurrent tunnels, sustained throughput,

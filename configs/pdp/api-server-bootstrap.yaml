@@ -1,4 +1,10 @@
 # PDPConfig — API Server (Bootstrap, 14 days)
+# Feature profile:  minimum graph-learning
+#                   recommended graph-learning
+#
+# Start command:
+#   sudo kliq --pdp-config=<this-file> --graph --graph-mode=learn --dry-run=true --whitelist-learn=true
+#
 #
 # Covers: REST APIs, gRPC services, microservice backends.
 # API servers see moderate PPS but very high SYN rates during client reconnect storms.
