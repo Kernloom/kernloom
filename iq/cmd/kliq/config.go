@@ -274,9 +274,11 @@ func parseFlags() cfg {
 		fmt.Fprintf(os.Stdout, `Kernloom IQ — local intelligence and enforcement agent
 
 USAGE
-  kliq [flags]              run the kliq agent
-  kliq status               show node status: bootstrap phase, autotune triggers, graph/baseline summary
-  kliq graph <subcommand>   manage the communication graph and edge baselines
+  kliq [flags]                      run the kliq agent
+  kliq status                       show node status: bootstrap phase, autotune triggers, graph/baseline summary
+  kliq runtime status [profile]     show active feature set for a runtime profile
+                                    profiles: dos-light  iq-learning  graph-learning  graph-enforce  klshield-light
+  kliq graph <subcommand>           manage the communication graph and edge baselines
 
 GRAPH SUBCOMMANDS
   kliq graph edges [--all] [--sort=last|state|src|port|seen] [store] [node-id]
