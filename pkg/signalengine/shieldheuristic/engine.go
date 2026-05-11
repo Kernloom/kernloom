@@ -94,6 +94,25 @@ func (e *Engine) Config() Config {
 	return e.cfg
 }
 
+// EvaluateAt computes severity using explicitly provided trigger thresholds.
+// Used by iq-learning+ profiles where per-source baselines raise the effective
+// trigger for known high-traffic sources above the global guardrail.
+// Pass trigBPS = 0 to disable BPS scoring for this call.
+func (e *Engine) EvaluateAt(
+	subject observation.EntityRef,
+	pps, bps, synRate, scanRate, dropRLRate float64,
+	trigPPS, trigSyn, trigScan, trigBPS float64,
+) (fsm.Metrics, []signal.Signal) {
+	e.mu.RLock()
+	cfg := e.cfg
+	e.mu.RUnlock()
+	cfg.TrigPPS = trigPPS
+	cfg.TrigSyn = trigSyn
+	cfg.TrigScan = trigScan
+	cfg.TrigBPS = trigBPS
+	return evaluateWith(cfg, subject, pps, bps, synRate, scanRate, dropRLRate)
+}
+
 // Evaluate computes composite severity and emits typed signals for a single
 // source during one observation window.
 //
@@ -115,7 +134,15 @@ func (e *Engine) Evaluate(
 	e.mu.RLock()
 	cfg := e.cfg
 	e.mu.RUnlock()
+	return evaluateWith(cfg, subject, pps, bps, synRate, scanRate, dropRLRate)
+}
 
+// evaluateWith is the shared implementation for Evaluate and EvaluateAt.
+func evaluateWith(
+	cfg Config,
+	subject observation.EntityRef,
+	pps, bps, synRate, scanRate, dropRLRate float64,
+) (fsm.Metrics, []signal.Signal) {
 	sev := fsm.CalcSeverity(
 		pps, synRate, scanRate, bps,
 		cfg.TrigPPS, cfg.TrigSyn, cfg.TrigScan, cfg.TrigBPS,
@@ -202,8 +229,6 @@ func (e *Engine) Evaluate(
 	// source.rate_limit_drops_sustained — emitted whenever RL drops are observed.
 	// Confidence is high because drops are a direct eBPF counter, not inferred.
 	if dropRLRate > 0 {
-		// Boost composite score: RL drops mean enforcement is already active
-		// and the source keeps trying — escalation risk is real.
 		compositeScore := int(math.Min(sev/cfg.SevCap*100, 100))
 		sigs = append(sigs, *signal.NewSignal(
 			signal.ProducerKLIQ, signal.ScopeLocal,
