@@ -1,110 +1,85 @@
-# Kernloom Shield + Kernloom IQ
+# Kernloom
 
-Kernloom consists of two core components:
+Kernloom is a Linux network security system built on XDP/eBPF. It provides DoS prevention and traffic microsegmentation without touching application code or adding a sidecar proxy.
 
-- **Kernloom Shield** (`klshield`) — the **XDP/eBPF data plane** (ingress enforcement + telemetry)
-- **Kernloom IQ** (`kliq`) — the **local intelligence agent** (heuristic scoring, graph learning, decision engine, progressive enforcement)
+Two components, one mission:
+
+- **`klshield`** — XDP/eBPF data plane. Attached to a network interface, it enforces deny/rate-limit decisions in the kernel packet path at line rate.
+- **`kliq`** — userspace intelligence agent. Reads Shield telemetry, learns traffic baselines, runs the progressive enforcement FSM, manages the communication graph, and writes enforcement decisions back into Shield maps.
 
 Official docs: https://kernloom.com/
 
 ---
 
-## Architecture
+## Two use cases
 
-### kliq as local PDP
+Choose your scenario before you start. The operational model is fundamentally different.
 
-`kliq` is a **local Policy Decision Point (PDP)**. It consumes telemetry from one or more adapters, runs the signal engine and graph learner, and enforces decisions through **PEP adapters** (Policy Enforcement Points). Today the only built-in PEP is Kernloom Shield (XDP/eBPF). Future releases will add adapters for nginx, nftables, OpenZiti and others.
+### Scenario A — DoS Prevention (public-facing nodes)
 
-```
- ┌──────────────────────────────────────────────────────────────┐
- │                      Kernloom IQ (kliq)                      │
- │                                                              │
- │  [Telemetry Adapters]         [Signal Adapters]              │
- │   Shield Telemetry  ──────►  Signal Engine                   │
- │   (future: nginx log,         │                              │
- │    syslog, OTel, …)           │                              │
- │                         Graph Learner                        │
- │                               │                              │
- │                        Decision Engine                       │
- │                         (LocalPolicy)                        │
- │                               │                              │
- │                        [PEP Adapters]                        │
- │                    Shield PEP  (today)                       │
- │                    nginx PEP   (future)                      │
- │                    nftables    (future)                      │
- └──────────────────────────────────────────────────────────────┘
-        reads maps ↑                  ↓ writes maps
- ┌──────────────────────────────────────────────────────────────┐
- │                Kernloom Shield (XDP/eBPF)                    │
- │   allowlist  →  denylist  →  rate-limit  →  PASS/DROP       │
- └──────────────────────────────────────────────────────────────┘
-```
+**When to use:** The node is reachable from the internet, or from a large number of unknown clients. Think: Ziti controller, Ziti router, public web server, reverse proxy.
 
-### Future: Kernloom Forge integration
+**What it does:** kliq learns your node's normal PPS/SYN/scan rates via autotune and rate-limits or blocks sources that deviate significantly. No graph learning, no SQLite, minimal overhead.
 
-**Kernloom Forge** (in development in a separate repo) is the **Policy Management System (PMS)** and control plane for Kernloom. When integrated, Forge will:
+**What it does not do:** Microsegmentation. With thousands of rotating internet client IPs, graph learning never converges and would be meaningless.
 
-- compile and sign **PolicyPacks** (versioned, auditable policy bundles)
-- distribute PolicyPacks to registered `kliq` instances
-- replace the locally configured `LocalPolicy` with Forge-issued, cryptographically signed policy
-- receive enforcement receipts back from each node for fleet-wide audit
+### Scenario B — Microsegmentation (internal nodes)
 
-Until Forge is available, `kliq` operates in **standalone mode**: policy is configured through CLI flags, built-in profiles, or local YAML files. The configuration is split into two Forge-compatible files:
+**When to use:** The node communicates with a small, known set of internal services. Think: IDP (Keycloak), database, internal API, NAS.
 
-| File | Kind | Controls |
-|---|---|---|
-| `configs/policies/*.yaml` | `LocalPolicyPack` | **What** to enforce: abstract rules, capability requirements, autonomy gates. PEP-agnostic, Forge-distributable. |
-| `configs/pdp/*.yaml` | `PDPConfig` | **How** kliq operates: signal engine thresholds, progressive enforcement, graph learning, Shield PEP adapter parameters. Also Forge-distributable. |
+**What it does:** kliq learns the full communication graph (who talks to whom, on which port and protocol). After the graph is frozen, any new or unexpected connection is detected and blocked — optionally down to the exact `(src_ip, port, proto)` tuple in XDP with zero race window.
 
-When Forge is integrated it will sign and distribute both files to registered `kliq` nodes.
+**What it does not do:** Scale to public internet cardinality. The flow telemetry map holds 32k entries; a public node with 10k+ clients fills it instantly.
 
 ---
 
-## Repo layout
+## Architecture
 
-```text
-kernloom/
-├── iq/
-│   └── cmd/kliq/               # Kernloom IQ CLI
-│       ├── kliq.go             # main loop, adapter wiring, signal consumer
-│       ├── config.go           # all CLI flags + Config struct
-│       ├── fsm.go              # per-IP FSM transitions (processCandidate4/6)
-│       ├── graph.go            # graph subcommands (status/export/freeze/approve-ip/deny-ip)
-│       ├── state.go            # autotune state persistence
-│       ├── profiles.go         # built-in config profiles
-│       ├── whitelist.go        # whitelist/feedback file loading
-│       ├── reservoir.go        # rolling sample reservoir for autotune
-│       ├── helpers.go          # IP helpers, CIDR parsing, graphStrikesFromScore
-│       ├── feedback.go         # feedback file (temporary exemptions)
-│       └── types.go            # internal metrics/state types
-├── shield/
-│   ├── bpf/
-│   │   ├── xdp_kernloom_shield.bpf.c   # XDP program
-│   │   └── include/
-│   └── cmd/klshield/           # Kernloom Shield CLI
-└── pkg/
-    ├── core/
-    │   ├── observation/        # Observation model (flows, auth, drops, …)
-    │   ├── signal/             # Signal model + signal type catalog
-    │   ├── decision/           # Decision + EnforcementReceipt models
-    │   ├── reason/             # standardised reason code constants
-    │   ├── capability/         # Capability model
-    │   ├── graph/              # GraphEdge, EdgeState, PromotionConfig
-    │   ├── fsm/                # FSM levels, State, Config, Advance()
-    │   ├── policy/             # LocalPolicyPack schema + loader (abstract enforcement rules)
-    │   └── pdp/                # PDPConfig schema + loader (signal engine, progressive enforcement, graph, adapters)
-    ├── adapterruntime/         # Adapter interface, EventBus, well-known capabilities
-    ├── adapters/
-    │   ├── graphlearner/       # Graph learning adapter
-    │   └── shieldtelemetry/    # Shield telemetry adapter (eBPF maps → Observations)
-    ├── decisionengine/         # Decision Engine
-    │   ├── engine.go           # EvaluateSignal, RecordFSMTransition, LocalPolicy
-    │   ├── shieldbridge.go     # Shield PEP bridge (EnforceDecision → eBPF maps)
-    │   └── engine_test.go
-    ├── graphstore/sqlite/      # SQLite-backed graph edge store
-    ├── shieldclient/           # Go client for Shield pinned eBPF maps
-    └── signalengine/
-        └── shieldheuristic/    # PPS / SYN / scan / drop-RL signal engine
+```
+╔═══════════════════════════════════════════════════════════╗
+║                   Kernloom IQ  (kliq)                    ║
+║                                                          ║
+║  Signal Engine      Graph Learner      Source Baseline   ║
+║  (autotune PPS/     (edge states,      (per-source EWMA, ║
+║   SYN/scan/BPS)      EWMA baseline,    effective trig)   ║
+║         │            peak decay)             │            ║
+║         └──────────────────┬────────────────┘            ║
+║                    Decision Engine                        ║
+║                    (FSM + LocalPolicy)                    ║
+║                            │                             ║
+║                    Shield PEP Adapter                     ║
+╚════════════════════════════╪═════════════════════════════╝
+                             │ writes eBPF maps
+╔════════════════════════════╪═════════════════════════════╗
+║           Kernloom Shield  │ (XDP/eBPF)                  ║
+║                            │                             ║
+║  allowlist → denylist → rate-limit → PASS/DROP           ║
+║                                                          ║
+║  New in this release: tuple enforcement (edge4_deny /    ║
+║  edge4_allow) for per-(src,port,proto) decisions         ║
+╚══════════════════════════════════════════════════════════╝
+```
+
+---
+
+## Runtime profiles
+
+Kernloom is **modular by design**. Heavy subsystems (graph learning, SQLite, flow telemetry, tuple enforcement) are off by default and enabled explicitly via a runtime profile. This keeps the default hot path minimal.
+
+| Profile | Requires | Active subsystems |
+|---|---|---|
+| `klshield-light` | klshield only, no kliq | XDP enforce + telemetry. No autotune, no learning. |
+| `dos-light` | klshield + kliq | Source heuristic + autotune. No graph, no SQLite. |
+| `iq-learning` | klshield + kliq | dos-light + per-source EWMA baseline (lower false positives for busy sources). |
+| `graph-learning` | klshield + kliq | iq-learning + flow telemetry + graph learning + edge baselines + SQLite. |
+| `graph-enforce` | klshield + kliq | graph-learning + XDP tuple enforcement (edge4_deny / edge4_allow). |
+
+The profile is auto-derived from the `--graph` flag and PDPConfig. Set it explicitly with `--feature-profile` if needed.
+
+```bash
+kliq runtime status dos-light        # show what a profile activates
+kliq runtime status graph-enforce
+kliq runtime status klshield-light   # → no kliq needed
 ```
 
 ---
@@ -114,24 +89,23 @@ kernloom/
 ### Prerequisites
 
 - Linux with bpffs at `/sys/fs/bpf`
-- Tools: `clang`, `llvm`, `bpftool`, `iproute2`
+- `clang` ≥ 15, `llvm`, `iproute2`
 - Go toolchain matching `go.mod`
 
 ```bash
-sudo mount -t bpf bpf /sys/fs/bpf || true
+sudo mount -t bpf bpf /sys/fs/bpf 2>/dev/null || true
 ```
 
 ### Build
 
 ```bash
-# BPF object (Shield)
+# BPF object
 make -C shield/bpf
-# Output: shield/bpf/out/xdp_kernloom_shield.bpf.o
+# → shield/bpf/out/xdp_kernloom_shield.bpf.o
 
-# CLIs
-mkdir -p bin
-go build -o bin/klshield ./shield/cmd/klshield
-go build -o bin/kliq     ./iq/cmd/kliq
+# Binaries
+go build -o klshield ./shield/cmd/klshield
+go build -o kliq     ./iq/cmd/kliq
 
 # Tests
 go test ./...
@@ -139,234 +113,229 @@ go test ./...
 
 ---
 
-## Quick start
-
-### 1. Attach Shield to a network interface
+## Quick start — DoS Prevention (Scenario A)
 
 ```bash
-sudo ./bin/klshield attach-xdp -iface eth0 \
-  -obj shield/bpf/out/xdp_kernloom_shield.bpf.o -force
-sudo ./bin/klshield stats
+# 1. Attach Shield to your NIC
+sudo ./klshield attach-xdp --iface eth0 \
+  --obj shield/bpf/out/xdp_kernloom_shield.bpf.o
+
+# 2. (Optional) Set a global per-source rate limit in XDP
+#    Applied instantly by the kernel, before KLIQ reacts.
+sudo ./klshield set-default-rl --rate 1000 --burst 2000
+
+# 3. Choose a PDPConfig for your node role
+sudo cp configs/pdp/ziti-controller-bootstrap.yaml \
+        /opt/kernloom/attested/etc/pdp/node.yaml
+
+# 4. Whitelist monitoring and management IPs
+sudo tee /opt/kernloom/attested/etc/whitelist.txt << EOF
+203.0.113.10      # monitoring
+192.168.1.0/24    # management
+EOF
+
+# 5. Bootstrap: 14 days dry-run, autotune learns thresholds
+sudo ./kliq \
+  --pdp-config=/opt/kernloom/attested/etc/pdp/node.yaml \
+  --dry-run=true \
+  --whitelist-learn=true
+
+# 6. Watch triggers converge
+./kliq status
+
+# 7. Go live
+sudo ./kliq \
+  --pdp-config=/opt/kernloom/attested/etc/pdp/node.yaml \
+  --dry-run=false \
+  --whitelist-learn=true
 ```
 
-### 2. Prepare directories
-
-```bash
-sudo mkdir -p /etc/kernloom/iq /var/lib/kernloom/iq
-sudo touch /etc/kernloom/iq/whitelist.txt
-echo "[]" | sudo tee /var/lib/kernloom/iq/feedback.json > /dev/null
-```
-
-### 3. Run IQ in dry-run first
-
-```bash
-sudo ./bin/kliq --dry-run=true --interval=1s --profile=public-web
-```
-
-Watch the logs: you'll see `TOP` lines for each source and `TICK#N` summaries. No enforcement is applied in dry-run.
+See `configs/pdp/` for all PDPConfig profiles. Each file header shows the minimum feature profile and the exact start command.
 
 ---
 
-## Bootstrap phase
+## Quick start — Microsegmentation (Scenario B)
 
-### What bootstrap mode does
+```bash
+# 1. Attach Shield
+sudo ./klshield attach-xdp --iface eth0 \
+  --obj shield/bpf/out/xdp_kernloom_shield.bpf.o
 
-On first startup, `kliq` has no baseline for what "normal" traffic looks like. The bootstrap phase runs an **accelerated autotune schedule** that learns trigger thresholds (PPS, SYN/s, scan rate) faster than the steady-state schedule.
+# 2. Choose a PDPConfig for your node role
+sudo cp configs/pdp/idp-bootstrap.yaml \
+        /opt/kernloom/attested/etc/pdp/node.yaml
 
-Bootstrap automatically ends when the learning window expires (default: 4 hours divided into three phases). After bootstrap, autotune switches to slower, more conservative updates.
+# 3. Phase 1 — learn the communication graph (14 days dry-run)
+sudo ./kliq \
+  --pdp-config=/opt/kernloom/attested/etc/pdp/node.yaml \
+  --graph --graph-mode=learn \
+  --dry-run=true --whitelist-learn=true
 
-Bootstrap affects **only** the heuristic signal engine thresholds. The graph learner runs independently.
+# Monitor
+./kliq status
+./kliq graph edges --sort=state
+./kliq graph baselines --sort=obs
 
-### Bootstrap vs graph learning
+# 4. Phase 2 — review and freeze
+./kliq graph freeze --dry-run          # check readiness
+sudo ./kliq graph approve-ip 10.0.1.50 # protect known sources
+sudo ./kliq graph freeze
 
-| | Bootstrap | Graph learning |
+# 5. Phase 3 — validate (still dry-run)
+sudo ./kliq \
+  --pdp-config=/opt/kernloom/attested/etc/pdp/node.yaml \
+  --graph --graph-mode=frozen-observe \
+  --dry-run=true
+
+# 6a. Go live (source-level enforcement)
+sudo ./kliq \
+  --pdp-config=/opt/kernloom/attested/etc/pdp/node.yaml \
+  --graph --graph-mode=frozen-enforce \
+  --dry-run=false
+
+# 6b. Go live (tuple-level enforcement — no first-packet race window)
+#     Requires Shield reloaded with edge map support (new .bpf.o)
+sudo ./klshield attach-xdp --iface eth0 --force  # reload with new BPF
+sudo ./kliq \
+  --pdp-config=/opt/kernloom/attested/etc/pdp/node.yaml \
+  --feature-profile=graph-enforce \
+  --graph --graph-mode=frozen-enforce \
+  --dry-run=false
+# KLIQ auto-populates edge4_allow on startup from frozen edges.
+# Then activate default-deny in XDP:
+sudo ./klshield tuple-enforce allow
+```
+
+---
+
+## Configuration
+
+### Two axes
+
+**PDPConfig** (`--pdp-config`) — *what* to measure and how aggressively to enforce:
+- Signal engine trigger thresholds (cold-start values; autotune refines them)
+- Autotune schedule (bootstrap phases, max change per cycle)
+- Progressive enforcement parameters (soft_at, hard_at, block_at, TTLs)
+- Shield PEP adapter parameters (rate limit values, burst sizes)
+
+**Feature profile** (`--feature-profile`) — *which* subsystems are active (see table above). Auto-derived from `--graph` flag; override explicitly if needed.
+
+### PDPConfig profiles
+
+All profiles live in `configs/pdp/`. Each file header shows:
+- Minimum and recommended feature profile
+- Ready-to-use start command
+
+| Bootstrap profile | Production profile | Role |
 |---|---|---|
-| **What it learns** | Numeric thresholds for PPS, SYN/s, scan rate | Which source IPs communicate to which destination IPs/ports |
-| **Output** | `TrigPPS`, `TrigSyn`, `TrigScan` stored in `state.json` | Edge records in `graph.db` |
-| **Used for** | Deciding when heuristic severity > threshold | Detecting unknown communication paths |
-| **Required** | Yes, always active | Optional (`--graph` flag) |
-| **Duration** | Finite bootstrap window, then steady-state | Ongoing; freeze manually when baseline is stable |
+| `ziti-controller-bootstrap` | `ziti-controller` | Public Ziti controller |
+| `ziti-router-bootstrap` | `ziti-router` | Public Ziti router / NAT gateway |
+| `web-server-bootstrap` | `web-server` | Public web server |
+| `reverse-proxy-bootstrap` | `reverse-proxy` | Public reverse proxy / load balancer |
+| `idp-bootstrap` | `idp` | Identity provider (Keycloak, Authentik, …) |
+| `database-bootstrap` | `database` | Database server (PostgreSQL, MySQL, …) |
+| `api-server-bootstrap` | `api-server` | Internal API / microservice |
+| `nas-bootstrap` | `nas` | NAS / storage (Synology, TrueNAS, …) |
 
-### Best practices: bootstrap phase
+Bootstrap profiles use conservative cold-start values, fast autotune convergence (`max_down: 0.10` in phase 1), and graph learning enabled where appropriate. Production profiles expect a populated `state.json` from bootstrap.
 
-- Run with `--dry-run=true` during bootstrap to avoid blocking legitimate traffic before thresholds are calibrated.
-- Use a **bootstrap profile** (`--profile=ziti-router-bootstrap`, `--profile=nas-bootstrap`, etc.) which sets conservative thresholds to prevent false positives.
-- Keep bootstrap active for **at least one full traffic cycle** (e.g. 24h for a NAS to capture backup windows, business hours, etc.).
-- Check `state.json` or watch for `AUTOTUNE` log lines to see when thresholds stabilise.
-- Switch to the production profile once thresholds look reasonable:
-
-```bash
-# Transition from bootstrap to production profile
-sudo ./bin/kliq --dry-run=false --profile=ziti-router
-```
+Use `configs/pdp/reference.yaml` as documentation for every available option.
 
 ---
 
-## Graph learning workflow
+## How learning works
 
-The graph learner records each observed flow as a directed communication edge and tracks its state over time:
+### Autotune (all modes)
 
-```
-candidate  →  learned  →  frozen
-    ↓             ↓           ↓
-  expired       denied    violation if new edge appears
-```
+kliq samples PPS, SYN/s, scan rate, and optionally BPS into a reservoir. Every poll interval (1h in phase 1, 6h in phase 2, 24h in phase 3) it computes `median + K × MAD` and applies a smoothed update to the trigger values. The floor prevents collapse to zero on quiet nodes.
 
-| State | Meaning |
-|---|---|
-| `candidate` | Seen, but not enough evidence yet |
-| `learned` | Promoted: meets seen-count, window, and age criteria |
-| `approved` | Explicitly approved (admin or via `approve-ip`) |
-| `frozen` | Part of the locked baseline; new edges trigger signals or blocks |
-| `denied` | Explicitly blocked; never overwritten by new observations |
-| `expired` | Not seen for `graph-expire-ttl`; restarts as candidate if traffic resumes |
+The first hour after startup is critical: triggers start at the cold-start values in the PDPConfig. They only begin to drop after the first autotune cycle. The default rate limit in XDP (`set-default-rl`) provides kernel-level protection before KLIQ reacts.
 
-### Phase 1: Learn
+### Source baseline (iq-learning+)
 
-Start with graph learning enabled and let it observe normal traffic:
+Per-source IP EWMA tracking of PPS and BPS. Known high-traffic sources get an *effective trigger* (`max(global_trigger, source_peak × 1.2)`) so they don't trip the global guardrail. Unknown sources fall back to the global trigger.
 
-```bash
-sudo ./bin/kliq --dry-run=false --graph --graph-mode=learn \
-  --graph-exclude-source-cidrs=172.16.0.0/12   # exclude NAT/WSL gateway
-```
+### Edge baseline (graph-learning+)
 
-Watch progress:
+Per-edge `(src→dst:port/proto)` EWMA with two-phase alpha:
+- Bootstrap phase (obs < 30): `alpha = 0.10` (fast convergence)
+- Stable phase (obs ≥ 30): `alpha = 0.02` (resistant to short-term spikes)
 
-```bash
-./bin/kliq graph status
-```
+Running peak per edge with optional half-life decay (`peak_decay_half_life: "336h"`) — a historical spike from two weeks ago is worth 50% of its original value.
 
-Wait until candidate edges promote to `learned`. Default promotion criteria (all must be met):
-- `seen_count >= 5` (`--graph-min-seen`)
-- `distinct_windows >= 3` (`--graph-min-windows`)
-- edge age >= 10m (`--graph-min-age`)
+### Anti-poisoning
 
-**Best practices during learning:**
-- Run for at least one full daily cycle so all regular peers appear.
-- Keep `--dry-run=false` so the heuristic FSM still protects against active attacks (graph learning and FSM operate independently).
-- Suspicious sources (PPS spike, SYN flood, port scan) are **automatically excluded** from the learned baseline — their candidate edges are retroactively expired when a heuristic signal fires.
-- Exclude known NAT gateways and infrastructure IPs with `--graph-exclude-source-cidrs` to keep the graph clean.
+Three independent layers prevent attacks from corrupting baselines:
+1. **TrigPPS cap** — observations above the host-level trigger are never written to the baseline buffer
+2. **SuspiciousRegistry** — once a signal fires for a source/edge, all buffered observations are retroactively dropped
+3. **30s pending buffer** — baseline updates are delayed 30s and dropped if the source/edge was flagged in that window
 
-### Phase 2: Review and freeze
-
-Inspect the learned graph:
-
-```bash
-# Summary
-./bin/kliq graph status
-
-# Full export as YAML
-./bin/kliq graph export > graph-baseline.yaml
-```
-
-Review the YAML. Then freeze:
-
-```bash
-# Marks all learned/approved edges as frozen in the DB
-sudo ./bin/kliq graph freeze
-# Optional: also write the frozen baseline to a file
-sudo ./bin/kliq graph freeze /var/lib/kernloom/iq/graph.db $(hostname) \
-  /etc/kernloom/iq/frozen-graph.yaml
-```
-
-### Phase 3: Frozen-observe (safe)
-
-Switch to frozen-observe. New edges emit `graph.new_edge_after_freeze` signals and inject FSM strikes, but enforcement is gradual (same FSM gates as heuristic signals):
-
-```bash
-sudo ./bin/kliq --dry-run=false --graph --graph-mode=frozen-observe
-```
-
-Watch for signals:
+### Graph lifecycle
 
 ```
-[graph-learner] new_edge_after_freeze src=203.0.113.55 dst=...
-[decision-engine] GRAPH-DECISION ... → fsm_strikes
+candidate ──► learned ──► approved ──► frozen
+    │             │            │           │
+  expired       denied       denied    violation if unknown edge appears
 ```
 
-### Phase 4: Frozen-enforce (strict)
+**deny-mode** (default after freeze): unknown edges are blacklisted in `edge4_deny` after the first packet passes (~1s poll delay).
 
-Any source with a non-frozen edge is forced to FSM BLOCK immediately, bypassing the normal accumulation gates:
-
-```bash
-sudo ./bin/kliq --dry-run=false --graph --graph-mode=frozen-enforce
-```
-
-Signal log shows `→ fsm_force_block`. The IP is blocked for `BlockTTL` (30 min for `ziti-controller` profile) via the deny eBPF map.
-
-**Best practice:** Use frozen-observe first for a few days to identify false positives before switching to frozen-enforce.
-
-### Managing the frozen graph
-
-**Approve an IP** (whitelist it in the graph — stops freeze signals for all its edges):
-
-```bash
-./bin/kliq graph approve-ip 172.21.112.1
-# With explicit store/node:
-./bin/kliq graph approve-ip 172.21.112.1 /var/lib/kernloom/iq/graph.db mynode
-```
-
-Use `approve-ip` when a legitimate IP is being blocked by frozen-enforce (e.g. a known gateway, monitoring host, or new service that wasn't present during the learning phase). This is preferred over the FSM whitelist because it stops graph signals at the source rather than just overriding enforcement after the fact.
-
-**Deny an IP** (mark all its edges as denied — rejected even if previously frozen):
-
-```bash
-./bin/kliq graph deny-ip 203.0.113.55
-```
-
-**Direct SQLite access** for bulk operations:
-
-```bash
-# Approve a specific port/proto combination
-sqlite3 /var/lib/kernloom/iq/graph.db \
-  "UPDATE graph_edges SET state='approved'
-   WHERE source_id='172.21.112.1' AND protocol='tcp' AND destination_port=443;"
-
-# List all frozen edges
-sqlite3 /var/lib/kernloom/iq/graph.db \
-  "SELECT source_id, destination_id, protocol, destination_port, seen_count
-   FROM graph_edges WHERE state='frozen' ORDER BY last_seen_at DESC;"
-```
+**allow-mode** (default-deny): KLIQ populates `edge4_allow` with all frozen/approved edges at startup and every 5 minutes. `tuple-enforce allow` in XDP drops any unknown tuple immediately — no first-packet race window.
 
 ---
 
 ## klshield command reference
 
-```
-attach-xdp    -iface <iface> [-obj <path>] [-force]
-detach-xdp
-
-add-allow-cidr  <cidr>       Add CIDR to allowlist LPM trie
-list-allow                   Show allowlist entries
-enforce-allow   on|off       Enable/disable allowlist-only mode
-
-add-deny-ip     <ip>         Add IP to deny map
-del-deny-ip     <ip>         Remove IP from deny map
-list-deny                    List all denied IPs
-
-rl-set          -rate <pps> -burst <n>       Set global rate limit
-rl-set-ip       -rate <pps> -burst <n> <ip> Set per-IP rate limit
-rl-unset-ip     <ip>         Remove per-IP rate limit
-list-rl                      List all per-IP rate limits
-
-reset                        Clear all deny and rate-limit map entries
-                             (use with: sudo kill -USR1 $(pidof kliq) to sync kliq state)
-
-set-sampling    <mask>       Event ringbuf sampling (0=off, 1≈50%, 1023≈0.1%)
-
-stats                        Show global packet counters
-top-src [-n 20] [-by pkts|bytes|drops|droprl]   Top sources
-events                       Stream drop events from ringbuf
-```
-
-### Sync kliq after a manual reset
-
-When you run `klshield reset`, the eBPF maps are cleared but `kliq`'s in-memory FSM state still shows those IPs as rate-limited or blocked. Send `SIGUSR1` to de-escalate all enforced IPs back to `OBSERVE`:
-
 ```bash
-sudo ./bin/klshield reset
-sudo kill -USR1 $(pidof kliq)
-# kliq logs: RESET via SIGUSR1: de-escalated N enforced IPs to OBSERVE
+# Attach / detach
+klshield attach-xdp  --iface eth0 [--obj bpf/klshield.bpf.o] [--force]
+klshield detach-xdp
+klshield status                # XDP state, RL config, deny counts, tuple mode
+
+# Source allow / deny
+klshield add-allow-cidr  <cidr>
+klshield list-allow
+klshield add-deny-ip     <ip>
+klshield del-deny-ip     <ip>
+klshield list-deny
+klshield enforce-allow   on|off    # drop all sources not in allowlist
+
+# Default kernel rate limit (no KLIQ needed)
+klshield set-default-rl  --rate <pps> --burst <n>
+klshield disable-default-rl
+klshield rl-set-ip       --rate <pps> --burst <n> <ip>
+klshield rl-unset-ip     <ip>
+klshield list-rl
+
+# Tuple enforcement (requires Shield reload with edge map support)
+klshield tuple-enforce   on       # deny-mode: blacklist unknown tuples
+klshield tuple-enforce   allow    # allow-mode: block unknown tuples immediately
+klshield tuple-enforce   off      # disable tuple checks
+
+# Deny-mode blacklist management
+klshield add-edge-deny   --src <ip> --port <n> --proto tcp|udp|icmp
+klshield del-edge-deny   --src <ip> --port <n> --proto tcp|udp|icmp
+klshield list-edge-deny
+
+# Allow-mode whitelist management
+klshield add-edge-allow  --src <ip> --port <n> --proto tcp|udp|icmp
+klshield del-edge-allow  --src <ip> --port <n> --proto tcp|udp|icmp
+klshield list-edge-allow
+
+# Per-tuple rate limit
+klshield set-edge-rl     --src <ip> --port <n> --proto tcp|udp|icmp \
+                         --rate <pps> --burst <n>
+
+# Misc
+klshield reset            # clear all deny and RL entries
+klshield stats            # XDP packet/drop counters
+klshield top-src [-n 20] [-by pkts|bytes|drops|droprl]
+klshield events           # live XDP ringbuf event stream
+```
+
+**After `klshield reset`:** send `SIGUSR1` to kliq to sync FSM state:
+```bash
+sudo kill -USR1 $(pgrep kliq)
 ```
 
 ---
@@ -376,304 +345,104 @@ sudo kill -USR1 $(pidof kliq)
 ### Subcommands
 
 ```bash
-# Graph management (no running kliq required)
-kliq graph status   [store] [node-id]
-kliq graph export   [store] [node-id] [--format=json]
-kliq graph freeze   [store] [node-id] [frozen-out-path]
-kliq graph approve-ip  <ip> [store] [node-id]
-kliq graph deny-ip     <ip> [store] [node-id]
+kliq status                           # bootstrap phase, autotune triggers, graph summary
+kliq runtime status [profile]         # show active feature set for a profile
+
+kliq graph edges [--all] [--sort=last|state|src|port|seen]
+kliq graph baselines [--all] [--sort=obs|state|src|port|pps|bps]
+kliq graph baselines reset            # zero EWMA stats, keep graph edges
+kliq graph freeze [--dry-run]         # freeze learned edges (--dry-run: readiness report)
+kliq graph export [--format=json]
+kliq graph reset [--all]              # delete candidate/learned edges
+kliq graph approve-ip <ip>
+kliq graph deny-ip    <ip>
 ```
 
 ### Key flags
 
 | Flag | Default | Description |
 |---|---|---|
-| `--mode` | `standalone` | `standalone` or `managed` (Forge integration pending) |
-| `--policy-file` | `""` | Path to `LocalPolicyPack` YAML — abstract enforcement rules |
-| `--pdp-config` | `""` | Path to `PDPConfig` YAML — signal engine, progressive enforcement, graph, adapter params |
-| `--profile` | `ziti-controller` | Built-in PDP behavior profile; ignored when `--pdp-config` is set |
+| `--pdp-config` | `""` | PDPConfig YAML (signal engine, enforcement, graph, adapter params) |
+| `--feature-profile` | auto | Runtime feature profile (`dos-light`, `iq-learning`, `graph-learning`, `graph-enforce`) |
+| `--graph` | from PDPConfig | Enable graph learning |
+| `--graph-mode` | from PDPConfig | `learn`, `frozen-observe`, `frozen-enforce` |
 | `--dry-run` | `true` | Observe only; no eBPF map writes |
-| `--interval` | `1s` | Telemetry poll interval |
-| `--state-file` | `/var/lib/kernloom/iq/state.json` | Autotune state |
-| `--whitelist` | `/etc/kernloom/iq/whitelist.txt` | FSM whitelist (bypasses enforcement) |
-| `--feedback-file` | `/var/lib/kernloom/iq/feedback.json` | Temporary exemptions |
-| `--bootstrap` | `true` | Accelerated autotune at startup |
-| `--graph` | `false` | Enable graph learning (CLI override; prefer `pdp.graph.enabled`) |
-| `--graph-mode` | `learn` | `learn`, `frozen-observe`, `frozen-enforce` (CLI override) |
+| `--whitelist` | `/opt/kernloom/attested/etc/whitelist.txt` | IPs never blocked; contribute to autotune |
+| `--whitelist-learn` | `false` | Whitelisted IPs contribute to autotune learning |
+| `--state-file` | `/var/lib/kernloom/iq/state.json` | Learned autotune trigger values |
+| `--bootstrap-allow-block` | `false` | Allow BLOCK during bootstrap (default: cap at RATE_HARD) |
 
 Full flag list: `kliq --help`
 
-### Configuration files (preferred over flags)
+---
 
-**Two files per node role**, both forward-compatible with Kernloom Forge:
+## Map limits
 
-```bash
-# Full file-based configuration:
-sudo kliq \
-  --pdp-config=configs/pdp/ziti-controller.yaml \
-  --policy-file=configs/policies/ziti-controller.yaml
+All eBPF maps are loaded when `klshield attach-xdp` runs, regardless of which kliq feature profile is active.
 
-# Standalone (built-in profile, no files):
-sudo kliq --profile=ziti-controller
-```
+| Map | Type | Entries | Used by |
+|---|---|---|---|
+| `xdp_src4_stats` | LRU | 128k IPv4 | Always — source telemetry |
+| `xdp_deny_hash` | Hash | 1M IPv4 | Always — source blocklist |
+| `xdp_rl_policy4` | Hash | 256k IPv4 | KLIQ rate-limit decisions |
+| `xdp_rl_state4` | LRU | 256k IPv4 | XDP token bucket state |
+| `xdp_flow4_stats` | LRU | **32k tuples** | Always (written by XDP); read only by graph-learning+ |
+| `edge4_deny` | LRU | 65k tuples | tuple-enforce deny-mode |
+| `edge4_allow` | LRU | 65k tuples | tuple-enforce allow-mode |
+| `edge4_rl_policy` | Hash | 65k tuples | per-edge rate limit |
 
-| File | `kind` | What it controls |
-|---|---|---|
-| `configs/policies/ziti-controller.yaml` | `LocalPolicyPack` | Autonomy, enforcement rules (when FSM level → action + capability + TTL), exports |
-| `configs/pdp/ziti-controller.yaml` | `PDPConfig` | Signal engine, progressive enforcement, graph learning, Shield adapter params |
+**Critical limit for graph learning:** `xdp_flow4_stats` holds 32k `(src_ip, dst_port, proto)` entries. A public-facing node with 10k+ concurrent internet clients fills this instantly. Graph learning is only practical when the number of distinct source IPs is well below 32k — i.e. internal nodes with controlled clients.
 
-The **PolicyPack** is PEP-agnostic — it references abstract capability IDs (`network.rate_limit_source`, `network.block_source`) not Shield-specific values. The concrete rate/burst values live in `PDPConfig.adapters.shield_pep`.
+**Tuple enforcement capacity:** 65k entries covers thousands of edge denies or allowlist entries. For an internal node with 20 known services on 3 ports each, that's 60 entries — far below the limit.
 
-### PolicyPack — enforcement rules
-
-```yaml
-rules:
-  - name: soft-rate-limit
-    when: {fsm_level: soft}
-    then: {action: rate_limit, capability: network.rate_limit_source, ttl: "60s"}
-  - name: block
-    when: {fsm_level: block}
-    then: {action: block, capability: network.block_source, ttl: "30m"}
-  - name: graph-freeze-violation
-    when: {signal: graph.new_edge_after_freeze}
-    then: {action: signal, capability: signal.emit_local_risk, ttl: "10m"}
-```
-
-### PDPConfig — progressive enforcement + Shield adapter
-
-```yaml
-progressive_enforcement:    # was: fsm (renamed for clarity)
-  soft_at: 1
-  hard_at: 3
-  block_at: 9
-  block_min_sev: 2.0
-  block_min_dur: "15s"
-  ...
-
-adapters:
-  shield_pep:               # Shield-specific rate/burst values
-    soft_rate_pps: 20
-    soft_burst:    40
-    hard_rate_pps: 5
-    hard_burst:    10
-    cooldown:      "5s"
-```
-
-### Built-in profiles
-
-| Profile | Use case |
-|---|---|
-| `ziti-controller` | Public OpenZiti controller / enrolment endpoint |
-| `ziti-router` | OpenZiti router (high throughput, NAT-friendly) |
-| `ziti-controller-bootstrap` | Bootstrap variant: tolerant, no blocks |
-| `ziti-router-bootstrap` | Bootstrap variant: high PPS tolerance |
-| `public-web` | Public HTTP/HTTPS endpoint |
-| `public-api` | Public JSON API (bursty) |
-| `idp` | Identity provider / auth endpoint |
-| `internal-app` | East-west / internal service; no auto-block |
-| `nas` | NAS (Synology, QNAP, TrueNAS); strict on SYN/scan, 24h block TTL |
-| `nas-bootstrap` | NAS bootstrap: tolerant, rate-limit only |
-| `ssh-bastion` | SSH jump host |
+Total locked kernel memory: ~97 MB for all maps combined.
 
 ---
 
-## Whitelist and feedback
-
-### FSM whitelist
-
-File: `/etc/kernloom/iq/whitelist.txt`
-
-```text
-# monitoring host
-203.0.113.7
-# office subnet
-198.51.100.0/24
-```
-
-The FSM whitelist bypasses **heuristic enforcement** (FSM never escalates above OBSERVE for these IPs). It does **not** suppress graph signals in frozen-observe/frozen-enforce mode. Use `kliq graph approve-ip` instead when the goal is to allow an IP past graph enforcement.
-
-### Feedback file (temporary exemptions)
-
-File: `/var/lib/kernloom/iq/feedback.json`
-
-```json
-[
-  {"target":"203.0.113.7","action":"forgive","ttl":"24h","notes":"partner NAT"},
-  {"target":"198.51.100.0/24","action":"whitelist","until":"2026-06-01T00:00:00Z"}
-]
-```
-
-`forgive` reduces current severity. `whitelist` exempts the IP entirely until TTL/`until` expires.
-
----
-
-## Building a custom adapter
-
-Adapters plug into `kliq` via the `adapterruntime.Adapter` interface defined in `pkg/adapterruntime/adapter.go`. There are four adapter kinds:
-
-| Kind | Interface | Purpose |
-|---|---|---|
-| `telemetry` | `Start(ctx, bus)` publishes `Observation` to `bus` | Feed raw flow/event data to the engine |
-| `signal` | `Start(ctx, bus)` publishes `Signal` to `bus` | Feed pre-scored signals (e.g. from Correlate) |
-| `pep` | `EnforceDecision(ctx, dec)` | Apply enforcement decisions |
-| `export` | `ExportDecision(ctx, dec)` etc. | Forward decisions/receipts to SIEM/OTel |
-
-### Minimal telemetry adapter skeleton
-
-```go
-package myadapter
-
-import (
-    "context"
-    "github.com/adrianenderlin/kernloom/pkg/adapterruntime"
-    "github.com/adrianenderlin/kernloom/pkg/core/observation"
-)
-
-type Adapter struct{}
-
-func (a *Adapter) ID() string                       { return "my-adapter" }
-func (a *Adapter) Kind() adapterruntime.AdapterKind { return adapterruntime.AdapterTelemetry }
-func (a *Adapter) Capabilities() []*capability.Capability { return nil }
-func (a *Adapter) Init(_ context.Context, _ adapterruntime.AdapterConfig) error { return nil }
-func (a *Adapter) Health(_ context.Context) adapterruntime.HealthStatus {
-    return adapterruntime.HealthStatus{Healthy: true}
-}
-func (a *Adapter) Stop(_ context.Context) error { return nil }
-
-func (a *Adapter) Start(ctx context.Context, bus adapterruntime.EventBus) error {
-    go func() {
-        for {
-            select {
-            case <-ctx.Done():
-                return
-            default:
-                obs := observation.Observation{ /* fill fields */ }
-                _ = bus.PublishObservation(ctx, obs)
-            }
-        }
-    }()
-    return nil
-}
-```
-
-### Minimal PEP adapter skeleton
-
-```go
-func (a *MyPEP) EnforceDecision(ctx context.Context, dec *decision.Decision) (*decision.EnforcementReceipt, error) {
-    switch dec.Action.Type {
-    case decision.ActionBlock:
-        // apply block in your system
-    case decision.ActionRateLimit:
-        // apply rate limit
-    }
-    return decision.NewEnforcementReceipt(dec.ID, nodeID, a.ID(), decision.StatusApplied), nil
-}
-```
-
-### Wiring a new adapter into kliq
-
-1. Create your adapter package under `pkg/adapters/<name>/`.
-2. In `iq/cmd/kliq/kliq.go`, instantiate and start it alongside the existing adapters:
-
-```go
-// After the graph learner block (around line 350):
-myAdapter := myadapter.New(myadapter.Config{...})
-if err := myAdapter.Start(ctx, mainBus); err != nil {
-    log.Fatalf("start my-adapter: %v", err)
-}
-defer myAdapter.Stop(context.Background())
-```
-
-For a PEP adapter that should receive enforcement decisions, pass it to the decision engine:
-
-```go
-decisionEng := decisionengine.New(decPolicy, myPEPAdapter)
-```
-
-The `EnforceDecision` method will be called for every enforcement action the decision engine produces.
-
----
-
-## Decision engine and LocalPolicy
-
-`pkg/decisionengine/engine.go` is the enforcement brain. It translates signals and FSM transitions into `Decision` structs and enforces them through the active PEP adapter.
+## Repo layout
 
 ```
-Signal (graph.new_edge_after_freeze, pps_high, …)
-         │
-         ▼
-  Decision Engine  ←  LocalPolicy
-         │              MaxAction, AllowLocalBlock, TTLs,
-         │              GraphFreezeAction, MinSeverityForBlock
-         ▼
-  PEP Adapter  →  eBPF maps / nginx / nftables / …
-         │
-         ▼
-  EnforcementReceipt  (audit trail, reason codes)
+kernloom/
+├── iq/cmd/kliq/               # Kernloom IQ agent
+│   ├── kliq.go                # main loop, adapter wiring, autotune
+│   ├── config.go              # CLI flags
+│   ├── fsm.go                 # per-source FSM (processCandidate4/6)
+│   ├── graph.go               # graph subcommands
+│   └── ...
+├── shield/
+│   ├── bpf/
+│   │   └── xdp_kernloom_shield.bpf.c   # XDP program
+│   └── cmd/klshield/          # klshield CLI
+├── pkg/
+│   ├── core/
+│   │   ├── featureset/        # RuntimeProfile + FeatureSet
+│   │   ├── fsm/               # FSM levels, State, Advance()
+│   │   ├── graph/             # GraphEdge model
+│   │   ├── signal/            # Signal type catalog
+│   │   ├── observation/       # Observation model
+│   │   ├── decision/          # Decision + EnforcementReceipt
+│   │   ├── enforcement/       # EnforcementTarget (source / edge)
+│   │   ├── suspicious/        # SuspiciousRegistry (source + edge level)
+│   │   ├── pdp/               # PDPConfig schema + loader
+│   │   ├── policy/            # LocalPolicyPack schema + loader
+│   │   └── reason/            # Signal reason code constants
+│   ├── adapters/
+│   │   ├── graphlearner/      # Graph learning + edge baseline adapter
+│   │   ├── shieldtelemetry/   # eBPF maps → Observations
+│   │   ├── shieldpep/         # Shield PEP: writes deny/rl/allow maps
+│   │   └── sourcebaseline/    # Per-source EWMA baseline cache
+│   ├── graphstore/sqlite/     # SQLite-backed graph edge store
+│   ├── shieldclient/          # Go client for Shield pinned eBPF maps
+│   ├── signalengine/
+│   │   └── shieldheuristic/   # PPS/SYN/scan/BPS signal engine
+│   └── decisionengine/        # Decision engine + LocalPolicy
+└── configs/
+    ├── pdp/                   # PDPConfig profiles (16 profiles, all roles)
+    └── policies/              # LocalPolicyPack examples
 ```
-
-`LocalPolicy` is the local enforcement ceiling — it caps what the engine may do without Forge approval. Key fields:
-
-| Field | Purpose |
-|---|---|
-| `MaxAction` | Global ceiling: `observe → signal → rate_limit → block` |
-| `AllowLocalBlock` | Gate: must be `true` for any block to happen |
-| `MinSeverityForBlock` | Score threshold before block is allowed |
-| `GraphFreezeAction` | Action for graph freeze violations |
-| `GraphFreezeTTL` | How long a freeze-enforcement entry lasts |
-
-When Kernloom Forge is integrated, `LocalPolicy` will be populated from a signed PolicyPack received from Forge instead of from CLI flags.
-
----
-
-## Troubleshooting
-
-### Verify maps are pinned
-
-```bash
-sudo ls /sys/fs/bpf | grep kernloom
-# expect: kernloom_src4_stats, kernloom_deny4_hash, kernloom_rl_policy4, …
-```
-
-### Candidate edges not promoting
-
-All three criteria must be met simultaneously:
-
-```bash
-sqlite3 /var/lib/kernloom/iq/graph.db \
-  "SELECT source_id, destination_port, state, seen_count,
-          distinct_windows, first_seen_at
-   FROM graph_edges
-   WHERE state='candidate'
-   ORDER BY last_seen_at DESC LIMIT 20;"
-```
-
-Increase `--graph-min-seen` if legitimate peers are promoted too aggressively, or lower it if well-known peers take too long.
-
-### NAT gateway appearing in graph
-
-Exclude it before starting the learner:
-
-```bash
---graph-exclude-source-cidrs=172.16.0.0/12,10.0.0.0/8
-```
-
-### Approved IP still getting blocked
-
-If `kliq graph approve-ip` was run but blocks continue, check whether the old `ForceBlock` state is still active in-memory. Restart `kliq` or send `SIGUSR1` to clear FSM state:
-
-```bash
-sudo kill -USR1 $(pidof kliq)
-```
-
-### Generic XDP vs driver XDP
-
-If the NIC does not support native XDP, Shield falls back to generic mode (software path, higher CPU). Check `ip link show dev eth0` for `xdpgeneric` vs `xdp` flag after attach.
 
 ---
 
 ## License
 
-- `LICENSE` (repo root) — MPL-2.0
-- `shield/LICENSE`, `iq/LICENSE`
-- Additional texts under `LICENSES/`
+MPL-2.0 — see `LICENSE`.
