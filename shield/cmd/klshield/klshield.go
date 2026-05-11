@@ -41,6 +41,11 @@ const (
 	pinRLPolicy4 = "/sys/fs/bpf/kernloom_rl_policy4"
 	pinRLPolicy6 = "/sys/fs/bpf/kernloom_rl_policy6"
 
+	// Tuple (edge) enforcement maps.
+	pinEdge4Deny = "/sys/fs/bpf/kernloom_edge4_deny"
+	pinEdge4RL   = "/sys/fs/bpf/kernloom_edge4_rl_policy"
+	pinEdge4Cfg  = "/sys/fs/bpf/kernloom_edge4_cfg"
+
 	pinEvents = "/sys/fs/bpf/kernloom_events"
 )
 
@@ -68,6 +73,20 @@ type lpmKey6 struct {
 type key4Bytes struct{ IP [4]byte }
 type key6Bytes struct{ IP [16]byte }
 type src6Key struct{ IP [16]byte }
+
+// edge4Key matches struct edge4_key in xdp_kernloom_shield.bpf.c.
+// All fields must be in the exact same order and size as the BPF struct.
+type edge4Key struct {
+	SrcIP   [4]byte
+	DstPort uint16 // host byte order
+	Proto   uint8
+	Pad     uint8 // must be zero
+}
+
+type edge4CfgValue struct {
+	Enforce uint32
+	Pad     uint32
+}
 
 // MUST match Shield C layout for xdp_src_stats_v4_t (including explicit padding).
 type src4Stats struct {
@@ -160,6 +179,11 @@ type bpfObjects struct {
 	XdpRLCfg     *ebpf.Map
 	XdpRLPolicy4 *ebpf.Map
 	XdpRLPolicy6 *ebpf.Map
+
+	// Tuple enforcement maps (may be nil on older Shield builds).
+	XdpEdge4Deny *ebpf.Map
+	XdpEdge4RL   *ebpf.Map
+	XdpEdge4Cfg  *ebpf.Map
 
 	XdpEventsRing *ebpf.Map
 
@@ -266,6 +290,11 @@ func loadBPFWithReplacements(objPath string) (*bpfObjects, error) {
 		"xdp_rl_policy4": pinRLPolicy4,
 		"xdp_rl_policy6": pinRLPolicy6,
 
+		// Tuple enforcement maps (present in new Shield builds).
+		"edge4_deny":      pinEdge4Deny,
+		"edge4_rl_policy": pinEdge4RL,
+		"edge4_cfg":       pinEdge4Cfg,
+
 		"xdp_events": pinEvents,
 	} {
 		if m, ok := tryOpenPinnedMap(pin); ok {
@@ -355,6 +384,18 @@ func loadBPFWithReplacements(objPath string) (*bpfObjects, error) {
 		return nil, err2
 	}
 
+	// Tuple enforcement maps — optional; present only in new Shield builds.
+	// Absence is not an error; KLIQ and klshield degrade gracefully.
+	if m := coll.Maps["edge4_deny"]; m != nil {
+		objs.XdpEdge4Deny = m
+	}
+	if m := coll.Maps["edge4_rl_policy"]; m != nil {
+		objs.XdpEdge4RL = m
+	}
+	if m := coll.Maps["edge4_cfg"]; m != nil {
+		objs.XdpEdge4Cfg = m
+	}
+
 	// Pin maps (names per docs) if missing.
 	if err := pinIfMissing(objs.XdpTotals, pinTotals); err != nil {
 		objs.Close()
@@ -407,6 +448,17 @@ func loadBPFWithReplacements(objPath string) (*bpfObjects, error) {
 	if err := pinIfMissing(objs.XdpEventsRing, pinEvents); err != nil {
 		objs.Close()
 		return nil, err
+	}
+
+	// Pin edge maps if present.
+	if objs.XdpEdge4Deny != nil {
+		_ = pinIfMissing(objs.XdpEdge4Deny, pinEdge4Deny)
+	}
+	if objs.XdpEdge4RL != nil {
+		_ = pinIfMissing(objs.XdpEdge4RL, pinEdge4RL)
+	}
+	if objs.XdpEdge4Cfg != nil {
+		_ = pinIfMissing(objs.XdpEdge4Cfg, pinEdge4Cfg)
 	}
 
 	initCfgDefaults()
@@ -903,6 +955,111 @@ func listRL() {
 	}
 }
 
+/* ---------------- Tuple (edge) enforcement ---------------- */
+
+func parseEdge4Key(srcStr, portStr, protoStr string) edge4Key {
+	ip := net.ParseIP(srcStr)
+	mustIf(ip == nil, "parse src IP")
+	ip4 := ip.To4()
+	mustIf(ip4 == nil, "src must be IPv4")
+
+	var port uint64
+	_, err := fmt.Sscanf(portStr, "%d", &port)
+	must(err, "parse port")
+
+	var proto uint8
+	switch strings.ToLower(protoStr) {
+	case "tcp":
+		proto = 6
+	case "udp":
+		proto = 17
+	case "icmp":
+		proto = 1
+	default:
+		must(fmt.Errorf("unknown proto %q (use tcp/udp/icmp)", protoStr), "parse proto")
+	}
+
+	var k edge4Key
+	copy(k.SrcIP[:], ip4)
+	k.DstPort = uint16(port)
+	k.Proto = proto
+	return k
+}
+
+func addEdgeDeny(srcStr, portStr, protoStr string) {
+	k := parseEdge4Key(srcStr, portStr, protoStr)
+	m, err := openPinnedMap(pinEdge4Deny)
+	must(err, "open edge4_deny (run 'klshield attach-xdp' with new .bpf.o first)")
+	defer m.Close()
+	v := uint8(1)
+	must(m.Update(&k, &v, ebpf.UpdateAny), "update edge4_deny")
+	fmt.Printf("edge deny added: src=%s port=%s proto=%s\n", srcStr, portStr, protoStr)
+}
+
+func delEdgeDeny(srcStr, portStr, protoStr string) {
+	k := parseEdge4Key(srcStr, portStr, protoStr)
+	m, err := openPinnedMap(pinEdge4Deny)
+	must(err, "open edge4_deny")
+	defer m.Close()
+	if err := m.Delete(&k); err != nil {
+		fmt.Printf("edge deny not found (already removed?): %v\n", err)
+		return
+	}
+	fmt.Printf("edge deny removed: src=%s port=%s proto=%s\n", srcStr, portStr, protoStr)
+}
+
+func listEdgeDeny() {
+	m, err := openPinnedMap(pinEdge4Deny)
+	must(err, "open edge4_deny")
+	defer m.Close()
+
+	it := m.Iterate()
+	var k edge4Key
+	var v uint8
+	fmt.Println("Edge deny entries:")
+	n := 0
+	for it.Next(&k, &v) {
+		src := net.IPv4(k.SrcIP[0], k.SrcIP[1], k.SrcIP[2], k.SrcIP[3])
+		proto := map[uint8]string{6: "tcp", 17: "udp", 1: "icmp"}[k.Proto]
+		fmt.Printf("  src=%-15s port=%-5d proto=%s\n", src, k.DstPort, proto)
+		n++
+	}
+	if err := it.Err(); err != nil {
+		fmt.Printf("iterate edge4_deny: %v\n", err)
+	}
+	if n == 0 {
+		fmt.Println("  (none)")
+	}
+}
+
+func setEdgeRL(srcStr, portStr, protoStr string, rate, burst uint64) {
+	k := parseEdge4Key(srcStr, portStr, protoStr)
+	m, err := openPinnedMap(pinEdge4RL)
+	must(err, "open edge4_rl_policy")
+	defer m.Close()
+	v := rlCfg{RatePPS: rate, Burst: burst}
+	must(m.Update(&k, &v, ebpf.UpdateAny), "update edge4_rl_policy")
+	fmt.Printf("edge rl set: src=%s port=%s proto=%s rate=%d burst=%d\n",
+		srcStr, portStr, protoStr, rate, burst)
+}
+
+func tupleEnforce(on bool) {
+	m, err := openPinnedMap(pinEdge4Cfg)
+	must(err, "open edge4_cfg (run 'klshield attach-xdp' with new .bpf.o first)")
+	defer m.Close()
+	var k uint32 = 0
+	v := edge4CfgValue{}
+	if on {
+		v.Enforce = 1
+	}
+	must(m.Update(&k, &v, ebpf.UpdateAny), "update edge4_cfg")
+	if on {
+		fmt.Println("Tuple enforcement: ON — edge4_deny and edge4_rl_policy active in XDP.")
+	} else {
+		fmt.Println("Tuple enforcement: OFF — edge maps loaded but bypassed in XDP.")
+	}
+}
+
 /* ---------------- Stats ---------------- */
 
 func sumPerCPU(vals []xdpTotals) xdpTotals {
@@ -1086,29 +1243,115 @@ func usage() {
 	fmt.Print(`klshield (Kernloom Shield, XDP only)
 
 Commands:
-  attach-xdp   -iface eth0 [-obj bpf/klshield.bpf.o] [-force]
+  attach-xdp        -iface eth0 [-obj bpf/klshield.bpf.o] [-force]
   detach-xdp
+  status            show XDP attach state, default RL config and allow/deny counts
 
-  add-allow-cidr  <cidr>
+  add-allow-cidr    <cidr>
   list-allow
-  add-deny-ip     <ip>
-  del-deny-ip     <ip>
+  add-deny-ip       <ip>
+  del-deny-ip       <ip>
   list-deny
 
-  enforce-allow   on|off
-  set-sampling    <mask>     (0 disables, 1 => ~1/2, 3 => ~1/4, 1023 => ~1/1024)
+  enforce-allow     on|off
+  set-sampling      <mask>       (0 disables, 1 => ~1/2, 3 => ~1/4, 1023 => ~1/1024)
 
-  rl-set          -rate <pps> -burst <n>
-  rl-set-ip       -rate <pps> -burst <n> <ip>
-  rl-unset-ip     <ip>
+  # Sprint 7 — default kernel rate limit (XDP token bucket, no KLIQ needed)
+  set-default-rl    -rate <pps> -burst <n>    set global per-source RL (all sources)
+  disable-default-rl                           clear global RL (rate=0)
+  rl-set-ip         -rate <pps> -burst <n> <ip>  per-IP override (stronger or weaker)
+  rl-unset-ip       <ip>
   list-rl
 
-  reset
+  # XDP tuple (edge) enforcement — requires Shield reloaded with edge map support
+  tuple-enforce     on|off
+  add-edge-deny     -src <ip> -port <n> -proto tcp|udp|icmp
+  del-edge-deny     -src <ip> -port <n> -proto tcp|udp|icmp
+  list-edge-deny
+  set-edge-rl       -src <ip> -port <n> -proto tcp|udp|icmp -rate <pps> -burst <n>
+
+  reset             clear all deny/rl entries
 
   stats
-  top-src         [-n 20] [-by pkts|bytes|drops|droprl]
+  top-src           [-n 20] [-by pkts|bytes|drops|droprl]
   events
 `)
+}
+
+// showStatus prints a quick operational overview of the XDP program.
+func showStatus() {
+	fmt.Println("=== Kernloom Shield status ===")
+
+	// XDP link
+	if exists(pinXdpLink) {
+		fmt.Printf("XDP:      attached (link at %s)\n", pinXdpLink)
+	} else {
+		fmt.Println("XDP:      NOT attached")
+	}
+
+	// Default RL
+	if m, err := openPinnedMap(pinRLCfg); err == nil {
+		defer m.Close()
+		var k uint32 = 0
+		var v rlCfg
+		if err := m.Lookup(&k, &v); err == nil && v.RatePPS > 0 {
+			fmt.Printf("Default RL: rate=%d pps  burst=%d pkts\n", v.RatePPS, v.Burst)
+		} else {
+			fmt.Println("Default RL: disabled")
+		}
+	}
+
+	// Deny counts
+	deny4n, deny6n := 0, 0
+	if m, err := openPinnedMap(pinDeny4Hash); err == nil {
+		it := m.Iterate()
+		var k key4Bytes
+		var v uint8
+		for it.Next(&k, &v) {
+			deny4n++
+		}
+		m.Close()
+	}
+	if m, err := openPinnedMap(pinDeny6Hash); err == nil {
+		it := m.Iterate()
+		var k key6Bytes
+		var v uint8
+		for it.Next(&k, &v) {
+			deny6n++
+		}
+		m.Close()
+	}
+	fmt.Printf("Deny entries: v4=%d  v6=%d\n", deny4n, deny6n)
+
+	// Allow enforce
+	if m, err := openPinnedMap(pinCfg); err == nil {
+		defer m.Close()
+		var k uint32 = 0
+		var cur xdpCfg
+		if err := m.Lookup(&k, &cur); err == nil {
+			if cur.EnforceAllow == 1 {
+				fmt.Println("Allow-list enforcement: ON")
+			} else {
+				fmt.Println("Allow-list enforcement: off")
+			}
+		}
+	}
+
+	// Tuple enforcement
+	if m, err := openPinnedMap(pinEdge4Cfg); err == nil {
+		defer m.Close()
+		var k uint32 = 0
+		var v edge4CfgValue
+		if err := m.Lookup(&k, &v); err == nil {
+			if v.Enforce != 0 {
+				fmt.Println("Tuple enforcement: ON")
+			} else {
+				fmt.Println("Tuple enforcement: off (maps loaded, XDP bypass active)")
+			}
+		}
+	} else {
+		fmt.Println("Tuple enforcement: not available (reload Shield with new .bpf.o)")
+	}
 }
 
 func main() {
@@ -1118,6 +1361,9 @@ func main() {
 	}
 
 	switch os.Args[1] {
+	case "status":
+		showStatus()
+
 	case "attach-xdp":
 		fs := flag.NewFlagSet("attach-xdp", flag.ExitOnError)
 		iface := fs.String("iface", "eth0", "interface")
@@ -1173,6 +1419,26 @@ func main() {
 		must(err, "parse mask")
 		setEventSampling(mask)
 
+	case "set-default-rl":
+		// Sprint 7: clean alias for rl-set — sets the global per-source token bucket.
+		// Every new source is immediately subject to this limit in XDP, without
+		// waiting for KLIQ to react. KLIQ can still apply stricter per-IP overrides.
+		fs := flag.NewFlagSet("set-default-rl", flag.ExitOnError)
+		rate := fs.Uint64("rate", 0, "packets/sec limit applied to every source")
+		burst := fs.Uint64("burst", 0, "burst allowance in packets")
+		_ = fs.Parse(os.Args[2:])
+		if *rate == 0 || *burst == 0 {
+			fmt.Fprintln(os.Stderr, "usage: klshield set-default-rl -rate <pps> -burst <n>")
+			os.Exit(1)
+		}
+		rlSet(*rate, *burst)
+		fmt.Printf("Default RL active: every source is limited to %d pps (burst %d) in XDP.\n", *rate, *burst)
+
+	case "disable-default-rl":
+		// Sprint 7: clear the global rate limit (rate=0 disables the token bucket).
+		rlSet(0, 0)
+		fmt.Println("Default RL disabled.")
+
 	case "rl-set":
 		fs := flag.NewFlagSet("rl-set", flag.ExitOnError)
 		rate := fs.Uint64("rate", 0, "tokens/sec (pps)")
@@ -1199,6 +1465,45 @@ func main() {
 
 	case "list-rl":
 		listRL()
+
+	case "tuple-enforce":
+		if len(os.Args) < 3 {
+			must(fmt.Errorf("missing on|off"), "tuple-enforce")
+		}
+		tupleEnforce(strings.ToLower(os.Args[2]) == "on")
+
+	case "add-edge-deny":
+		fs := flag.NewFlagSet("add-edge-deny", flag.ExitOnError)
+		src := fs.String("src", "", "source IP")
+		port := fs.String("port", "", "destination port")
+		proto := fs.String("proto", "tcp", "tcp|udp|icmp")
+		_ = fs.Parse(os.Args[2:])
+		mustIf(*src == "" || *port == "", "add-edge-deny requires -src, -port")
+		addEdgeDeny(*src, *port, *proto)
+
+	case "del-edge-deny":
+		fs := flag.NewFlagSet("del-edge-deny", flag.ExitOnError)
+		src := fs.String("src", "", "source IP")
+		port := fs.String("port", "", "destination port")
+		proto := fs.String("proto", "tcp", "tcp|udp|icmp")
+		_ = fs.Parse(os.Args[2:])
+		mustIf(*src == "" || *port == "", "del-edge-deny requires -src, -port")
+		delEdgeDeny(*src, *port, *proto)
+
+	case "list-edge-deny":
+		listEdgeDeny()
+
+	case "set-edge-rl":
+		fs := flag.NewFlagSet("set-edge-rl", flag.ExitOnError)
+		src := fs.String("src", "", "source IP")
+		port := fs.String("port", "", "destination port")
+		proto := fs.String("proto", "tcp", "tcp|udp|icmp")
+		rate := fs.Uint64("rate", 0, "packets/sec")
+		burst := fs.Uint64("burst", 0, "burst size")
+		_ = fs.Parse(os.Args[2:])
+		mustIf(*src == "" || *port == "" || *rate == 0 || *burst == 0,
+			"set-edge-rl requires -src, -port, -rate, -burst")
+		setEdgeRL(*src, *port, *proto, *rate, *burst)
 
 	case "reset":
 		resetMaps()
