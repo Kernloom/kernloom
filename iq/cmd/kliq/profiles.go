@@ -27,10 +27,12 @@ type profile struct {
 	TrigPPS  float64
 	TrigSyn  float64
 	TrigScan float64
+	TrigBPS  float64 // 0 = disabled
 
 	WPPS   float64
 	WSyn   float64
 	WScan  float64
+	WBps   float64 // 0 = disabled
 	SevCap float64
 
 	SoftAt  int

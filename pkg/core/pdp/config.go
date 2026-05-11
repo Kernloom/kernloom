@@ -63,10 +63,36 @@ type Spec struct {
 	// PolicyPack (signal: graph.new_edge_after_freeze → action: …).
 	Graph GraphSpec `yaml:"graph,omitempty"`
 
+	// Baseline controls per-source traffic baseline learning and deviation detection.
+	Baseline BaselineSpec `yaml:"baseline,omitempty"`
+
 	// Adapters holds the concrete parameters for each built-in PEP adapter.
 	// These are the values the adapter uses to implement abstract capabilities
 	// (network.rate_limit_source, network.block_source) requested by the policy.
 	Adapters AdaptersSpec `yaml:"adapters,omitempty"`
+}
+
+// ─── Baseline ─────────────────────────────────────────────────────────────────
+
+// BaselineSpec controls per-edge traffic baseline learning.
+// Baseline is automatically active when graph learning is enabled.
+type BaselineSpec struct {
+	// MinObservations before an edge profile is promoted from candidate to
+	// learned and used for anomaly detection.
+	MinObservations uint64 `yaml:"min_observations"`
+
+	// Alpha is the stable long-run EWMA adaptation speed (0.0–1.0).
+	// Lower = slower / more stable. Recommended: 0.01–0.05.
+	Alpha float64 `yaml:"alpha"`
+
+	// AlphaBootstrap is the faster EWMA speed used while obs < MinObservations.
+	// Allows quick initial convergence; switches to Alpha after promotion.
+	// Recommended: 0.05–0.15. Default (0) uses 0.10.
+	AlphaBootstrap float64 `yaml:"alpha_bootstrap,omitempty"`
+
+	// DeviationThreshold is the MAD multiplier that triggers a signal.
+	// 5.0 = very conservative; lower values = more sensitive.
+	DeviationThreshold float64 `yaml:"deviation_threshold"`
 }
 
 // ─── Signal engine ────────────────────────────────────────────────────────────
@@ -77,6 +103,7 @@ type SignalEngineSpec struct {
 	PPSTrigger  float64     `yaml:"pps_trigger"`
 	SynTrigger  float64     `yaml:"syn_trigger"`
 	ScanTrigger float64     `yaml:"scan_trigger"`
+	BPSTrigger  float64     `yaml:"bps_trigger,omitempty"` // 0 = disabled
 	Weights     WeightsSpec `yaml:"weights"`
 }
 
@@ -85,6 +112,7 @@ type WeightsSpec struct {
 	PPS  float64 `yaml:"pps"`
 	Syn  float64 `yaml:"syn"`
 	Scan float64 `yaml:"scan"`
+	BPS  float64 `yaml:"bps,omitempty"` // 0 = disabled
 	// Cap is the maximum composite severity score (e.g. 3.0).
 	Cap float64 `yaml:"cap"`
 }

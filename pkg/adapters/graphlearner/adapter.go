@@ -48,11 +48,15 @@ type Store interface {
 	Upsert(e *graph.Edge) (*graph.Edge, error)
 	GetByKey(key graph.EdgeKey) (*graph.Edge, error)
 	PromoteCandidates(nodeID string, cfg graph.PromotionConfig, now time.Time) (int, error)
-	MarkExpired(nodeID string, cutoff time.Time) (int, error)
-	// ExpireCandidatesBySource expires all candidate edges whose source IP
-	// matches sourceID for the given node. Used to retroactively clean up
-	// candidates that slipped through before the heuristic signal fired.
-	ExpireCandidatesBySource(nodeID, sourceID string) (int, error)
+	MarkExpired(nodeID string, cutoff time.Time, minSeenCount uint64) (int, error)
+	// ExpireCandidatesBySource expires fresh candidate edges (seen_count < minSeenCount)
+	// whose source IP matches sourceID. Established candidates are preserved.
+	ExpireCandidatesBySource(nodeID, sourceID string, minSeenCount uint64) (int, error)
+	// UpdateEdgeBaseline updates the EWMA traffic baseline for a specific edge.
+	// Must only be called when the source is not suspicious (anti-poisoning).
+	UpdateEdgeBaseline(key graph.EdgeKey, pps, bytesPS, alphaStable, alphaBootstrap float64, minObs uint64) error
+	// EdgeBaselineDeviation returns deviation factors vs the learned baseline.
+	EdgeBaselineDeviation(key graph.EdgeKey, pps, bytesPS float64) (devPPS, devBytes float64)
 }
 
 // Config configures the graph learner adapter.
@@ -93,6 +97,28 @@ type Config struct {
 	// Useful to exclude NAT gateways, local routers or WSL host IPs that funnel
 	// all external traffic and would otherwise dominate the graph.
 	ExcludeSourceCIDRs []net.IPNet
+
+	// Baseline tuning. Edge baseline is always active when the graph learner runs.
+	// Alpha controls EWMA adaptation speed (0.0–1.0, recommended 0.05–0.15).
+	// BaselineAlpha is the stable long-run EWMA adaptation speed (e.g. 0.02).
+	BaselineAlpha float64
+	// BaselineAlphaBootstrap is the faster alpha used while obs < BaselineMinObservations.
+	// Allows quick initial convergence before switching to the stable alpha.
+	// Default 0.10 when unset.
+	BaselineAlphaBootstrap float64
+	// BaselineMinObservations before a profile is used for anomaly detection.
+	BaselineMinObservations uint64
+	// BaselineDeviationThreshold is the MAD multiplier that triggers a signal.
+	BaselineDeviationThreshold float64
+
+	// BaselineTrigPPS and BaselineTrigBPS are the host-level trigger thresholds
+	// from the signal engine. Observations that exceed these values are by
+	// definition above-normal for this host and must not be learned as baseline —
+	// even on the very first observation, before isSuspicious() has fired.
+	// Set to the current TrigPPS/TrigBPS from the heuristic engine config.
+	// 0 = disabled (no cap).
+	BaselineTrigPPS float64
+	BaselineTrigBPS float64
 }
 
 // suspiciousEntry tracks an IP flagged by the heuristic signal engine.
@@ -196,9 +222,12 @@ func (a *Adapter) signalLoop(ctx context.Context, bus adapterruntime.EventBus) {
 func (a *Adapter) handleSignal(sig signal.Signal) {
 	switch sig.Type {
 	case signal.SignalPPSHigh,
+		signal.SignalBPSHigh,
 		signal.SignalSYNRateHigh,
 		signal.SignalScanSuspected,
-		signal.SignalRateLimitDropsSustained:
+		signal.SignalRateLimitDropsSustained,
+		signal.SignalGraphEdgeBaselinePPSDeviation,
+		signal.SignalGraphEdgeBaselineBytesDeviation:
 	default:
 		return
 	}
@@ -213,11 +242,17 @@ func (a *Adapter) handleSignal(sig signal.Signal) {
 	a.suspicious[sig.Subject.ID] = suspiciousEntry{expiresAt: time.Now().Add(ttl)}
 	a.suspMu.Unlock()
 
-	// Expire any candidate edges that snuck through before this signal fired.
-	if n, err := a.store.ExpireCandidatesBySource(a.cfg.NodeID, sig.Subject.ID); err != nil {
+	// Expire only fresh candidate edges (seen_count < minSeen) that snuck in
+	// during the attack burst. Established candidates survive — they represent
+	// real historical traffic from the source, not attack-created fake edges.
+	minSeen := a.cfg.Promotion.MinSeenCount
+	if minSeen == 0 {
+		minSeen = 5
+	}
+	if n, err := a.store.ExpireCandidatesBySource(a.cfg.NodeID, sig.Subject.ID, minSeen); err != nil {
 		logger.Printf("expire candidates for %s: %v", sig.Subject.ID, err)
 	} else if n > 0 {
-		logger.Printf("expired %d candidate(s) for suspicious source %s", n, sig.Subject.ID)
+		logger.Printf("expired %d fresh candidate(s) for suspicious source %s", n, sig.Subject.ID)
 	}
 }
 
@@ -348,6 +383,70 @@ func (a *Adapter) handleObservation(ctx context.Context, bus adapterruntime.Even
 		return
 	}
 
+	// Per-edge baseline: update EWMA with current tick rates and check for
+	// deviation.
+	// Two anti-poisoning layers:
+	//   1. isSuspicious() above: skips sources already flagged by signals.
+	//   2. TrigPPS/TrigBPS cap below: skips observations that are by definition
+	//      above the host-level trigger threshold — these are attack-level values
+	//      that must not be learned as normal even on the first observation.
+	//      This closes the race window where signals haven't fired yet (obs ≤ 2).
+	pps := obs.Metrics["pps"]
+	bps := obs.Metrics["bps"]
+
+	baselineClean := true
+	if a.cfg.BaselineTrigPPS > 0 && pps > a.cfg.BaselineTrigPPS {
+		baselineClean = false
+	}
+	if a.cfg.BaselineTrigBPS > 0 && bps > a.cfg.BaselineTrigBPS {
+		baselineClean = false
+	}
+
+	alpha := a.cfg.BaselineAlpha
+	if alpha <= 0 {
+		alpha = 0.1
+	}
+	minObs := a.cfg.BaselineMinObservations
+	if minObs == 0 {
+		minObs = 30
+	}
+	if baselineClean {
+		alphaBootstrap := a.cfg.BaselineAlphaBootstrap
+		if alphaBootstrap <= 0 {
+			alphaBootstrap = 0.10
+		}
+		if err := a.store.UpdateEdgeBaseline(current.Key(), pps, bps, alpha, alphaBootstrap, minObs); err != nil {
+			logger.Printf("edge baseline update %s: %v", current.ID, err)
+		}
+	}
+
+	thresh := a.cfg.BaselineDeviationThreshold
+	if thresh <= 0 {
+		thresh = 5.0
+	}
+	devPPS, devBytes := a.store.EdgeBaselineDeviation(current.Key(), pps, bps)
+	if devPPS > thresh || devBytes > thresh {
+		factor := devPPS
+		sigType := signal.SignalGraphEdgeBaselinePPSDeviation
+		if devBytes > devPPS {
+			factor = devBytes
+			sigType = signal.SignalGraphEdgeBaselineBytesDeviation
+		}
+		score := 50 + int((factor-thresh)*10)
+		if score > 99 {
+			score = 99
+		}
+		sig := signal.NewSignal(signal.ProducerKLIQ, signal.ScopeLocal, sigType, obs.Subject).
+			SetScore(score).
+			SetConfidence(80).
+			SetTTL(2*time.Minute).
+			AddReasonCode("baseline_edge_deviation").
+			SetAttribute("edge", strconv.Itoa(int(dstPort))+"/"+proto).
+			SetAttribute("deviation_pps", strconv.FormatFloat(devPPS, 'f', 1, 64)).
+			SetAttribute("deviation_bytes", strconv.FormatFloat(devBytes, 'f', 1, 64))
+		_ = bus.PublishSignal(ctx, *sig)
+	}
+
 	// In frozen modes, signal any edge that is not frozen/approved.
 	// Candidate edges (seen during learning but never promoted) are treated as
 	// unknown — they were never part of the frozen baseline.
@@ -403,7 +502,11 @@ func (a *Adapter) maintenanceLoop(ctx context.Context) {
 				logger.Printf("promoted %d candidate(s) to learned", n)
 			}
 			if a.cfg.ExpireTTL > 0 {
-				if n, err := a.store.MarkExpired(a.cfg.NodeID, now.Add(-a.cfg.ExpireTTL)); err != nil {
+				minSeen := a.cfg.Promotion.MinSeenCount
+				if minSeen == 0 {
+					minSeen = 5
+				}
+				if n, err := a.store.MarkExpired(a.cfg.NodeID, now.Add(-a.cfg.ExpireTTL), minSeen); err != nil {
 					logger.Printf("mark expired: %v", err)
 				} else if n > 0 {
 					logger.Printf("marked %d edge(s) as expired", n)

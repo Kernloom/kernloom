@@ -19,6 +19,7 @@ type trigState struct {
 	TrigPPS  float64 `json:"trig_pps"`
 	TrigSyn  float64 `json:"trig_syn"`
 	TrigScan float64 `json:"trig_scan"`
+	TrigBPS  float64 `json:"trig_bps,omitempty"` // 0 = disabled; absent in older state files
 }
 
 type tuneMeta struct {
@@ -57,6 +58,8 @@ type stateHistory struct {
 	MadSyn      float64   `json:"mad_syn"`
 	MedianScan  float64   `json:"median_scan"`
 	MadScan     float64   `json:"mad_scan"`
+	MedianBPS   float64   `json:"median_bps,omitempty"`
+	MadBPS      float64   `json:"mad_bps,omitempty"`
 	SampleCount int       `json:"sample_count"`
 	CleanRatio  float64   `json:"clean_ratio"`
 	Notes       string    `json:"notes,omitempty"`
@@ -104,7 +107,7 @@ func writeStateAtomic(path string, st *stateFile) error {
 	tmpPath := path + ".tmp"
 	bakPath := path + ".bak"
 
-	f, err := os.OpenFile(tmpPath, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o640)
+	f, err := os.OpenFile(tmpPath, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o644)
 	if err != nil {
 		return err
 	}

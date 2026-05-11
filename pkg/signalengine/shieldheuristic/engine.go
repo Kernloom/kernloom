@@ -40,11 +40,14 @@ type Config struct {
 	TrigPPS  float64
 	TrigSyn  float64
 	TrigScan float64
+	TrigBPS  float64 // bytes/s trigger; 0 disables BPS scoring
 
-	// Weights for the composite severity score (typically sum to 1.0).
+	// Weights for the composite severity score.
+	// BPS weight is additive — existing PPS/SYN/scan weights need not sum to 1.
 	WPPS  float64
 	WSyn  float64
 	WScan float64
+	WBps  float64 // 0 disables BPS contribution to severity
 
 	// SevCap is the maximum normalised value per component (default 3.0).
 	// Normalised values above this are clamped before weighting.
@@ -114,9 +117,9 @@ func (e *Engine) Evaluate(
 	e.mu.RUnlock()
 
 	sev := fsm.CalcSeverity(
-		pps, synRate, scanRate,
-		cfg.TrigPPS, cfg.TrigSyn, cfg.TrigScan,
-		cfg.WPPS, cfg.WSyn, cfg.WScan,
+		pps, synRate, scanRate, bps,
+		cfg.TrigPPS, cfg.TrigSyn, cfg.TrigScan, cfg.TrigBPS,
+		cfg.WPPS, cfg.WSyn, cfg.WScan, cfg.WBps,
 		cfg.SevCap,
 	)
 
@@ -159,6 +162,23 @@ func (e *Engine) Evaluate(
 			AddReasonCode(reason.SYNRateHigh).
 			SetAttribute("syn_rate", fmt.Sprintf("%.1f", synRate)).
 			SetAttribute("trig_syn", fmt.Sprintf("%.1f", cfg.TrigSyn)).
+			SetAttribute("severity", fmt.Sprintf("%.3f", sev)).
+			SetAttribute("node_id", cfg.NodeID))
+	}
+
+	// source.bps_high — emitted when bytes/s reaches or exceeds trigger.
+	// Catches large-packet floods and slow exfiltration that stay under PPS radar.
+	if cfg.TrigBPS > 0 && cfg.WBps > 0 && bps >= cfg.TrigBPS {
+		sigs = append(sigs, *signal.NewSignal(
+			signal.ProducerKLIQ, signal.ScopeLocal,
+			signal.SignalBPSHigh, subject,
+		).
+			SetScore(normToScore(bps/cfg.TrigBPS, cfg.SevCap)).
+			SetConfidence(75).
+			SetTTL(cfg.SignalTTL).
+			AddReasonCode(reason.BPSHigh).
+			SetAttribute("bps", fmt.Sprintf("%.0f", bps)).
+			SetAttribute("trig_bps", fmt.Sprintf("%.0f", cfg.TrigBPS)).
 			SetAttribute("severity", fmt.Sprintf("%.3f", sev)).
 			SetAttribute("node_id", cfg.NodeID))
 	}

@@ -5,7 +5,9 @@ package main
 
 import (
 	"flag"
+	"fmt"
 	"math"
+	"os"
 	"time"
 
 	"github.com/adrianenderlin/kernloom/pkg/adapters/shieldpep"
@@ -78,6 +80,7 @@ type cfg struct {
 	AutoFloorPPS   float64
 	AutoFloorSyn   float64
 	AutoFloorScan  float64
+	AutoFloorBPS   float64
 
 	// Anti-poisoning
 	LearnSevGT        float64
@@ -90,9 +93,11 @@ type cfg struct {
 	TrigPPS  float64
 	TrigSyn  float64
 	TrigScan float64
+	TrigBPS  float64
 	WPPS     float64
 	WSyn     float64
 	WScan    float64
+	WBps     float64
 	SevCap   float64
 
 	// Strike mapping
@@ -168,6 +173,12 @@ type cfg struct {
 	GraphFreezeMaxAction   string        // upper bound on freeze enforcement action
 	GraphFreezeAllowBlock  bool          // permit block decisions from freeze violations
 	GraphFreezeMinSeverity int           // minimum signal score (0-100) before enforcement
+
+	// Baseline engine (per-edge EWMA traffic learning, active when GraphEnabled=true).
+	BaselineMinObservations    uint64
+	BaselineAlpha              float64
+	BaselineAlphaBootstrap     float64
+	BaselineDeviationThreshold float64
 }
 
 // toFSMConfig converts the relevant cfg fields to an fsm.Config.
@@ -219,6 +230,51 @@ func (c cfg) toPEPParams() shieldpep.EnforcementParams {
 
 func parseFlags() cfg {
 	var c cfg
+
+	// Write help to stdout so it can be piped and grepped.
+	flag.CommandLine.SetOutput(os.Stdout)
+	flag.Usage = func() {
+		fmt.Fprintf(os.Stdout, `Kernloom IQ — local intelligence and enforcement agent
+
+USAGE
+  kliq [flags]              run the kliq agent
+  kliq status               show node status: bootstrap phase, autotune triggers, graph/baseline summary
+  kliq graph <subcommand>   manage the communication graph and edge baselines
+
+GRAPH SUBCOMMANDS
+  kliq graph edges [--all] [--sort=last|state|src|port|seen] [store] [node-id]
+      Show learned communication edges and their state.
+      --all    show all edges (default: first 30)
+      --sort=  sort by: last (default), state, src, port, seen
+
+  kliq graph baselines [--all] [--sort=obs|state|src|port|pps|bps] [store] [node-id]
+      Show per-edge EWMA traffic baselines (src, dst, proto, port, pps, bps).
+      --all    show all edges (default: first 40)
+      --sort=  sort by: obs (default), state, src, port, pps, bps
+
+  kliq graph baselines reset [store] [node-id]
+      Zero all per-edge baseline stats so EWMA learning restarts from scratch.
+
+  kliq graph export [--format=json] [store] [node-id]
+      Export full graph as YAML (or JSON) to stdout.
+
+  kliq graph freeze [store] [node-id] [frozen-file]
+      Freeze all learned/approved edges and write frozen-graph.yaml.
+
+  kliq graph reset [--all] [store] [node-id]
+      Delete candidate/learned/expired edges so the graph re-learns.
+      --all   also wipe frozen and approved edges (full reset).
+
+  kliq graph approve-ip <ip> [store] [node-id]
+      Mark all edges from <ip> as approved (stops freeze-violation signals).
+
+  kliq graph deny-ip <ip> [store] [node-id]
+      Mark all edges from <ip> as denied.
+
+AGENT FLAGS
+`)
+		flag.PrintDefaults()
+	}
 
 	flag.DurationVar(&c.Interval, "interval", 1*time.Second, "poll interval")
 	flag.IntVar(&c.TopN, "top", 200, "top N sources by severity")
@@ -278,6 +334,7 @@ func parseFlags() cfg {
 	flag.Float64Var(&c.AutoFloorPPS, "autotune-floor-pps", 100, "minimum trig-pps")
 	flag.Float64Var(&c.AutoFloorSyn, "autotune-floor-syn", 50, "minimum trig-syn")
 	flag.Float64Var(&c.AutoFloorScan, "autotune-floor-scan", 20, "minimum trig-scan")
+	flag.Float64Var(&c.AutoFloorBPS, "autotune-floor-bps", 0, "minimum trig-bps (0 disables BPS autotuning)")
 
 	flag.Float64Var(&c.LearnSevGT, "learn-sev-gt", 1.0, "tick is 'dirty' if sev>=learn-sev-gt fraction is too high")
 	flag.Float64Var(&c.LearnFracGT, "learn-frac-gt", 0.005, "max fraction of sources with sev>=learn-sev-gt to consider tick 'clean'")
@@ -288,9 +345,11 @@ func parseFlags() cfg {
 	flag.Float64Var(&c.TrigPPS, "trig-pps", 0, "PPS trigger threshold (0 => from profile/state)")
 	flag.Float64Var(&c.TrigSyn, "trig-syn", 0, "SYN/s trigger threshold (0 => from profile/state)")
 	flag.Float64Var(&c.TrigScan, "trig-scan", 0, "scan/s trigger threshold (0 => from profile/state)")
+	flag.Float64Var(&c.TrigBPS, "trig-bps", 0, "bytes/s trigger threshold (0 => from profile; 0 disables BPS scoring)")
 	flag.Float64Var(&c.WPPS, "w-pps", 0, "weight for PPS (0 => from profile)")
 	flag.Float64Var(&c.WSyn, "w-syn", 0, "weight for SYN/s (0 => from profile)")
 	flag.Float64Var(&c.WScan, "w-scan", 0, "weight for scan/s (0 => from profile)")
+	flag.Float64Var(&c.WBps, "w-bps", 0, "weight for bytes/s (0 => from profile; 0 disables BPS scoring)")
 	flag.Float64Var(&c.SevCap, "sev-cap", 0, "cap for normalized metrics (0 => from profile)")
 
 	flag.Float64Var(&c.SevStep1, "sev-step1", 1.0, "severity >= step1 -> add delta1 strikes")
@@ -332,8 +391,8 @@ func parseFlags() cfg {
 	flag.StringVar(&c.BPFfsRoot, "bpffs-root", "/sys/fs/bpf", "bpffs mount root")
 
 	flag.BoolVar(&c.GraphEnabled, "graph", false, "enable graph learning")
-	// Runtime state — SQLite DB updated every tick, not under IMA.
-	flag.StringVar(&c.GraphStorePath, "graph-store", "/var/lib/kernloom/iq/graph.db", "graph SQLite database (runtime, not IMA-attested)")
+	// Runtime state — combined SQLite DB for graph edges and source baselines.
+	flag.StringVar(&c.GraphStorePath, "db", "/var/lib/kernloom/iq/kliq.db", "runtime SQLite database (graph edges + source baselines, not IMA-attested)")
 	// IMA-attested: written once by 'kliq graph freeze', then static until next freeze.
 	flag.StringVar(&c.GraphFrozenPath, "graph-frozen", "/opt/kernloom/attested/etc/frozen-graph.yaml", "frozen graph baseline written by 'kliq graph freeze' (IMA-attested if activated)")
 	flag.StringVar(&c.GraphMode, "graph-mode", "learn", "graph mode: learn or frozen-observe")
@@ -355,6 +414,12 @@ func parseFlags() cfg {
 	flag.BoolVar(&c.GraphFreezeAllowBlock, "graph-freeze-allow-block", false, "permit block decisions from graph freeze violations")
 	flag.IntVar(&c.GraphFreezeMinSeverity, "graph-freeze-min-severity", 70, "minimum signal score (0-100) required before enforcing on a graph freeze violation")
 
+	// Per-edge baseline (active when --graph is enabled; no separate flag).
+	flag.Uint64Var(&c.BaselineMinObservations, "baseline-min-obs", 30, "edge observations before EWMA profile is promoted to learned")
+	flag.Float64Var(&c.BaselineAlpha, "baseline-alpha", 0.02, "EWMA stable adaptation speed after bootstrap (0.0=never, 1.0=instant; recommended 0.01–0.05)")
+	flag.Float64Var(&c.BaselineAlphaBootstrap, "baseline-alpha-bootstrap", 0.10, "EWMA bootstrap adaptation speed while obs < baseline-min-obs (faster initial convergence)")
+	flag.Float64Var(&c.BaselineDeviationThreshold, "baseline-threshold", 5.0, "MAD multiplier that triggers an edge baseline deviation signal")
+
 	flag.Parse()
 	return c
 }
@@ -370,6 +435,9 @@ func applyProfileDefaults(c *cfg, p profile) {
 	if c.TrigScan == 0 {
 		c.TrigScan = p.TrigScan
 	}
+	if c.TrigBPS == 0 {
+		c.TrigBPS = p.TrigBPS
+	}
 	if c.WPPS == 0 {
 		c.WPPS = p.WPPS
 	}
@@ -378,6 +446,9 @@ func applyProfileDefaults(c *cfg, p profile) {
 	}
 	if c.WScan == 0 {
 		c.WScan = p.WScan
+	}
+	if c.WBps == 0 {
+		c.WBps = p.WBps
 	}
 	if c.SevCap == 0 {
 		c.SevCap = p.SevCap

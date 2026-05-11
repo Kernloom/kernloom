@@ -4,6 +4,7 @@
 package fsm_test
 
 import (
+	"math"
 	"testing"
 	"time"
 
@@ -92,7 +93,7 @@ func TestLevelString(t *testing.T) {
 /* ---------------- CalcSeverity -------------------------------------------- */
 
 func TestCalcSeverity_ZeroThresholds(t *testing.T) {
-	sev := fsm.CalcSeverity(9999, 9999, 9999, 0, 0, 0, 0.5, 0.3, 0.2, 3.0)
+	sev := fsm.CalcSeverity(9999, 9999, 9999, 9999, 0, 0, 0, 0, 0.5, 0.3, 0.2, 0, 3.0)
 	if sev != 0 {
 		t.Errorf("expected 0 when all thresholds are 0, got %f", sev)
 	}
@@ -100,7 +101,7 @@ func TestCalcSeverity_ZeroThresholds(t *testing.T) {
 
 func TestCalcSeverity_Partial(t *testing.T) {
 	// Only PPS signal active (trig=100, w=1.0), pps=100 => nPPS=1.0, sev=1.0
-	sev := fsm.CalcSeverity(100, 0, 0, 100, 0, 0, 1.0, 0, 0, 3.0)
+	sev := fsm.CalcSeverity(100, 0, 0, 0, 100, 0, 0, 0, 1.0, 0, 0, 0, 3.0)
 	if sev != 1.0 {
 		t.Errorf("expected 1.0, got %f", sev)
 	}
@@ -108,7 +109,7 @@ func TestCalcSeverity_Partial(t *testing.T) {
 
 func TestCalcSeverity_Capped(t *testing.T) {
 	// pps=10000, trig=100 => ratio=100 but cap=3.0 => nPPS=3.0; weight=1.0 => sev=3.0
-	sev := fsm.CalcSeverity(10000, 0, 0, 100, 0, 0, 1.0, 0, 0, 3.0)
+	sev := fsm.CalcSeverity(10000, 0, 0, 0, 100, 0, 0, 0, 1.0, 0, 0, 0, 3.0)
 	if sev != 3.0 {
 		t.Errorf("expected 3.0 (capped), got %f", sev)
 	}
@@ -118,9 +119,19 @@ func TestCalcSeverity_Combined(t *testing.T) {
 	// pps trig=100,w=0.5: pps=200 => n=2.0 (below cap 3) => contrib=1.0
 	// syn trig=50,w=0.5: syn=100 => n=2.0 => contrib=1.0
 	// total = 2.0
-	sev := fsm.CalcSeverity(200, 100, 0, 100, 50, 0, 0.5, 0.5, 0, 3.0)
+	sev := fsm.CalcSeverity(200, 100, 0, 0, 100, 50, 0, 0, 0.5, 0.5, 0, 0, 3.0)
 	if sev != 2.0 {
 		t.Errorf("expected 2.0, got %f", sev)
+	}
+}
+
+func TestCalcSeverity_BPS(t *testing.T) {
+	// bps trig=1_000_000, w=0.2: bps=2_000_000 => n=2.0 => contrib=0.4
+	// pps trig=1000, w=0.8: pps=1000 => n=1.0 => contrib=0.8
+	// total = 1.2
+	sev := fsm.CalcSeverity(1000, 0, 0, 2_000_000, 1000, 0, 0, 1_000_000, 0.8, 0, 0, 0.2, 3.0)
+	if math.Abs(sev-1.2) > 1e-9 {
+		t.Errorf("expected 1.2, got %f", sev)
 	}
 }
 

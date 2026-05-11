@@ -17,6 +17,11 @@ const (
 	PPSVeryHigh = "pps_very_high" // Packets per second extremely elevated
 )
 
+// BPS-related reasons
+const (
+	BPSHigh = "bps_high" // Bytes per second exceeds threshold (large-packet flood or exfil)
+)
+
 // SYN-related reasons
 const (
 	SYNRateHigh     = "syn_rate_high" // SYN packet rate exceeds threshold (SYN flood pattern)

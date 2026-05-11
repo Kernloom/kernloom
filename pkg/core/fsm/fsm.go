@@ -267,12 +267,12 @@ func Advance(m Metrics, st State, now time.Time, cfg Config, doTransition Transi
 	return st, transitioned
 }
 
-// CalcSeverity computes a composite severity score from PPS, SYN/s and scan/s.
-// Each signal is normalised by its trigger threshold (capped at cap) and
-// weighted.  A zero threshold disables that signal.
-func CalcSeverity(pps, synps, scanps float64,
-	trigPPS, trigSyn, trigScan float64,
-	wPPS, wSyn, wScan float64,
+// CalcSeverity computes a composite severity score from PPS, SYN/s, scan/s
+// and bytes/s. Each signal is normalised by its trigger threshold (capped at
+// cap) and weighted. A zero threshold or weight disables that signal.
+func CalcSeverity(pps, synps, scanps, bps float64,
+	trigPPS, trigSyn, trigScan, trigBPS float64,
+	wPPS, wSyn, wScan, wBps float64,
 	cap float64,
 ) float64 {
 	nPPS := 0.0
@@ -287,7 +287,11 @@ func CalcSeverity(pps, synps, scanps float64,
 	if trigScan > 0 {
 		nScan = minf(scanps/trigScan, cap)
 	}
-	return wPPS*nPPS + wSyn*nSyn + wScan*nScan
+	nBps := 0.0
+	if trigBPS > 0 {
+		nBps = minf(bps/trigBPS, cap)
+	}
+	return wPPS*nPPS + wSyn*nSyn + wScan*nScan + wBps*nBps
 }
 
 func minf(a, b float64) float64 {

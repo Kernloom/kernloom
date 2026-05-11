@@ -18,7 +18,7 @@ import (
 // learning samples when appropriate.
 func processCandidate4(m metrics, st fsm.State, nowWall time.Time, c cfg,
 	wl *whitelist, fb *feedbackManager, pep *shieldpep.Adapter,
-	resPPS, resSyn, resScan *reservoir, clean bool,
+	resPPS, resSyn, resScan, resBps *reservoir, clean bool,
 ) fsm.State {
 	st.LastSeenWallTime = nowWall
 
@@ -37,6 +37,7 @@ func processCandidate4(m metrics, st fsm.State, nowWall time.Time, c cfg,
 				resPPS.Add(m.PPS)
 				resSyn.Add(m.SynRate)
 				resScan.Add(m.ScanRate)
+				resBps.Add(m.Bps)
 			}
 		}
 		return st
@@ -47,26 +48,20 @@ func processCandidate4(m metrics, st fsm.State, nowWall time.Time, c cfg,
 	}
 
 	prevLevel := st.Level
-	var newSt fsm.State
-	var transitioned bool
-	if c.AutoTune {
-		newSt, transitioned = fsm.Advance(m.toFSMMetrics(), st, nowWall, c.toFSMConfig(), doTransition)
-	} else {
-		newSt, transitioned = fsm.Advance(m.toFSMMetrics(), st, nowWall, c.toFSMConfig(), doTransition)
-	}
-	st = newSt
+	st, _ = fsm.Advance(m.toFSMMetrics(), st, nowWall, c.toFSMConfig(), doTransition)
 
-	if transitioned {
-		kliqLog.Printf("STATE %s %s->%s strikes=%d up=%d down=%d noncomp=%d sev=%.2f pps=%.0f syn=%.0f scan=%.0f dropRL/s=%.1f",
+	if st.Level != prevLevel {
+		kliqLog.Printf("STATE %s %s->%s strikes=%d up=%d down=%d noncomp=%d sev=%.2f pps=%.0f bps=%.0f syn=%.0f scan=%.0f dropRL/s=%.1f",
 			m.ipString(), prevLevel.String(), st.Level.String(),
 			st.Strikes, st.UpStreak, st.DownStreak, st.NonCompTicks,
-			m.Severity, m.PPS, m.SynRate, m.ScanRate, m.DropRLRate)
+			m.Severity, m.PPS, m.Bps, m.SynRate, m.ScanRate, m.DropRLRate)
 	}
 
 	if clean && c.AutoTune && st.Level == fsm.LevelObserve && m.Severity <= c.LearnMaxSev && m.DropRLRate == 0 {
 		resPPS.Add(m.PPS)
 		resSyn.Add(m.SynRate)
 		resScan.Add(m.ScanRate)
+		resBps.Add(m.Bps)
 	}
 
 	return st
@@ -75,7 +70,7 @@ func processCandidate4(m metrics, st fsm.State, nowWall time.Time, c cfg,
 // processCandidate6 runs the FSM for a single IPv6 source.
 func processCandidate6(m metrics, st fsm.State, nowWall time.Time, c cfg,
 	wl *whitelist, fb *feedbackManager, pep *shieldpep.Adapter,
-	resPPS, resSyn, resScan *reservoir, clean bool,
+	resPPS, resSyn, resScan, resBps *reservoir, clean bool,
 ) fsm.State {
 	st.LastSeenWallTime = nowWall
 
@@ -94,6 +89,7 @@ func processCandidate6(m metrics, st fsm.State, nowWall time.Time, c cfg,
 				resPPS.Add(m.PPS)
 				resSyn.Add(m.SynRate)
 				resScan.Add(m.ScanRate)
+				resBps.Add(m.Bps)
 			}
 		}
 		return st
@@ -104,22 +100,20 @@ func processCandidate6(m metrics, st fsm.State, nowWall time.Time, c cfg,
 	}
 
 	prevLevel := st.Level
-	var newSt fsm.State
-	var transitioned bool
-	newSt, transitioned = fsm.Advance(m.toFSMMetrics(), st, nowWall, c.toFSMConfig(), doTransition)
-	st = newSt
+	st, _ = fsm.Advance(m.toFSMMetrics(), st, nowWall, c.toFSMConfig(), doTransition)
 
-	if transitioned {
-		kliqLog.Printf("STATE %s %s->%s strikes=%d up=%d down=%d noncomp=%d sev=%.2f pps=%.0f syn=%.0f scan=%.0f dropRL/s=%.1f",
+	if st.Level != prevLevel {
+		kliqLog.Printf("STATE %s %s->%s strikes=%d up=%d down=%d noncomp=%d sev=%.2f pps=%.0f bps=%.0f syn=%.0f scan=%.0f dropRL/s=%.1f",
 			m.ipString(), prevLevel.String(), st.Level.String(),
 			st.Strikes, st.UpStreak, st.DownStreak, st.NonCompTicks,
-			m.Severity, m.PPS, m.SynRate, m.ScanRate, m.DropRLRate)
+			m.Severity, m.PPS, m.Bps, m.SynRate, m.ScanRate, m.DropRLRate)
 	}
 
 	if clean && c.AutoTune && st.Level == fsm.LevelObserve && m.Severity <= c.LearnMaxSev && m.DropRLRate == 0 {
 		resPPS.Add(m.PPS)
 		resSyn.Add(m.SynRate)
 		resScan.Add(m.ScanRate)
+		resBps.Add(m.Bps)
 	}
 
 	return st
