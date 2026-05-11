@@ -13,8 +13,6 @@ import (
 	gstore "github.com/adrianenderlin/kernloom/pkg/graphstore/sqlite"
 )
 
-
-
 // runBaselineStatus prints per-edge baseline stats (stored in graph_edges.bl_*).
 func runBaselineStatus(storePath, nodeID string, showAll bool, sortBy string) {
 	s, err := gstore.Open(storePath)
@@ -91,7 +89,7 @@ func runBaselineStatus(storePath, nodeID string, showAll bool, sortBy string) {
 	// Per-edge table.
 	fmt.Printf("\nEdge baselines (%d total):\n\n", len(edges))
 	w = tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
-	fmt.Fprintln(w, "BL\tGRAPH\tSOURCE\tDST\tPROTO\tPORT\tOBS\tPPS_MED\tPPS_MAD\tBPS_MED\tBPS_MAD")
+	fmt.Fprintln(w, "BL\tGRAPH\tSOURCE\tDST\tPROTO\tPORT\tOBS\tPPS_MED\tPPS_MAD\tPPS_PEAK\tBPS_MED\tBPS_MAD\tBPS_PEAK")
 
 	shown := edges
 	const defaultCap = 40
@@ -99,10 +97,11 @@ func runBaselineStatus(storePath, nodeID string, showAll bool, sortBy string) {
 		shown = shown[:defaultCap]
 	}
 	for _, e := range shown {
-		fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%d\t%d\t%.1f\t%.1f\t%.0f\t%.0f\n",
+		fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%d\t%d\t%.1f\t%.1f\t%.0f\t%.0f\t%.0f\t%.0f\n",
 			e.BLState, e.GraphState,
 			e.SourceID, e.DestinationID, e.Protocol, e.DestinationPort,
-			e.BLObs, e.BLPPSMedian, e.BLPPSMad, e.BLBytesMedian, e.BLBytesMad,
+			e.BLObs, e.BLPPSMedian, e.BLPPSMad, e.BLPPSPeak,
+			e.BLBytesMedian, e.BLBytesMad, e.BLBPSPeak,
 		)
 	}
 	w.Flush()

@@ -46,14 +46,16 @@ const (
 
 // Graph signals (local, from KLIQ graph learner)
 const (
-	SignalGraphNewEdgeAfterFreeze       SignalType = "graph.new_edge_after_freeze"        // New edge detected post-freeze
-	SignalGraphNewDestinationPort       SignalType = "graph.new_destination_port"         // Known peer, new port
-	SignalGraphNewPeer                  SignalType = "graph.new_peer"                     // Never seen before
-	SignalGraphDirectionChange          SignalType = "graph.direction_change"             // Inbound/egress flip
-	SignalGraphVolumeDeviation          SignalType = "graph.volume_deviation"             // Unusual traffic volume
-	SignalGraphTimeWindowDeviation      SignalType = "graph.time_window_deviation"        // Off-hours communication
-	SignalGraphEdgeBaselinePPSDeviation SignalType = "graph.edge_baseline_pps_deviation"  // PPS far above learned edge median
-	SignalGraphEdgeBaselineBytesDeviation SignalType = "graph.edge_baseline_bytes_deviation" // Bytes/s far above learned edge median
+	SignalGraphNewEdgeAfterFreeze         SignalType = "graph.new_edge_after_freeze"         // New edge detected post-freeze
+	SignalGraphNewDestinationPort         SignalType = "graph.new_destination_port"          // Known peer, new port
+	SignalGraphNewPeer                    SignalType = "graph.new_peer"                      // Never seen before
+	SignalGraphDirectionChange            SignalType = "graph.direction_change"              // Inbound/egress flip
+	SignalGraphVolumeDeviation            SignalType = "graph.volume_deviation"              // Unusual traffic volume
+	SignalGraphTimeWindowDeviation        SignalType = "graph.time_window_deviation"         // Off-hours communication
+	SignalGraphEdgeBaselinePPSDeviation      SignalType = "graph.edge_baseline_pps_deviation"       // PPS far above learned edge median (EWMA)
+	SignalGraphEdgeBaselineBytesDeviation    SignalType = "graph.edge_baseline_bytes_deviation"     // Bytes/s far above learned edge median (EWMA)
+	SignalGraphEdgeBaselinePPSPeakExceeded   SignalType = "graph.edge_baseline_pps_peak_exceeded"   // PPS exceeded learned maximum × tolerance
+	SignalGraphEdgeBaselineBPSPeakExceeded   SignalType = "graph.edge_baseline_bps_peak_exceeded"   // Bytes/s exceeded learned maximum × tolerance
 )
 
 // Trust signals
