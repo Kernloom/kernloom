@@ -239,13 +239,46 @@ func (a *Adapter) RevokeEdgeRL4(key shieldclient.Edge4Key) error {
 	return a.maps.DeleteEdge4RL(key)
 }
 
-// SetTupleEnforce enables or disables XDP tuple enforcement globally.
+// SetTupleEnforce enables deny-mode or disables XDP tuple enforcement.
 func (a *Adapter) SetTupleEnforce(on bool) error {
 	if a.dryRun {
 		logger.Printf("[dry-run] SetTupleEnforce on=%v", on)
 		return nil
 	}
 	return a.maps.SetTupleEnforce(on)
+}
+
+// SetTupleAllowMode switches XDP to allow-mode (default-deny).
+// Call only AFTER AllowEdge4 has been called for all frozen/approved edges,
+// otherwise legitimate traffic is blocked immediately.
+func (a *Adapter) SetTupleAllowMode() error {
+	if a.dryRun {
+		logger.Printf("[dry-run] SetTupleAllowMode")
+		return nil
+	}
+	return a.maps.SetTupleMode(shieldclient.TupleModeAllow)
+}
+
+// AllowEdge4 inserts a tuple into the XDP allowlist (edge4_allow).
+// Must be called for every frozen/approved graph edge before activating
+// allow-mode so legitimate traffic is not blocked.
+func (a *Adapter) AllowEdge4(key shieldclient.Edge4Key) error {
+	if a.dryRun {
+		logger.Printf("[dry-run] AllowEdge4 src=%v port=%d proto=%d", key.SrcIP, key.DstPort, key.Proto)
+		return nil
+	}
+	if a.maps.Edge4Allow == nil {
+		return ErrTupleUnavailable
+	}
+	return a.maps.WriteEdge4Allow(key)
+}
+
+// RevokeEdgeAllow4 removes a tuple from the XDP allowlist.
+func (a *Adapter) RevokeEdgeAllow4(key shieldclient.Edge4Key) error {
+	if a.dryRun || a.maps.Edge4Allow == nil {
+		return nil
+	}
+	return a.maps.DeleteEdge4Allow(key)
 }
 
 // TupleAvailable reports whether the edge maps are present (Shield reloaded

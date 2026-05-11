@@ -53,5 +53,5 @@ _docs/
 
 .claude
 # Built binaries in repo root
-kliq
-klshield
+/kliq
+/klshield

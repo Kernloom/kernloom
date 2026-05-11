@@ -33,9 +33,10 @@ const (
 	MapPinRLPolicy6 = "kernloom_rl_policy6"
 
 	// Tuple (edge) enforcement maps — Sprint 8 / XDP tuple map integration.
-	MapPinEdge4Deny = "kernloom_edge4_deny"
-	MapPinEdge4RL   = "kernloom_edge4_rl_policy"
-	MapPinEdge4Cfg  = "kernloom_edge4_cfg"
+	MapPinEdge4Deny  = "kernloom_edge4_deny"
+	MapPinEdge4Allow = "kernloom_edge4_allow"
+	MapPinEdge4RL    = "kernloom_edge4_rl_policy"
+	MapPinEdge4Cfg   = "kernloom_edge4_cfg"
 )
 
 /* ---------------- eBPF struct types (MUST match Shield C layouts) --------- */
@@ -235,9 +236,10 @@ type Maps struct {
 
 	// Tuple (edge) enforcement maps — nil when TupleEnforcement feature is disabled
 	// or when the Shield BPF version does not yet have these maps loaded.
-	Edge4Deny *ebpf.Map // edge4_deny LRU hash: Edge4Key → u8
-	Edge4RL   *ebpf.Map // edge4_rl_policy hash: Edge4Key → RLConfig
-	Edge4Cfg  *ebpf.Map // edge4_cfg array: index 0 → {enforce u32, _pad u32}
+	Edge4Deny  *ebpf.Map // edge4_deny  LRU hash: Edge4Key → u8 (blacklist)
+	Edge4Allow *ebpf.Map // edge4_allow LRU hash: Edge4Key → u8 (allowlist/default-deny)
+	Edge4RL    *ebpf.Map // edge4_rl_policy hash: Edge4Key → RLConfig
+	Edge4Cfg   *ebpf.Map // edge4_cfg array: index 0 → {mode u32, _pad u32}
 }
 
 // Close closes all non-nil map handles.
@@ -246,7 +248,7 @@ func (m *Maps) Close() {
 		m.Src4, m.Src6, m.Flow4,
 		m.Deny4, m.RL4, m.Deny6, m.RL6,
 		m.Totals,
-		m.Edge4Deny, m.Edge4RL, m.Edge4Cfg,
+		m.Edge4Deny, m.Edge4Allow, m.Edge4RL, m.Edge4Cfg,
 	} {
 		if mp != nil {
 			mp.Close()
@@ -319,6 +321,11 @@ func Open(root string, dryRun bool) (*Maps, error) {
 	} else {
 		logger.Printf("edge4_deny map not available (tuple enforcement disabled): %v", err)
 	}
+	if em, err := OpenPinnedMap(filepath.Join(root, MapPinEdge4Allow)); err == nil {
+		m.Edge4Allow = em
+	} else {
+		logger.Printf("edge4_allow map not available (tuple enforcement disabled): %v", err)
+	}
 	if em, err := OpenPinnedMap(filepath.Join(root, MapPinEdge4RL)); err == nil {
 		m.Edge4RL = em
 	} else {
@@ -378,38 +385,89 @@ func (m *Maps) DeleteEdge4RL(key Edge4Key) error {
 	return err
 }
 
+// TupleMode controls which enforcement model is active in XDP.
+type TupleMode uint32
+
+const (
+	// TupleModeOff disables all tuple checks (zero overhead).
+	TupleModeOff TupleMode = 0
+	// TupleModeDeny is blacklist mode: only explicitly denied tuples are dropped.
+	// First violation packet passes; KLIQ reacts in the next poll cycle (~1s).
+	TupleModeDeny TupleMode = 1
+	// TupleModeAllow is allowlist / default-deny mode: ONLY tuples present in
+	// edge4_allow are permitted. Everything else is dropped immediately — no
+	// race window, true Zero-Trust microsegmentation.
+	// KLIQ must populate edge4_allow with all frozen edges BEFORE activating.
+	TupleModeAllow TupleMode = 2
+)
+
 // edge4CfgValue is the value stored in the edge4_cfg ARRAY map.
+// Must match struct edge4_cfg_t in xdp_kernloom_shield.bpf.c exactly.
 type edge4CfgValue struct {
-	Enforce uint32
-	Pad     uint32
+	Mode uint32 // TupleMode: 0=off, 1=deny, 2=allow
+	Pad  uint32
 }
 
-// SetTupleEnforce enables (true) or disables (false) XDP tuple enforcement.
-// When disabled the edge deny/rl maps are present but not consulted in the
-// packet path — useful for loading entries before activating enforcement.
-func (m *Maps) SetTupleEnforce(on bool) error {
+// SetTupleMode sets the XDP tuple enforcement mode.
+// Use TupleModeOff to disable, TupleModeDeny for blacklist (default after
+// klshield tuple-enforce on), TupleModeAllow for Zero-Trust default-deny.
+// When using TupleModeAllow, populate edge4_allow with all frozen edges first.
+func (m *Maps) SetTupleMode(mode TupleMode) error {
 	if m.Edge4Cfg == nil {
 		return fmt.Errorf("edge4_cfg map not available (reload Shield with tuple support)")
 	}
 	var k uint32 = 0
-	v := edge4CfgValue{}
-	if on {
-		v.Enforce = 1
-	}
+	v := edge4CfgValue{Mode: uint32(mode)}
 	return m.Edge4Cfg.Update(&k, &v, ebpf.UpdateAny)
 }
 
-// TupleEnforceActive returns true when XDP tuple enforcement is currently active.
-func (m *Maps) TupleEnforceActive() bool {
+// SetTupleEnforce is a convenience wrapper: true → TupleModeDeny, false → off.
+func (m *Maps) SetTupleEnforce(on bool) error {
+	if on {
+		return m.SetTupleMode(TupleModeDeny)
+	}
+	return m.SetTupleMode(TupleModeOff)
+}
+
+// TupleMode returns the currently active tuple enforcement mode.
+func (m *Maps) TupleEnforceMode() TupleMode {
 	if m.Edge4Cfg == nil {
-		return false
+		return TupleModeOff
 	}
 	var k uint32 = 0
 	var v edge4CfgValue
 	if err := m.Edge4Cfg.Lookup(&k, &v); err != nil {
-		return false
+		return TupleModeOff
 	}
-	return v.Enforce != 0
+	return TupleMode(v.Mode)
+}
+
+// TupleEnforceActive returns true when any tuple enforcement mode is active.
+func (m *Maps) TupleEnforceActive() bool {
+	return m.TupleEnforceMode() != TupleModeOff
+}
+
+// WriteEdge4Allow inserts a tuple into the allowlist (edge4_allow).
+// Only meaningful when mode is TupleModeAllow. Call for every frozen/approved
+// graph edge before activating allow-mode.
+func (m *Maps) WriteEdge4Allow(key Edge4Key) error {
+	if m.Edge4Allow == nil {
+		return fmt.Errorf("edge4_allow map not available")
+	}
+	v := uint8(1)
+	return m.Edge4Allow.Update(&key, &v, ebpf.UpdateAny)
+}
+
+// DeleteEdge4Allow removes a tuple from the allowlist.
+func (m *Maps) DeleteEdge4Allow(key Edge4Key) error {
+	if m.Edge4Allow == nil {
+		return fmt.Errorf("edge4_allow map not available")
+	}
+	err := m.Edge4Allow.Delete(&key)
+	if err != nil && err.Error() == "key does not exist" {
+		return nil
+	}
+	return err
 }
 
 // OpenPinnedMap is a thin wrapper around ebpf.LoadPinnedMap.
