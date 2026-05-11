@@ -8,6 +8,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"math"
 	"strings"
 	"time"
 
@@ -49,6 +50,10 @@ CREATE TABLE IF NOT EXISTS graph_edges (
 	bl_pps_mad        REAL    NOT NULL DEFAULT 0,
 	bl_bytes_median   REAL    NOT NULL DEFAULT 0,
 	bl_bytes_mad      REAL    NOT NULL DEFAULT 0,
+	bl_pps_peak       REAL    NOT NULL DEFAULT 0,
+	bl_bps_peak       REAL    NOT NULL DEFAULT 0,
+	bl_pps_peak_ts    REAL    NOT NULL DEFAULT 0,
+	bl_bps_peak_ts    REAL    NOT NULL DEFAULT 0,
 	bl_obs            INTEGER NOT NULL DEFAULT 0,
 	bl_state          TEXT    NOT NULL DEFAULT 'candidate'
 );
@@ -87,6 +92,10 @@ func Open(path string) (*Store, error) {
 		"ALTER TABLE graph_edges ADD COLUMN bl_pps_mad      REAL    NOT NULL DEFAULT 0",
 		"ALTER TABLE graph_edges ADD COLUMN bl_bytes_median REAL    NOT NULL DEFAULT 0",
 		"ALTER TABLE graph_edges ADD COLUMN bl_bytes_mad    REAL    NOT NULL DEFAULT 0",
+		"ALTER TABLE graph_edges ADD COLUMN bl_pps_peak     REAL    NOT NULL DEFAULT 0",
+		"ALTER TABLE graph_edges ADD COLUMN bl_bps_peak     REAL    NOT NULL DEFAULT 0",
+		"ALTER TABLE graph_edges ADD COLUMN bl_pps_peak_ts  REAL    NOT NULL DEFAULT 0",
+		"ALTER TABLE graph_edges ADD COLUMN bl_bps_peak_ts  REAL    NOT NULL DEFAULT 0",
 		"ALTER TABLE graph_edges ADD COLUMN bl_obs          INTEGER NOT NULL DEFAULT 0",
 		"ALTER TABLE graph_edges ADD COLUMN bl_state        TEXT    NOT NULL DEFAULT 'candidate'",
 	} {
@@ -345,10 +354,29 @@ func (s *Store) Stats(nodeID string) (map[graph.EdgeState]int, error) {
 // alphaBootstrap is used while obs < minObs (candidate phase) to converge
 // faster during initial learning (e.g. 0.10). Pass 0 to always use alphaStable.
 // Only call this when the source is NOT flagged as suspicious (anti-poisoning).
-func (s *Store) UpdateEdgeBaseline(key graph.EdgeKey, pps, bytesPS, alphaStable, alphaBootstrap float64, minObs uint64) error {
-	// Load current stats.
+// UpdateEdgeBaseline updates the EWMA baseline stats for a specific edge.
+// Promotion from candidate → learned happens when either:
+//
+//	a) obs >= minObs (enough observations regardless of time), or
+//	b) obs >= minObsTimeBased AND edge age >= minAge (time-based: useful for
+//	   low-frequency traffic like weekly cron jobs that would take too long
+//	   to accumulate minObs observations).
+// UpdateEdgeBaseline is the core edge-baseline update function.
+// peakDecayHalfLife controls how quickly peaks decay over time (Sprint 5).
+// Pass 0 to disable decay (running maximum, original behaviour).
+func (s *Store) UpdateEdgeBaseline(key graph.EdgeKey, pps, bytesPS, alphaStable, alphaBootstrap float64, minObs, minObsTimeBased uint64, minAge time.Duration) error {
+	return s.UpdateEdgeBaselineDecay(key, pps, bytesPS, alphaStable, alphaBootstrap, minObs, minObsTimeBased, minAge, 0)
+}
+
+// UpdateEdgeBaselineDecay is UpdateEdgeBaseline with optional peak decay.
+// peakDecayHalfLife > 0 enables half-life decay: a peak from 14d ago at 500 PPS
+// decays to ~250 PPS (half-life=14d), so a single historical spike doesn't
+// permanently cap legitimate burst detection.
+func (s *Store) UpdateEdgeBaselineDecay(key graph.EdgeKey, pps, bytesPS, alphaStable, alphaBootstrap float64, minObs, minObsTimeBased uint64, minAge time.Duration, peakDecayHalfLife time.Duration) error {
 	row := s.db.QueryRow(`
-		SELECT bl_pps_median, bl_pps_mad, bl_bytes_median, bl_bytes_mad, bl_obs, bl_state, id
+		SELECT bl_pps_median, bl_pps_mad, bl_bytes_median, bl_bytes_mad,
+		       bl_pps_peak, bl_bps_peak, bl_pps_peak_ts, bl_bps_peak_ts,
+		       bl_obs, bl_state, id, first_seen_at
 		FROM graph_edges
 		WHERE node_id=? AND source_kind=? AND source_id=?
 		  AND destination_kind=? AND destination_id=?
@@ -358,14 +386,38 @@ func (s *Store) UpdateEdgeBaseline(key graph.EdgeKey, pps, bytesPS, alphaStable,
 		key.Protocol, key.DestinationPort, string(key.Direction),
 	)
 	var ppsMedian, ppsMad, bytesMedian, bytesMad float64
+	var ppsPeak, bpsPeak, ppsPeakTS, bpsPeakTS float64
 	var obs uint64
 	var blState, edgeID string
-	if err := row.Scan(&ppsMedian, &ppsMad, &bytesMedian, &bytesMad, &obs, &blState, &edgeID); err != nil {
-		return nil // edge not found yet — upsert hasn't run, skip
+	var firstSeenNano int64
+	if err := row.Scan(&ppsMedian, &ppsMad, &bytesMedian, &bytesMad,
+		&ppsPeak, &bpsPeak, &ppsPeakTS, &bpsPeakTS,
+		&obs, &blState, &edgeID, &firstSeenNano); err != nil {
+		return nil // edge not found yet — skip
 	}
 
-	// Choose alpha: bootstrap phase uses faster adaptation until min_observations
-	// is reached, then switches to the stable (slower) alpha.
+	nowUnix := float64(time.Now().UnixNano()) / 1e9
+
+	// Sprint 5: apply half-life decay to peaks before comparing with current value.
+	// Decay formula: decayed = peak * 0.5^(elapsed/halfLife)
+	// This prevents a single historical spike from permanently blocking detection.
+	if peakDecayHalfLife > 0 {
+		halfLifeSec := peakDecayHalfLife.Seconds()
+		if ppsPeak > 0 && ppsPeakTS > 0 {
+			elapsedPPS := nowUnix - ppsPeakTS
+			if elapsedPPS > 0 {
+				ppsPeak *= math.Pow(0.5, elapsedPPS/halfLifeSec)
+			}
+		}
+		if bpsPeak > 0 && bpsPeakTS > 0 {
+			elapsedBPS := nowUnix - bpsPeakTS
+			if elapsedBPS > 0 {
+				bpsPeak *= math.Pow(0.5, elapsedBPS/halfLifeSec)
+			}
+		}
+	}
+
+	// Choose alpha: bootstrap phase uses faster adaptation until min_observations.
 	a := alphaStable
 	if alphaBootstrap > alphaStable && obs < minObs {
 		a = alphaBootstrap
@@ -380,21 +432,97 @@ func (s *Store) UpdateEdgeBaseline(key graph.EdgeKey, pps, bytesPS, alphaStable,
 		bytesMad = (1-a)*bytesMad + a*abs64(bytesPS-bytesMedian)
 		bytesMedian = (1-a)*bytesMedian + a*bytesPS
 	}
+
+	// Peak tracking with decay: update peak and timestamp if current value exceeds.
+	if pps > ppsPeak {
+		ppsPeak = pps
+		ppsPeakTS = nowUnix
+	}
+	if bytesPS > bpsPeak {
+		bpsPeak = bytesPS
+		bpsPeakTS = nowUnix
+	}
 	obs++
 
 	newState := blState
-	if blState == "candidate" && obs >= minObs {
-		newState = "learned"
+	if blState == "candidate" {
+		edgeAge := time.Since(time.Unix(0, firstSeenNano))
+		normalPromotion := obs >= minObs
+		timeBasedPromotion := minObsTimeBased > 0 && minAge > 0 &&
+			obs >= minObsTimeBased && edgeAge >= minAge
+		if normalPromotion || timeBasedPromotion {
+			newState = "learned"
+		}
 	}
 
 	_, err := s.db.Exec(`
 		UPDATE graph_edges SET
 			bl_pps_median=?, bl_pps_mad=?, bl_bytes_median=?, bl_bytes_mad=?,
+			bl_pps_peak=?, bl_bps_peak=?, bl_pps_peak_ts=?, bl_bps_peak_ts=?,
 			bl_obs=?, bl_state=?
 		WHERE id=?`,
-		ppsMedian, ppsMad, bytesMedian, bytesMad, obs, newState, edgeID,
+		ppsMedian, ppsMad, bytesMedian, bytesMad,
+		ppsPeak, bpsPeak, ppsPeakTS, bpsPeakTS,
+		obs, newState, edgeID,
 	)
 	return err
+}
+
+// EdgeBaselinePeakDeviation returns how much the current pps/bps exceed the
+// learned peak. A value > peakTolerance means the edge is producing more
+// traffic than ever observed during learning. Returns 0 if peak not yet set.
+func (s *Store) EdgeBaselinePeakDeviation(key graph.EdgeKey, pps, bytesPS float64) (factorPPS, factorBPS float64) {
+	row := s.db.QueryRow(`
+		SELECT bl_pps_peak, bl_bps_peak, bl_state
+		FROM graph_edges
+		WHERE node_id=? AND source_kind=? AND source_id=?
+		  AND destination_kind=? AND destination_id=?
+		  AND protocol=? AND destination_port=? AND direction=?`,
+		key.NodeID, string(key.SourceKind), key.SourceID,
+		string(key.DestinationKind), key.DestinationID,
+		key.Protocol, key.DestinationPort, string(key.Direction),
+	)
+	var ppsPeak, bpsPeak float64
+	var blState string
+	if err := row.Scan(&ppsPeak, &bpsPeak, &blState); err != nil {
+		return 0, 0
+	}
+	if blState != "learned" {
+		return 0, 0 // only check peak for promoted edges
+	}
+	if ppsPeak > 0.001 {
+		factorPPS = pps / ppsPeak
+	}
+	if bpsPeak > 0.001 {
+		factorBPS = bytesPS / bpsPeak
+	}
+	return
+}
+
+// ListSourcesWithLearnedEdges returns the set of source IPs that have at
+// least one edge in learned, approved or frozen state for the given node.
+// Used to distinguish "known" sources (edge baseline is primary detector) from
+// unknown sources (global trigger is primary detector).
+func (s *Store) ListSourcesWithLearnedEdges(nodeID string) (map[string]struct{}, error) {
+	rows, err := s.db.Query(`
+		SELECT DISTINCT source_id FROM graph_edges
+		WHERE node_id=? AND state IN (?,?,?)`,
+		nodeID,
+		string(graph.EdgeLearned), string(graph.EdgeApproved), string(graph.EdgeFrozen),
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := make(map[string]struct{})
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		out[id] = struct{}{}
+	}
+	return out, rows.Err()
 }
 
 // EdgeBaselineDeviation returns deviation factors for a specific edge's current
@@ -449,6 +577,8 @@ type EdgeBaselineSummary struct {
 	BLPPSMad        float64
 	BLBytesMedian   float64
 	BLBytesMad      float64
+	BLPPSPeak       float64
+	BLBPSPeak       float64
 }
 
 // ResetEdgeBaselines zeros the bl_* columns for all edges belonging to nodeID.
@@ -457,6 +587,7 @@ func (s *Store) ResetEdgeBaselines(nodeID string) (int, error) {
 	res, err := s.db.Exec(`
 		UPDATE graph_edges
 		SET bl_pps_median=0, bl_pps_mad=0, bl_bytes_median=0, bl_bytes_mad=0,
+		    bl_pps_peak=0, bl_bps_peak=0, bl_pps_peak_ts=0, bl_bps_peak_ts=0,
 		    bl_obs=0, bl_state='candidate'
 		WHERE node_id=?`, nodeID)
 	if err != nil {
@@ -472,7 +603,8 @@ func (s *Store) ListEdgeBaselines(nodeID string) ([]EdgeBaselineSummary, error) 
 	rows, err := s.db.Query(`
 		SELECT source_id, destination_id, protocol, destination_port, direction,
 		       state, bl_state, bl_obs,
-		       bl_pps_median, bl_pps_mad, bl_bytes_median, bl_bytes_mad
+		       bl_pps_median, bl_pps_mad, bl_bytes_median, bl_bytes_mad,
+		       bl_pps_peak, bl_bps_peak
 		FROM graph_edges
 		WHERE node_id=? AND bl_obs > 0
 		ORDER BY
@@ -490,6 +622,7 @@ func (s *Store) ListEdgeBaselines(nodeID string) ([]EdgeBaselineSummary, error) 
 			&e.SourceID, &e.DestinationID, &e.Protocol, &e.DestinationPort, &e.Direction,
 			&e.GraphState, &e.BLState, &e.BLObs,
 			&e.BLPPSMedian, &e.BLPPSMad, &e.BLBytesMedian, &e.BLBytesMad,
+			&e.BLPPSPeak, &e.BLBPSPeak,
 		); err != nil {
 			return nil, err
 		}

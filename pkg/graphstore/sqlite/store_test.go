@@ -156,6 +156,7 @@ func TestStore_MarkExpired(t *testing.T) {
 	now := time.Now()
 
 	old := makeEdge("node-1", "1.2.3.4", "10.0.0.1", 443, now.Add(-48*time.Hour))
+	old.SeenCount = 5 // meets minSeenCount threshold — eligible for expiry
 	if _, err := s.Upsert(old); err != nil {
 		t.Fatal(err)
 	}
@@ -165,7 +166,7 @@ func TestStore_MarkExpired(t *testing.T) {
 	}
 
 	cutoff := now.Add(-24 * time.Hour)
-	n, err := s.MarkExpired("node-1", cutoff)
+	n, err := s.MarkExpired("node-1", cutoff, 5)
 	if err != nil {
 		t.Fatalf("mark expired: %v", err)
 	}
@@ -194,7 +195,7 @@ func TestStore_Upsert_ExpiredRestartsLearning(t *testing.T) {
 	if _, err := s.Upsert(e); err != nil {
 		t.Fatalf("initial upsert: %v", err)
 	}
-	if _, err := s.MarkExpired("node-1", now); err != nil {
+	if _, err := s.MarkExpired("node-1", now, 5); err != nil {
 		t.Fatalf("mark expired: %v", err)
 	}
 
@@ -264,7 +265,7 @@ func TestStore_ExpireCandidatesBySource(t *testing.T) {
 		}
 	}
 
-	n, err := s.ExpireCandidatesBySource("node-1", "5.5.5.5")
+	n, err := s.ExpireCandidatesBySource("node-1", "5.5.5.5", 5)
 	if err != nil {
 		t.Fatalf("expire by source: %v", err)
 	}
