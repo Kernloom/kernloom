@@ -52,3 +52,6 @@ coverage.out
 _docs/
 
 .claude
+# Built binaries in repo root
+kliq
+klshield
