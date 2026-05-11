@@ -296,11 +296,14 @@ func handleGraphSubcommand(storePath, frozenPath, nodeID string) bool {
 	showAll := false
 	format := "yaml"
 	sortBy := "last"
+	dryRun := false
 	filtered := args[:0]
 	for _, a := range args {
 		switch {
 		case a == "--all" || a == "-all":
 			showAll = true
+		case a == "--dry-run" || a == "-dry-run":
+			dryRun = true
 		case a == "--format=json" || a == "-json":
 			format = "json"
 		case a == "--format=yaml":
@@ -345,7 +348,11 @@ func handleGraphSubcommand(storePath, frozenPath, nodeID string) bool {
 		return true
 
 	case "freeze":
-		runGraphFreeze(getArg(2, storePath), getArg(3, nodeID), getArg(4, frozenPath))
+		if dryRun {
+			runGraphFreezeDryRun(getArg(2, storePath), getArg(3, nodeID))
+		} else {
+			runGraphFreeze(getArg(2, storePath), getArg(3, nodeID), getArg(4, frozenPath))
+		}
 		return true
 
 	case "approve-ip":
@@ -417,6 +424,62 @@ func runGraphFreeze(storePath, nodeID, frozenPath string) {
 	}
 
 	fmt.Println("Switch kliq to --graph-mode=frozen-observe to detect new edges.")
+}
+
+// runGraphFreezeDryRun prints a readiness summary without modifying the store.
+// Usage: kliq graph freeze --dry-run [store] [node-id]
+func runGraphFreezeDryRun(storePath, nodeID string) {
+	s, err := gstore.Open(storePath)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: open graph store: %v\n", err)
+		os.Exit(1)
+	}
+	defer s.Close()
+
+	edges, err := s.ListByNode(nodeID, "")
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: list edges: %v\n", err)
+		os.Exit(1)
+	}
+
+	var wouldFreeze, candidate, lowSeen, singleSeen int
+	for _, e := range edges {
+		switch e.State {
+		case graph.EdgeLearned, graph.EdgeApproved:
+			wouldFreeze++
+			if e.SeenCount < 5 {
+				lowSeen++
+			}
+			if e.SeenCount == 1 {
+				singleSeen++
+			}
+		case graph.EdgeCandidate:
+			candidate++
+		}
+	}
+
+	fmt.Printf("Freeze readiness for node: %s\n\n", nodeID)
+	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
+	fmt.Fprintf(w, "  Would freeze:\t%d edges (learned + approved)\n", wouldFreeze)
+	fmt.Fprintf(w, "  Candidates not ready:\t%d edges (still accumulating observations)\n", candidate)
+	fmt.Fprintf(w, "  Low-confidence (seen < 5):\t%d edges\n", lowSeen)
+	fmt.Fprintf(w, "  Seen only once:\t%d edges\n", singleSeen)
+	w.Flush()
+	fmt.Println()
+
+	if candidate > 0 {
+		fmt.Printf("  Recommendation: %d candidate edge(s) are not mature yet.\n", candidate)
+		fmt.Printf("  Wait for them to be promoted or deny them before freezing.\n")
+	}
+	if lowSeen > 0 {
+		fmt.Printf("  Warning: %d edge(s) have been seen fewer than 5 times — consider waiting.\n", lowSeen)
+	}
+	if wouldFreeze == 0 {
+		fmt.Println("  No learned/approved edges to freeze — run in learn mode first.")
+	} else if candidate == 0 && lowSeen == 0 {
+		fmt.Println("  Graph looks ready to freeze.")
+		fmt.Println("  Run 'kliq graph freeze' to proceed.")
+	}
 }
 
 // runGraphExportToFile writes the graph proposal YAML to a file instead of stdout.
