@@ -68,6 +68,37 @@ type cfg struct {
 	BootstrapAlpha2   float64
 	BootstrapAlpha3   float64
 
+	// Bootstrap safety guards (Sprint 2).
+	// BootstrapAllowBlock: when false (default), the FSM caps BLOCK → RATE_HARD
+	// during the active bootstrap window to avoid premature hard blocks on quiet starts.
+	BootstrapAllowBlock bool
+	// BootstrapMinWindowsBeforeDownscale: autotune will not lower triggers until
+	// at least this many active autotune windows have been completed. Prevents
+	// quiet-start threshold collapse when real traffic hasn't been observed yet.
+	BootstrapMinWindowsBeforeDownscale int
+	// BootstrapMinSourcesBeforeDownscale: autotune will not lower triggers until
+	// at least this many distinct source IPs have been seen in the learning window.
+	BootstrapMinSourcesBeforeDownscale int
+
+	// BootstrapActive is set at runtime (not a CLI flag) to indicate the
+	// current bootstrap phase is still active. Used by FSM to cap BLOCK level.
+	BootstrapActive bool
+
+	// Feature profile (Sprint 1) — controls which subsystems are active.
+	// Values: dos-light, iq-learning, graph-learning, graph-enforce.
+	// Default: automatically derived from --graph flag for backward compatibility.
+	FeatureProfile string
+
+	// Source baseline (Sprint 3) — per-source EWMA + peak tracking.
+	// Active when FeatureProfile is iq-learning or graph-*.
+	SrcBaselineAlpha       float64
+	SrcBaselineAlphaStable float64
+	SrcBaselineMinPPS      float64
+	SrcBaselineMinObs      uint64
+	SrcBaselineMaxSources  int
+	SrcBaselinePeakMul     float64
+	SrcBaselineMinConf     float64
+
 	// Autotune
 	AutoTune       bool
 	AutoEvery      time.Duration
@@ -178,7 +209,13 @@ type cfg struct {
 	BaselineMinObservations    uint64
 	BaselineAlpha              float64
 	BaselineAlphaBootstrap     float64
+	BaselineMinObsTimeBased    uint64
+	BaselineMinAge             time.Duration
 	BaselineDeviationThreshold float64
+	BaselineMinUpdatePPS       float64
+	BaselineMinUpdateBPS       float64
+	BaselinePeakTolerance      float64
+	BaselinePeakDecayHalfLife  time.Duration
 }
 
 // toFSMConfig converts the relevant cfg fields to an fsm.Config.
@@ -278,7 +315,7 @@ AGENT FLAGS
 
 	flag.DurationVar(&c.Interval, "interval", 1*time.Second, "poll interval")
 	flag.IntVar(&c.TopN, "top", 200, "top N sources by severity")
-	flag.Float64Var(&c.MinPPS, "min-pps", 10, "ignore sources below this PPS")
+	flag.Float64Var(&c.MinPPS, "min-pps", 3, "ignore sources below this PPS for FSM; autotune also samples below this floor")
 	flag.Float64Var(&c.MinSev, "min-sev", 0.0, "include candidates with severity >= min-sev")
 
 	flag.StringVar(&c.Mode, "mode", "standalone", `agent mode: standalone (local policy) or managed (Forge-managed; currently logs a warning and runs as standalone)`)
@@ -303,6 +340,8 @@ AGENT FLAGS
 	flag.DurationVar(&c.FeedbackCIDREvery, "feedback-cidr-every", 30*time.Second, "how often to scan maps to de-enforce CIDR feedback entries (0 disables)")
 	flag.IntVar(&c.FeedbackCIDRMax, "feedback-cidr-max", 5000, "max number of entries to delete per CIDR de-enforce scan (bounds cost)")
 
+	flag.StringVar(&c.FeatureProfile, "feature-profile", "", `runtime feature profile: dos-light, iq-learning, graph-learning, graph-enforce (default: auto from --graph)`)
+
 	flag.BoolVar(&c.Bootstrap, "bootstrap", true, "enable bootstrap autotune schedule (frequent early, slower later)")
 	flag.DurationVar(&c.BootstrapWindow, "bootstrap-window", 14*24*time.Hour, "bootstrap duration (suggest 14d)")
 	flag.DurationVar(&c.BootstrapP1End, "bootstrap-phase1-end", 48*time.Hour, "end of phase1 since bootstrap start")
@@ -323,9 +362,27 @@ AGENT FLAGS
 	flag.Float64Var(&c.BootstrapAlpha2, "bootstrap-alpha2", 0.15, "phase2 smoothing alpha")
 	flag.Float64Var(&c.BootstrapAlpha3, "bootstrap-alpha3", 0.20, "phase3 smoothing alpha")
 
+	// Bootstrap safety guards.
+	flag.BoolVar(&c.BootstrapAllowBlock, "bootstrap-allow-block", false, "allow BLOCK enforcement during bootstrap (default false — caps at RATE_HARD)")
+	// bootstrap-min-windows=0 disables the downscale guard (default). The floor
+	// (autotune-floor-pps) is the primary protection against threshold collapse.
+	// Set > 0 only on nodes that start during dead-quiet periods and you want
+	// extra protection before the first real traffic has been seen.
+	flag.IntVar(&c.BootstrapMinWindowsBeforeDownscale, "bootstrap-min-windows", 0, "min completed autotune windows before allowing downscale (0=disabled; the floor is the primary guard)")
+	flag.IntVar(&c.BootstrapMinSourcesBeforeDownscale, "bootstrap-min-sources", 0, "min distinct sources required before downscale (0=disabled)")
+
+	// Source baseline flags (active when feature-profile >= iq-learning).
+	flag.Float64Var(&c.SrcBaselineAlpha, "srcbl-alpha", 0.10, "source baseline EWMA speed during learning (default 0.10 ≈ 7-obs half-life)")
+	flag.Float64Var(&c.SrcBaselineAlphaStable, "srcbl-alpha-stable", 0.02, "source baseline EWMA speed after promotion")
+	flag.Float64Var(&c.SrcBaselineMinPPS, "srcbl-min-pps", 3, "skip source baseline update when pps < this (filters idle ticks)")
+	flag.Uint64Var(&c.SrcBaselineMinObs, "srcbl-min-obs", 30, "observations before a source profile is promoted")
+	flag.IntVar(&c.SrcBaselineMaxSources, "srcbl-max-sources", 100000, "max source profiles held in memory")
+	flag.Float64Var(&c.SrcBaselinePeakMul, "srcbl-peak-mul", 1.2, "effective trigger = max(global, peak*multiplier) for known sources")
+	flag.Float64Var(&c.SrcBaselineMinConf, "srcbl-min-conf", 0.4, "min confidence required to use source baseline as effective trigger")
+
 	flag.BoolVar(&c.AutoTune, "autotune", true, "enable autotune of trig-* using median+MAD")
 	flag.DurationVar(&c.AutoEvery, "autotune-every", 24*time.Hour, "how often to write new trig-* state")
-	flag.IntVar(&c.AutoMinSamples, "autotune-min-samples", 5000, "minimum samples per feature before tuning")
+	flag.IntVar(&c.AutoMinSamples, "autotune-min-samples", 500, "minimum samples per feature before tuning (lower on quiet nodes)")
 	flag.Float64Var(&c.AutoK, "autotune-k", 3.5, "k for trig = median + k*mad (k=3.5 ~ p99)")
 	flag.Float64Var(&c.AutoMaxChange, "autotune-max-change", 0.05, "max relative change per update (e.g. 0.05 => ±5%)")
 	flag.Float64Var(&c.AutoMaxUp, "autotune-max-change-up", 0, "max relative increase per update (0 => use autotune-max-change)")
@@ -418,7 +475,13 @@ AGENT FLAGS
 	flag.Uint64Var(&c.BaselineMinObservations, "baseline-min-obs", 30, "edge observations before EWMA profile is promoted to learned")
 	flag.Float64Var(&c.BaselineAlpha, "baseline-alpha", 0.02, "EWMA stable adaptation speed after bootstrap (0.0=never, 1.0=instant; recommended 0.01–0.05)")
 	flag.Float64Var(&c.BaselineAlphaBootstrap, "baseline-alpha-bootstrap", 0.10, "EWMA bootstrap adaptation speed while obs < baseline-min-obs (faster initial convergence)")
+	flag.Uint64Var(&c.BaselineMinObsTimeBased, "baseline-min-obs-time", 5, "min observations for time-based promotion (0 disables); promotes edge after baseline-min-age even if obs < baseline-min-obs")
+	flag.DurationVar(&c.BaselineMinAge, "baseline-min-age", 7*24*time.Hour, "min edge age for time-based promotion (e.g. 168h for weekly jobs)")
 	flag.Float64Var(&c.BaselineDeviationThreshold, "baseline-threshold", 5.0, "MAD multiplier that triggers an edge baseline deviation signal")
+	flag.Float64Var(&c.BaselineMinUpdatePPS, "baseline-min-update-pps", 0, "skip EWMA update when pps below this (filters idle keepalive ticks; 0=disabled)")
+	flag.Float64Var(&c.BaselineMinUpdateBPS, "baseline-min-update-bps", 0, "skip EWMA update when bps below this (0=disabled)")
+	flag.Float64Var(&c.BaselinePeakTolerance, "baseline-peak-tolerance", 1.5, "factor above learned peak that triggers a signal (1.5 = 50% above max)")
+	flag.DurationVar(&c.BaselinePeakDecayHalfLife, "baseline-peak-decay-half-life", 0, "half-life for peak decay (e.g. 336h = 14d); 0 disables decay (running max, original behaviour)")
 
 	flag.Parse()
 	return c

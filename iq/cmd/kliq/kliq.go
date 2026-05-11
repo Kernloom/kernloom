@@ -48,7 +48,9 @@ import (
 	"github.com/adrianenderlin/kernloom/pkg/adapters/graphlearner"
 	"github.com/adrianenderlin/kernloom/pkg/adapters/shieldpep"
 	"github.com/adrianenderlin/kernloom/pkg/adapters/shieldtelemetry"
+	"github.com/adrianenderlin/kernloom/pkg/adapters/sourcebaseline"
 	"github.com/adrianenderlin/kernloom/pkg/core/decision"
+	"github.com/adrianenderlin/kernloom/pkg/core/featureset"
 	"github.com/adrianenderlin/kernloom/pkg/core/fsm"
 	"github.com/adrianenderlin/kernloom/pkg/core/graph"
 	"github.com/adrianenderlin/kernloom/pkg/core/observation"
@@ -59,6 +61,9 @@ import (
 	gstore "github.com/adrianenderlin/kernloom/pkg/graphstore/sqlite"
 	"github.com/adrianenderlin/kernloom/pkg/shieldclient"
 	"github.com/adrianenderlin/kernloom/pkg/signalengine/shieldheuristic"
+
+	// Ensure enforcement package is available for future tuple target use.
+	_ "github.com/adrianenderlin/kernloom/pkg/core/enforcement"
 )
 
 var kliqLog = log.New(os.Stderr, "[kliq] ", log.LstdFlags)
@@ -73,6 +78,12 @@ type graphStrikeMsg struct {
 	isV6       bool
 	n          int  // strike credits to add
 	forceBlock bool // frozen-enforce: skip FSM accumulation, go straight to BLOCK
+	// addToCands: when true the IP is added to cands so it gets FSM-processed
+	// this tick even without Shield telemetry. Set for freeze violations (source
+	// is active). False for baseline deviations — strikes accumulate and are
+	// applied the next time the source naturally appears in telemetry with real
+	// metrics, avoiding UpStreak reset from zero-metric processing.
+	addToCands bool
 }
 
 // prevV4 stores the previous tick's counters for an IPv4 source.
@@ -89,7 +100,7 @@ type prevV6 struct {
 
 func main() {
 	// Handle subcommands before flag parsing so they work standalone.
-	const defaultDB        = "/var/lib/kernloom/iq/kliq.db"
+	const defaultDB = "/var/lib/kernloom/iq/kliq.db"
 	const defaultStateFile = "/var/lib/kernloom/iq/state.json"
 	if handleGraphSubcommand(
 		defaultDB,
@@ -125,6 +136,7 @@ func main() {
 		p = pdpConfigToProfile(pdpc)
 		applyPDPGraphToCfg(pdpc, &c)
 		applyPDPBaselineToCfg(pdpc, &c)
+		applyPDPAutotuneToCfg(pdpc, &c)
 		c.adapterParams = adapterParamsFromPDPConfig(pdpc)
 	} else {
 		p = profileByName(c.ProfileName)
@@ -145,6 +157,36 @@ func main() {
 
 	applyProfileDefaults(&c, p)
 	c.Cooldown = c.adapterParams.Cooldown
+
+	// Resolve runtime feature profile.
+	// --feature-profile takes precedence; otherwise derive from --graph flag.
+	if c.FeatureProfile == "" {
+		if c.GraphEnabled {
+			c.FeatureProfile = string(featureset.ProfileGraphLearning)
+		} else {
+			c.FeatureProfile = string(featureset.ProfileDOSLight)
+		}
+	}
+	features := featureset.FeaturesFor(featureset.RuntimeProfile(c.FeatureProfile))
+	kliqLog.Printf("Feature profile: %s  src_baseline=%v graph=%v sqlite=%v",
+		c.FeatureProfile, features.SourceBaseline, features.GraphLearning, features.SQLite)
+
+	// Source baseline cache (iq-learning and higher).
+	// Nil when disabled — the main loop checks before calling Update/Resolve.
+	var srcBL *sourcebaseline.Cache
+	if features.SourceBaseline {
+		srcBL = sourcebaseline.New(sourcebaseline.Config{
+			Alpha:          c.SrcBaselineAlpha,
+			AlphaPromoted:  c.SrcBaselineAlphaStable,
+			MinUpdatePPS:   c.SrcBaselineMinPPS,
+			MinObs:         c.SrcBaselineMinObs,
+			MaxSources:     c.SrcBaselineMaxSources,
+			PeakMultiplier: c.SrcBaselinePeakMul,
+			MinConfidence:  c.SrcBaselineMinConf,
+		})
+		kliqLog.Printf("Source baseline cache started: min_pps=%.1f min_obs=%d max_sources=%d peak_mul=%.2f",
+			c.SrcBaselineMinPPS, c.SrcBaselineMinObs, c.SrcBaselineMaxSources, c.SrcBaselinePeakMul)
+	}
 
 	// Collect flags the user explicitly set on the command line.
 	// flag.Visit only visits flags that were actually provided, not those
@@ -264,6 +306,19 @@ func main() {
 		log.Fatalf("init shield pep: %v", err)
 	}
 
+	// Tuple enforcement: activate XDP edge maps when the feature is enabled.
+	if features.TupleEnforcement {
+		if pep.TupleAvailable() {
+			if err := pep.SetTupleEnforce(true); err != nil {
+				kliqLog.Printf("WARNING: tuple enforce activate failed: %v", err)
+			} else {
+				kliqLog.Printf("Tuple enforcement: XDP edge maps active")
+			}
+		} else {
+			kliqLog.Printf("WARNING: feature-profile=graph-enforce but edge maps not available. Reload klshield with new .bpf.o")
+		}
+	}
+
 	// Decision engine: adds audit trail for FSM transitions and enforces graph-freeze signals.
 	decPolicy := decisionengine.LocalPolicy{
 		NodeID:              nodeID,
@@ -329,17 +384,42 @@ func main() {
 				// Graph freeze violation → FSM strike credits.
 				// score >= 90 (frozen-enforce): forceBlock skips accumulation.
 				// score < 90 (frozen-observe): normal strike accumulation.
+				// Graph freeze violation: source is actively sending → add to cands
+				// so the FSM is processed this tick with real metrics.
 				if sig.Type == signal.SignalGraphNewEdgeAfterFreeze && sig.Subject.ID != "" {
-					sendStrike(graphStrikeCh, sig.Subject.ID, graphStrikesFromScore(sig.Score), sig.Score >= 90)
+					sendStrike(graphStrikeCh, sig.Subject.ID, graphStrikesFromScore(sig.Score), sig.Score >= 90, true)
+
+					// Tuple enforcement (graph-enforce profile): write an XDP edge deny
+					// for the specific (src, dst_port, proto) tuple rather than blocking
+					// all traffic from the source. More surgical than source-level deny.
+					if features.TupleEnforcement && sig.Score >= 90 && pep.TupleAvailable() {
+						portStr := sig.Attributes["destination_port"]
+						proto := sig.Attributes["protocol"]
+						var port uint64
+						if portStr != "" {
+							fmt.Sscanf(portStr, "%d", &port)
+						}
+						if port > 0 && proto != "" {
+							if ekey, ok := shieldclient.NewEdge4Key(sig.Subject.ID, uint16(port), proto); ok {
+								if err := pep.DenyEdge4(ekey); err != nil {
+									kliqLog.Printf("TUPLE deny edge %s:%d/%s failed: %v", sig.Subject.ID, port, proto, err)
+								} else {
+									kliqLog.Printf("TUPLE deny edge: %s port=%d proto=%s (freeze violation)", sig.Subject.ID, port, proto)
+								}
+							}
+						}
+					}
 				}
 
-				// Edge baseline deviation → FSM strike credits (score boost only).
-				// forceBlock is always false: these signals raise the score gradually
-				// so the normal FSM path (block gate, min-sev, anti-flap) stays active.
+				// Edge baseline deviation (EWMA) and peak-exceeded signals:
+				// strikes accumulate but IP is NOT added to cands, so the FSM
+				// processes it with real metrics on the next natural telemetry tick.
 				if (sig.Type == signal.SignalGraphEdgeBaselinePPSDeviation ||
-					sig.Type == signal.SignalGraphEdgeBaselineBytesDeviation) &&
+					sig.Type == signal.SignalGraphEdgeBaselineBytesDeviation ||
+					sig.Type == signal.SignalGraphEdgeBaselinePPSPeakExceeded ||
+					sig.Type == signal.SignalGraphEdgeBaselineBPSPeakExceeded) &&
 					sig.Subject.ID != "" {
-					sendStrike(graphStrikeCh, sig.Subject.ID, graphStrikesFromScore(sig.Score), false)
+					sendStrike(graphStrikeCh, sig.Subject.ID, graphStrikesFromScore(sig.Score), false, false)
 				}
 			}
 		}
@@ -407,9 +487,15 @@ func main() {
 			BaselineAlpha:              c.BaselineAlpha,
 			BaselineAlphaBootstrap:     c.BaselineAlphaBootstrap,
 			BaselineMinObservations:    c.BaselineMinObservations,
+			BaselineMinObsTimeBased:    c.BaselineMinObsTimeBased,
+			BaselineMinAge:             c.BaselineMinAge,
 			BaselineDeviationThreshold: c.BaselineDeviationThreshold,
+			BaselineMinUpdatePPS:       c.BaselineMinUpdatePPS,
+			BaselineMinUpdateBPS:       c.BaselineMinUpdateBPS,
+			BaselinePeakTolerance:      c.BaselinePeakTolerance,
 			BaselineTrigPPS:            c.TrigPPS,
 			BaselineTrigBPS:            c.TrigBPS,
+			BaselinePeakDecayHalfLife:  c.BaselinePeakDecayHalfLife,
 		}, graphStore)
 
 		gctx, cancel := context.WithCancel(context.Background())
@@ -452,6 +538,15 @@ func main() {
 	totalLearnTicks := 0
 	cleanLearnTicks := 0
 
+	// Autotune quiet-node fix: consecutive skip counter.
+	// After 2 skips (2× interval) we proceed with available samples so quiet
+	// nodes are not permanently locked out of autotune.
+	autotuneSkipCount := 0
+
+	// Bootstrap downscale guards.
+	bootstrapCompletedWindows := 0
+	bootstrapDistinctSources := make(map[string]bool, 256)
+
 	// Baseline totals for drop-ratio gating.
 	var prevTotals shieldclient.Totals
 	var prevTotalsWall time.Time
@@ -472,8 +567,12 @@ func main() {
 	ossignal.Notify(resetCh, syscall.SIGUSR1)
 	defer ossignal.Stop(resetCh)
 
-	kliqLog.Printf("Kernloom IQ started profile=%s interval=%s dry_run=%v top=%d trig{pps=%.1f bps=%s syn=%.1f scan=%.1f} weights{pps=%.2f bps=%.2f syn=%.2f scan=%.2f} cap=%.1f (ipv6=%v)",
-		p.Name, c.Interval.String(), c.DryRun, c.TopN, c.TrigPPS, fmtBPS(c.TrigBPS), c.TrigSyn, c.TrigScan, c.WPPS, c.WBps, c.WSyn, c.WScan, c.SevCap, maps.Src6 != nil)
+	bootstrapPhase := "steady"
+	if bs.Enabled && bs.Phase != "" {
+		bootstrapPhase = bs.Phase
+	}
+	kliqLog.Printf("Kernloom IQ started profile=%s bootstrap=%s interval=%s dry_run=%v top=%d trig{pps=%.1f bps=%s syn=%.1f scan=%.1f} weights{pps=%.2f bps=%.2f syn=%.2f scan=%.2f} cap=%.1f (ipv6=%v)",
+		p.Name, bootstrapPhase, c.Interval.String(), c.DryRun, c.TopN, c.TrigPPS, fmtBPS(c.TrigBPS), c.TrigSyn, c.TrigScan, c.WPPS, c.WBps, c.WSyn, c.WScan, c.SevCap, maps.Src6 != nil)
 
 	for range ticker.C {
 		nowWall := time.Now()
@@ -569,7 +668,19 @@ func main() {
 			dropRLRate := float64(dDropRL) / sec
 
 			subject4 := observation.EntityRef{Kind: observation.KindIP, ID: ip4String(k4)}
-			fsmM4, sigs4 := engine.Evaluate(subject4, pps, bps, synRate, scanRate, dropRLRate)
+
+			// Source baseline update + per-source effective thresholds.
+			var fsmM4 fsm.Metrics
+			var sigs4 []signal.Signal
+			if srcBL != nil {
+				srcBL.Update(subject4.ID, pps, bps, synRate, scanRate, false, nowWall)
+				effPPS := srcBL.EffectiveTrigPPS(subject4.ID, c.TrigPPS)
+				effBPS := srcBL.EffectiveTrigBPS(subject4.ID, c.TrigBPS)
+				fsmM4, sigs4 = engine.EvaluateAt(subject4, pps, bps, synRate, scanRate, dropRLRate,
+					effPPS, c.TrigSyn, c.TrigScan, effBPS)
+			} else {
+				fsmM4, sigs4 = engine.Evaluate(subject4, pps, bps, synRate, scanRate, dropRLRate)
+			}
 			for _, sig := range sigs4 {
 				_ = mainBus.PublishSignal(context.Background(), sig)
 			}
@@ -579,6 +690,7 @@ func main() {
 
 			if dPkts > 0 || dSyn > 0 || dScan > 0 {
 				seenForLearn++
+				bootstrapDistinctSources[subject4.ID] = true
 				if fsmM4.Severity >= c.LearnSevGT {
 					highSevCount++
 				}
@@ -638,13 +750,25 @@ func main() {
 				dropRLRate := float64(dDropRL) / sec
 
 				subject6 := observation.EntityRef{Kind: observation.KindIP, ID: ip6String(ip6)}
-				fsmM6, sigs6 := engine.Evaluate(subject6, pps, bps, synRate, scanRate, dropRLRate)
+
+				var fsmM6 fsm.Metrics
+				var sigs6 []signal.Signal
+				if srcBL != nil {
+					srcBL.Update(subject6.ID, pps, bps, synRate, scanRate, false, nowWall)
+					effPPS := srcBL.EffectiveTrigPPS(subject6.ID, c.TrigPPS)
+					effBPS := srcBL.EffectiveTrigBPS(subject6.ID, c.TrigBPS)
+					fsmM6, sigs6 = engine.EvaluateAt(subject6, pps, bps, synRate, scanRate, dropRLRate,
+						effPPS, c.TrigSyn, c.TrigScan, effBPS)
+				} else {
+					fsmM6, sigs6 = engine.Evaluate(subject6, pps, bps, synRate, scanRate, dropRLRate)
+				}
 				for _, sig := range sigs6 {
 					_ = mainBus.PublishSignal(context.Background(), sig)
 				}
 
 				if dPkts > 0 || dSyn > 0 || dScan > 0 {
 					seenForLearn++
+					bootstrapDistinctSources[subject6.ID] = true
 					if fsmM6.Severity >= c.LearnSevGT {
 						highSevCount++
 					}
@@ -704,15 +828,17 @@ func main() {
 					}
 					st.LastTrigger = nowWall
 					state6[gs.ip6] = st
-					alreadyIn := false
-					for _, m := range cands {
-						if m.IPVer == 6 && m.IP6 == gs.ip6 {
-							alreadyIn = true
-							break
+					if gs.addToCands {
+						alreadyIn := false
+						for _, m := range cands {
+							if m.IPVer == 6 && m.IP6 == gs.ip6 {
+								alreadyIn = true
+								break
+							}
 						}
-					}
-					if !alreadyIn {
-						cands = append(cands, metrics{IPVer: 6, IP6: gs.ip6})
+						if !alreadyIn {
+							cands = append(cands, metrics{IPVer: 6, IP6: gs.ip6})
+						}
 					}
 				} else {
 					st := state4[gs.ip4]
@@ -730,15 +856,17 @@ func main() {
 					}
 					st.LastTrigger = nowWall
 					state4[gs.ip4] = st
-					alreadyIn := false
-					for _, m := range cands {
-						if m.IPVer == 4 && m.IP4 == gs.ip4 {
-							alreadyIn = true
-							break
+					if gs.addToCands {
+						alreadyIn := false
+						for _, m := range cands {
+							if m.IPVer == 4 && m.IP4 == gs.ip4 {
+								alreadyIn = true
+								break
+							}
 						}
-					}
-					if !alreadyIn {
-						cands = append(cands, metrics{IPVer: 4, IP4: gs.ip4})
+						if !alreadyIn {
+							cands = append(cands, metrics{IPVer: 4, IP4: gs.ip4})
+						}
 					}
 				}
 			default:
@@ -848,6 +976,9 @@ func main() {
 		}
 
 		// Housekeeping: bound memory.
+		if srcBL != nil && tickN%300 == 1 { // evict every ~5 min at 1s interval
+			srcBL.Evict(nowWall.Add(-24 * time.Hour))
+		}
 		for ip, pv := range prev4 {
 			if nowWall.Sub(pv.LastWall) > c.PrevTTL {
 				delete(prev4, ip)
@@ -889,6 +1020,9 @@ func main() {
 			c.BootstrapAlpha1, c.BootstrapAlpha2, c.BootstrapAlpha3,
 			steadyEveryEff, c.AutoK, steadyUp, steadyDown, c.AutoAlpha)
 
+		// Keep BootstrapActive in sync so the FSM block cap is applied correctly.
+		c.BootstrapActive = pol.Active
+
 		if c.AutoTune && pol.Every > 0 && time.Since(lastTune) >= pol.Every {
 			n := minInt(len(resPPS.data), len(resSyn.data), len(resScan.data))
 			cleanRatio := 0.0
@@ -897,10 +1031,30 @@ func main() {
 			}
 
 			if n < c.AutoMinSamples {
-				kliqLog.Printf("AUTOTUNE skipped: not enough samples (have=%d need=%d) cleanRatio=%.4f", n, c.AutoMinSamples, cleanRatio)
-				lastTune = time.Now()
-				continue
+				autotuneSkipCount++
+				// 2× failsafe: after 2 consecutive skips proceed with whatever
+				// samples exist so quiet nodes are not permanently locked out.
+				// Require ≥50 samples to avoid running on empty data.
+				if n < 50 || autotuneSkipCount < 2 {
+					kliqLog.Printf("AUTOTUNE skipped: not enough samples (have=%d need=%d skip=%d) cleanRatio=%.4f",
+						n, c.AutoMinSamples, autotuneSkipCount, cleanRatio)
+					lastTune = time.Now()
+					continue
+				}
+				kliqLog.Printf("AUTOTUNE proceeding with limited samples after %d skips (have=%d need=%d) cleanRatio=%.4f",
+					autotuneSkipCount, n, c.AutoMinSamples, cleanRatio)
 			}
+			autotuneSkipCount = 0 // reset on successful run
+
+			// Bootstrap downscale guard (optional, default disabled).
+			// Only active when bootstrap-min-windows > 0. The floor
+			// (autotune-floor-pps) is the primary protection against collapse.
+			distinctSourceCount := len(bootstrapDistinctSources)
+			guardEnabled := pol.Active && c.BootstrapMinWindowsBeforeDownscale > 0
+			canDownscale := !guardEnabled ||
+				(bootstrapCompletedWindows >= c.BootstrapMinWindowsBeforeDownscale &&
+					(c.BootstrapMinSourcesBeforeDownscale == 0 ||
+						distinctSourceCount >= c.BootstrapMinSourcesBeforeDownscale))
 
 			mPPS := median(resPPS.data)
 			mdPPS := mad(resPPS.data, mPPS)
@@ -912,6 +1066,24 @@ func main() {
 			targetPPS := math.Max(c.AutoFloorPPS, mPPS+pol.K*mdPPS)
 			targetSyn := math.Max(c.AutoFloorSyn, mSyn+pol.K*mdSyn)
 			targetScan := math.Max(c.AutoFloorScan, mScan+pol.K*mdScan)
+
+			// Apply downscale guard when active: clamp targets to current values
+			// from below so triggers can only rise, not fall, this cycle.
+			if !canDownscale {
+				if targetPPS < c.TrigPPS {
+					kliqLog.Printf("AUTOTUNE guard: downscale blocked (windows=%d need=%d sources=%d need=%d) — pps target %.1f clamped to %.1f",
+						bootstrapCompletedWindows, c.BootstrapMinWindowsBeforeDownscale,
+						distinctSourceCount, c.BootstrapMinSourcesBeforeDownscale,
+						targetPPS, c.TrigPPS)
+					targetPPS = c.TrigPPS
+				}
+				if targetSyn < c.TrigSyn {
+					targetSyn = c.TrigSyn
+				}
+				if targetScan < c.TrigScan {
+					targetScan = c.TrigScan
+				}
+			}
 
 			targetPPS = capChangeDir(c.TrigPPS, targetPPS, pol.MaxUp, pol.MaxDown)
 			targetSyn = capChangeDir(c.TrigSyn, targetSyn, pol.MaxUp, pol.MaxDown)
@@ -940,6 +1112,9 @@ func main() {
 			}
 
 			lastTune = time.Now()
+			bootstrapCompletedWindows++
+			// Reset distinct-source window for the next autotune cycle.
+			bootstrapDistinctSources = make(map[string]bool, 256)
 
 			engine.UpdateConfig(shieldheuristic.Config{
 				NodeID:  nodeID,
@@ -960,13 +1135,13 @@ func main() {
 				mBpsHist := median(resBps.data)
 				mdBpsHist := mad(resBps.data, mBpsHist)
 				st.History = append(st.History, stateHistory{
-					Revision:   rev,
-					At:         time.Now(),
-					Trig:       trigState{TrigPPS: c.TrigPPS, TrigSyn: c.TrigSyn, TrigScan: c.TrigScan, TrigBPS: c.TrigBPS},
-					MedianPPS:  mPPS, MadPPS: mdPPS,
-					MedianSyn:  mSyn, MadSyn: mdSyn,
+					Revision:  rev,
+					At:        time.Now(),
+					Trig:      trigState{TrigPPS: c.TrigPPS, TrigSyn: c.TrigSyn, TrigScan: c.TrigScan, TrigBPS: c.TrigBPS},
+					MedianPPS: mPPS, MadPPS: mdPPS,
+					MedianSyn: mSyn, MadSyn: mdSyn,
 					MedianScan: mScan, MadScan: mdScan,
-					MedianBPS:   mBpsHist, MadBPS: mdBpsHist,
+					MedianBPS: mBpsHist, MadBPS: mdBpsHist,
 					SampleCount: n,
 					CleanRatio:  cleanRatio,
 					Notes:       fmt.Sprintf("autotune median+mad dropRatio=%.4f phase=%s", dropRatio, pol.Phase),

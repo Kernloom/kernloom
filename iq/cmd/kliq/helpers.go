@@ -135,8 +135,13 @@ func graphStrikesFromScore(score int) int {
 }
 
 // sendStrike parses subjectID as an IP address and sends a graphStrikeMsg to ch.
+// addToCands=true: the IP is added to cands so the FSM processes it this tick
+// even without Shield telemetry (used for freeze violations where the source is
+// actively sending traffic). addToCands=false: strikes accumulate in state and
+// are applied the next time the source appears naturally in telemetry (used for
+// baseline deviations to avoid UpStreak reset from zero-metric processing).
 // No-op if the IP cannot be parsed or the channel is full.
-func sendStrike(ch chan<- graphStrikeMsg, subjectID string, n int, forceBlock bool) {
+func sendStrike(ch chan<- graphStrikeMsg, subjectID string, n int, forceBlock, addToCands bool) {
 	ip := net.ParseIP(subjectID)
 	if ip == nil {
 		return
@@ -144,6 +149,7 @@ func sendStrike(ch chan<- graphStrikeMsg, subjectID string, n int, forceBlock bo
 	var msg graphStrikeMsg
 	msg.n = n
 	msg.forceBlock = forceBlock
+	msg.addToCands = addToCands
 	if ip4 := ip.To4(); ip4 != nil {
 		copy(msg.ip4[:], ip4)
 	} else {
