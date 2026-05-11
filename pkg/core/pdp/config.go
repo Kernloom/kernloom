@@ -70,6 +70,77 @@ type Spec struct {
 	// These are the values the adapter uses to implement abstract capabilities
 	// (network.rate_limit_source, network.block_source) requested by the policy.
 	Adapters AdaptersSpec `yaml:"adapters,omitempty"`
+
+	// Autotune controls how kliq learns trigger thresholds (TrigPPS/TrigSyn/
+	// TrigScan/TrigBPS) from observed traffic via reservoir sampling + Median+MAD.
+	// Includes the three-phase bootstrap schedule for the initial learning window.
+	Autotune AutotuneSpec `yaml:"autotune,omitempty"`
+}
+
+// ─── Autotune / Bootstrap ──────────────────────────────────────────────────────
+
+// AutotuneSpec controls all autotune behaviour including the bootstrap schedule.
+type AutotuneSpec struct {
+	// Enabled turns autotune on or off.
+	Enabled bool `yaml:"enabled"`
+
+	// MinSamples is the minimum number of reservoir samples required before
+	// autotune applies a new trigger value.
+	MinSamples int `yaml:"min_samples,omitempty"`
+
+	// Floors are the minimum allowed trigger values after autotune.
+	// Autotune will never set a trigger below its floor.
+	Floors AutotuneFloorsSpec `yaml:"floors,omitempty"`
+
+	// Bootstrap defines the multi-phase learning schedule for the first
+	// BootstrapWindow after kliq starts on a new node. Omit to use CLI defaults.
+	Bootstrap BootstrapSpec `yaml:"bootstrap,omitempty"`
+}
+
+// AutotuneFloorsSpec sets the minimum allowed trigger values.
+type AutotuneFloorsSpec struct {
+	PPS  float64 `yaml:"pps,omitempty"`  // minimum TrigPPS (default 100)
+	Syn  float64 `yaml:"syn,omitempty"`  // minimum TrigSyn (default 50)
+	Scan float64 `yaml:"scan,omitempty"` // minimum TrigScan (default 20)
+	BPS  float64 `yaml:"bps,omitempty"`  // minimum TrigBPS (default 0 = disabled)
+}
+
+// BootstrapSpec describes the multi-phase autotune schedule.
+// K interpolates linearly from KStart (day 0) to KFinal (end of Window).
+// TrigPPS = max(floor, median + K × MAD), then capped by MaxUp/MaxDown.
+type BootstrapSpec struct {
+	// Window is the total bootstrap duration. After this, Steady applies.
+	Window Duration `yaml:"window,omitempty"`
+
+	// K interpolation: conservative at start, tighter at end.
+	KStart float64 `yaml:"k_start,omitempty"` // K on day 0 (more conservative)
+	KFinal float64 `yaml:"k_final,omitempty"` // K at end of Window (final value)
+
+	// Phase durations (measured from bootstrap start time).
+	// Phase 1 ends at Phase1End; Phase 2 ends at Phase2End.
+	// Phase 3 runs from Phase2End to Window.
+	Phase1End Duration `yaml:"phase1_end,omitempty"`
+	Phase2End Duration `yaml:"phase2_end,omitempty"`
+
+	Phase1 BootstrapPhaseSpec `yaml:"phase1,omitempty"`
+	Phase2 BootstrapPhaseSpec `yaml:"phase2,omitempty"`
+	Phase3 BootstrapPhaseSpec `yaml:"phase3,omitempty"`
+	Steady BootstrapPhaseSpec `yaml:"steady,omitempty"`
+}
+
+// BootstrapPhaseSpec defines autotune behaviour within one phase.
+type BootstrapPhaseSpec struct {
+	// Interval is how often autotune recalculates triggers in this phase.
+	Interval Duration `yaml:"interval,omitempty"`
+
+	// MaxUp / MaxDown cap the relative change per autotune cycle.
+	// 0.10 = TrigPPS may rise at most 10% per cycle.
+	MaxUp   float64 `yaml:"max_up,omitempty"`
+	MaxDown float64 `yaml:"max_down,omitempty"`
+
+	// Alpha is the EWMA smoothing applied when writing the new trigger value.
+	// Lower = more gradual transition. 0 = no smoothing (instant).
+	Alpha float64 `yaml:"alpha,omitempty"`
 }
 
 // ─── Baseline ─────────────────────────────────────────────────────────────────
@@ -90,9 +161,31 @@ type BaselineSpec struct {
 	// Recommended: 0.05–0.15. Default (0) uses 0.10.
 	AlphaBootstrap float64 `yaml:"alpha_bootstrap,omitempty"`
 
+	// MinObsTimeBased and MinAge enable time-based promotion: an edge is promoted
+	// to learned when obs >= MinObsTimeBased AND edge age >= MinAge, even if
+	// obs < MinObservations. Useful for low-frequency traffic (weekly jobs).
+	// 0 values disable time-based promotion.
+	MinObsTimeBased uint64   `yaml:"min_obs_time_based,omitempty"`
+	MinAge          Duration `yaml:"min_age_time_based,omitempty"`
+
 	// DeviationThreshold is the MAD multiplier that triggers a signal.
 	// 5.0 = very conservative; lower values = more sensitive.
 	DeviationThreshold float64 `yaml:"deviation_threshold"`
+
+	// MinUpdatePPS / MinUpdateBPS filter out very-low-traffic ticks from EWMA
+	// updates. Useful for bimodal sources (idle keepalives + response bursts).
+	// 0 = disabled.
+	MinUpdatePPS float64 `yaml:"min_update_pps,omitempty"`
+	MinUpdateBPS float64 `yaml:"min_update_bps,omitempty"`
+
+	// PeakTolerance is the multiplier above the learned peak that triggers a
+	// peak-exceeded signal. Default (0) uses 1.5 (50% above learned max).
+	PeakTolerance float64 `yaml:"peak_tolerance,omitempty"`
+
+	// PeakDecayHalfLife enables Sprint-5 decaying peaks.
+	// A peak from one half-life ago is worth 50% of its original value.
+	// Recommended: 336h (14 days). 0 disables decay.
+	PeakDecayHalfLife Duration `yaml:"peak_decay_half_life,omitempty"`
 }
 
 // ─── Signal engine ────────────────────────────────────────────────────────────

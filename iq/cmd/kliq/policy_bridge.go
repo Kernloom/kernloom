@@ -117,8 +117,26 @@ func applyPDPBaselineToCfg(dc *pdp.Config, c *cfg) {
 	if b.AlphaBootstrap > 0 {
 		c.BaselineAlphaBootstrap = b.AlphaBootstrap
 	}
+	if b.MinObsTimeBased > 0 {
+		c.BaselineMinObsTimeBased = b.MinObsTimeBased
+	}
+	if b.MinAge.D > 0 {
+		c.BaselineMinAge = b.MinAge.D
+	}
 	if b.DeviationThreshold > 0 {
 		c.BaselineDeviationThreshold = b.DeviationThreshold
+	}
+	if b.MinUpdatePPS > 0 {
+		c.BaselineMinUpdatePPS = b.MinUpdatePPS
+	}
+	if b.MinUpdateBPS > 0 {
+		c.BaselineMinUpdateBPS = b.MinUpdateBPS
+	}
+	if b.PeakTolerance > 0 {
+		c.BaselinePeakTolerance = b.PeakTolerance
+	}
+	if b.PeakDecayHalfLife.D > 0 {
+		c.BaselinePeakDecayHalfLife = b.PeakDecayHalfLife.D
 	}
 }
 
@@ -170,5 +188,94 @@ func applyPDPGraphToCfg(dc *pdp.Config, c *cfg) {
 	}
 	if g.Exclude.Loopback {
 		c.GraphExcludeLoopback = true
+	}
+}
+
+// applyPDPAutotuneToCfg writes autotune and bootstrap configuration from a
+// PDPConfig into cfg. Only non-zero values override CLI defaults.
+func applyPDPAutotuneToCfg(dc *pdp.Config, c *cfg) {
+	a := dc.Spec.Autotune
+	if !a.Enabled {
+		c.AutoTune = false
+	}
+	if a.MinSamples > 0 {
+		c.AutoMinSamples = a.MinSamples
+	}
+	if a.Floors.PPS > 0 {
+		c.AutoFloorPPS = a.Floors.PPS
+	}
+	if a.Floors.Syn > 0 {
+		c.AutoFloorSyn = a.Floors.Syn
+	}
+	if a.Floors.Scan > 0 {
+		c.AutoFloorScan = a.Floors.Scan
+	}
+	if a.Floors.BPS > 0 {
+		c.AutoFloorBPS = a.Floors.BPS
+	}
+
+	b := a.Bootstrap
+	if b.Window.D > 0 {
+		c.BootstrapWindow = b.Window.D
+	}
+	if b.KStart > 0 {
+		c.BootstrapKStart = b.KStart
+	}
+	if b.KFinal > 0 {
+		c.BootstrapKFinal = b.KFinal
+	}
+	if b.Phase1End.D > 0 {
+		c.BootstrapP1End = b.Phase1End.D
+	}
+	if b.Phase2End.D > 0 {
+		c.BootstrapP2End = b.Phase2End.D
+	}
+	if b.Phase1.Interval.D > 0 {
+		c.BootstrapEvery1 = b.Phase1.Interval.D
+	}
+	if b.Phase1.MaxUp > 0 {
+		c.BootstrapMaxUp1 = b.Phase1.MaxUp
+	}
+	if b.Phase1.MaxDown > 0 {
+		c.BootstrapMaxDown1 = b.Phase1.MaxDown
+	}
+	if b.Phase1.Alpha > 0 {
+		c.BootstrapAlpha1 = b.Phase1.Alpha
+	}
+	if b.Phase2.Interval.D > 0 {
+		c.BootstrapEvery2 = b.Phase2.Interval.D
+	}
+	if b.Phase2.MaxUp > 0 {
+		c.BootstrapMaxUp2 = b.Phase2.MaxUp
+	}
+	if b.Phase2.MaxDown > 0 {
+		c.BootstrapMaxDown2 = b.Phase2.MaxDown
+	}
+	if b.Phase2.Alpha > 0 {
+		c.BootstrapAlpha2 = b.Phase2.Alpha
+	}
+	if b.Phase3.Interval.D > 0 {
+		c.BootstrapEvery3 = b.Phase3.Interval.D
+	}
+	if b.Phase3.MaxUp > 0 {
+		c.BootstrapMaxUp3 = b.Phase3.MaxUp
+	}
+	if b.Phase3.MaxDown > 0 {
+		c.BootstrapMaxDown3 = b.Phase3.MaxDown
+	}
+	if b.Phase3.Alpha > 0 {
+		c.BootstrapAlpha3 = b.Phase3.Alpha
+	}
+	if b.Steady.Interval.D > 0 {
+		c.SteadyEvery = b.Steady.Interval.D
+	}
+	if b.Steady.MaxUp > 0 {
+		c.AutoMaxUp = b.Steady.MaxUp
+	}
+	if b.Steady.MaxDown > 0 {
+		c.AutoMaxDown = b.Steady.MaxDown
+	}
+	if b.Steady.Alpha > 0 {
+		c.AutoAlpha = b.Steady.Alpha
 	}
 }
