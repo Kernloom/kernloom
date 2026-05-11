@@ -265,13 +265,26 @@ struct edge4_key {
     __u8  _pad;
 };
 
-/* Deny map: drop all traffic matching (src_ip, dst_port, proto). */
+/* Deny map (blacklist): drop traffic matching (src_ip, dst_port, proto).
+ * Used in MODE_DENY: only explicitly denied tuples are dropped.
+ * First violation packet passes; KLIQ writes deny entry; subsequent → DROP. */
 struct {
     __uint(type, BPF_MAP_TYPE_LRU_HASH);
     __uint(max_entries, 65536);
     __type(key,   struct edge4_key);
     __type(value, __u8);
 } edge4_deny SEC(".maps");
+
+/* Allow map (allowlist / default-deny): only tuples in this map may pass.
+ * Used in MODE_ALLOW: everything NOT in edge4_allow is dropped immediately —
+ * no race window, true Zero-Trust microsegmentation.
+ * KLIQ populates this with all frozen/approved graph edges at freeze time. */
+struct {
+    __uint(type, BPF_MAP_TYPE_LRU_HASH);
+    __uint(max_entries, 65536);
+    __type(key,   struct edge4_key);
+    __type(value, __u8);
+} edge4_allow SEC(".maps");
 
 /* Per-edge rate-limit policy (src_ip, dst_port, proto) → rl_cfg_t. */
 struct {
@@ -291,10 +304,17 @@ struct {
 
 /*
  * Tuple enforcement config (separate from xdp_cfg to preserve ABI).
- *   enforce: 0 = disabled, 1 = deny+rl mode active.
+ *
+ * mode: 0 = disabled (no tuple checks in hot path)
+ *       1 = deny-mode (blacklist): only explicitly denied tuples are dropped.
+ *           First violation packet passes; KLIQ reacts in next poll (~1s).
+ *       2 = allow-mode (whitelist / default-deny): ONLY tuples in edge4_allow
+ *           pass. Everything else is dropped immediately — no race window.
+ *           Requires KLIQ to populate edge4_allow with all frozen edges before
+ *           activating. True Zero-Trust: no first packet leakage.
  */
 struct edge4_cfg_t {
-    __u32 enforce;
+    __u32 mode;   /* 0=off, 1=deny-mode, 2=allow-mode */
     __u32 _pad;
 };
 
@@ -921,24 +941,38 @@ int xdp_klshield(struct xdp_md *ctx)
         }
 
         /* ---- Tuple (edge) enforcement ---- */
-        /* Runs after source-level checks. Only when edge4_cfg.enforce == 1. */
+        /*
+         * mode 0 = off  → skip entirely (zero overhead beyond array lookup)
+         * mode 1 = deny-mode (blacklist): denied tuples → DROP, else PASS
+         * mode 2 = allow-mode (whitelist/default-deny): unknown tuples → DROP
+         *          Only tuples in edge4_allow are permitted. No race window.
+         */
         if (!drop_allow && !drop_deny && !drop_rl && dport != 0) {
             __u32 ecfg_idx = 0;
             struct edge4_cfg_t *ecfg = bpf_map_lookup_elem(&edge4_cfg, &ecfg_idx);
-            if (ecfg && ecfg->enforce) {
+            if (ecfg && ecfg->mode) {
                 struct edge4_key ek = {};
                 ek.src_ip   = saddr;
                 ek.dst_port = bpf_ntohs(dport);
                 ek.proto    = l4proto;
                 ek._pad     = 0;
 
-                /* Edge deny check */
-                if (bpf_map_lookup_elem(&edge4_deny, &ek)) {
-                    drop_deny = true;
-                    if (t) t->deny_hits++;
+                if (ecfg->mode == 2) {
+                    /* Allow-mode: drop anything NOT in edge4_allow.
+                     * True default-deny — first packet of a violation is also dropped. */
+                    if (!bpf_map_lookup_elem(&edge4_allow, &ek)) {
+                        drop_deny = true;
+                        if (t) t->deny_hits++;
+                    }
+                } else {
+                    /* Deny-mode (mode == 1): drop only explicitly denied tuples. */
+                    if (bpf_map_lookup_elem(&edge4_deny, &ek)) {
+                        drop_deny = true;
+                        if (t) t->deny_hits++;
+                    }
                 }
 
-                /* Edge rate limit (only when not denied) */
+                /* Edge rate limit (both modes, only when not denied) */
                 if (!drop_deny) {
                     const struct rl_cfg_t *erl = select_edge_rl_v4(saddr, ek.dst_port, l4proto);
                     if (erl && erl->rate_pps && erl->burst) {
