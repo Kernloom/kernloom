@@ -239,6 +239,8 @@ All profiles live in `configs/pdp/`. Each file header shows:
 
 Bootstrap profiles use conservative cold-start values, fast autotune convergence (`max_down: 0.10` in phase 1), and graph learning enabled where appropriate. Production profiles expect a populated `state.json` from bootstrap.
 
+The bootstrap window counts **actual kliq runtime**, not wall-clock time. Process restarts and downtime do not advance the bootstrap phase — the 14-day window only progresses while kliq is actively running and processing clean telemetry. The accumulated runtime is persisted in `state.json` (`observed_seconds`) and survives restarts.
+
 Use `configs/pdp/reference.yaml` as documentation for every available option.
 
 ---
@@ -289,7 +291,7 @@ candidate ──► learned ──► approved ──► frozen
 ```bash
 # Attach / detach
 klshield attach-xdp  --iface eth0 [--obj bpf/klshield.bpf.o] [--force]
-klshield detach-xdp
+klshield detach-xdp              [--iface <iface>]   # auto-detects when only one interface is attached
 klshield status                # XDP state, RL config, deny counts, tuple mode
 
 # Source allow / deny
