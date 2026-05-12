@@ -1166,7 +1166,11 @@ func main() {
 			targetSyn = capChangeDir(c.TrigSyn, targetSyn, pol.MaxUp, pol.MaxDown)
 			targetScan = capChangeDir(c.TrigScan, targetScan, pol.MaxUp, pol.MaxDown)
 
-			if pol.Alpha > 0 && pol.Alpha < 1 {
+			// EWMA smoothing is applied only in steady-state (pol.Active == false).
+			// During bootstrap the cap (maxDown) alone is the intended brake —
+			// stacking Alpha on top reduces the effective per-cycle drop from 10%
+			// to ~1%, preventing the fast convergence bootstrap is designed for.
+			if !pol.Active && pol.Alpha > 0 && pol.Alpha < 1 {
 				targetPPS = c.TrigPPS*(1-pol.Alpha) + targetPPS*pol.Alpha
 				targetSyn = c.TrigSyn*(1-pol.Alpha) + targetSyn*pol.Alpha
 				targetScan = c.TrigScan*(1-pol.Alpha) + targetScan*pol.Alpha
@@ -1182,7 +1186,7 @@ func main() {
 				mdBps := mad(resBps.data, mBps)
 				targetBPS := math.Max(c.AutoFloorBPS, mBps+pol.K*mdBps)
 				targetBPS = capChangeDir(c.TrigBPS, targetBPS, pol.MaxUp, pol.MaxDown)
-				if pol.Alpha > 0 && pol.Alpha < 1 {
+				if !pol.Active && pol.Alpha > 0 && pol.Alpha < 1 {
 					targetBPS = c.TrigBPS*(1-pol.Alpha) + targetBPS*pol.Alpha
 				}
 				c.TrigBPS = targetBPS
