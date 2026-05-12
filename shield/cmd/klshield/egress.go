@@ -82,7 +82,7 @@ func attachEgress(iface, obj string, force bool) {
 		}
 		m := coll.Maps[name]
 		if m == nil {
-			must(fmt.Errorf("map %s not found in BPF object", name), "pin egress map")
+			must(fmt.Errorf("map %s not found in BPF object %s — did you pass the XDP object instead of tc_kernloom_egress.bpf.o?", name, obj), "pin egress map")
 		}
 		if err := m.Pin(pin); err != nil {
 			must(err, "pin egress map "+name)
