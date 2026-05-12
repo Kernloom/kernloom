@@ -29,9 +29,8 @@ cleanup_all() {
   fi
 
   echo "[cleanup] detaching XDP"
-  if "$KLT_KLSHIELD" status 2>/dev/null | grep -q "attached to"; then
+  sudo ip netns exec "${KLT_XDP_NS:-klt-api}" \
     "$KLT_KLSHIELD" detach-xdp 2>/dev/null || true
-  fi
 
   echo "[cleanup] removing network namespaces and bridge"
   sudo ip netns del "${KLT_NS_GOOD:-klt-good}" 2>/dev/null || true

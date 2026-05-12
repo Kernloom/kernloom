@@ -32,6 +32,10 @@ assert_contains "$KLT_LOG_KLIQ" "STATE\|SOFT\|HARD\|BLOCK\|rate_limit\|deny\|enf
 STATS="$KLT_ARTIFACT_DIR/stats-03.txt"
 sudo "$KLT_KLSHIELD" stats > "$STATS" 2>&1
 cat "$STATS"
-assert_stats_field_gt "$STATS" "drop_rl\|drop_deny" 0
+# At least one of drop_rl or drop_deny must be > 0.
+RL=$(grep -oE "drop_rl=[0-9]+" "$STATS" | cut -d= -f2 || echo 0)
+DN=$(grep -oE "drop_deny=[0-9]+" "$STATS" | cut -d= -f2 || echo 0)
+[[ "$RL" -gt 0 || "$DN" -gt 0 ]] \
+  || fail "expected drop_rl or drop_deny > 0, got drop_rl=$RL drop_deny=$DN"
 
 pass "03: enforce mode — bad source escalated, good source unaffected"

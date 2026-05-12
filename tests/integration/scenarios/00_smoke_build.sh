@@ -10,8 +10,9 @@ assert_file_exists "$KLT_KLSHIELD"
 assert_file_exists "$KLT_KLIQ"
 assert_file_exists "$KLT_BPF_OBJ"
 
-# kliq --help must exit 0 and print something meaningful.
-"$KLT_KLIQ" --help 2>&1 | grep -qi "Kernloom\|USAGE\|kliq" \
+# kliq --help exits 2 (Go flag default) — capture output separately.
+HELP_OUT=$("$KLT_KLIQ" --help 2>&1 || true)
+echo "$HELP_OUT" | grep -qi "Kernloom\|USAGE\|kliq" \
   || fail "kliq --help produced unexpected output"
 
 pass "smoke: binaries and BPF object present"

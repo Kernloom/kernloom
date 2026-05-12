@@ -40,19 +40,21 @@ start_http_server() {
 }
 
 attach_xdp() {
-  echo "[proc] attaching XDP to $KLT_XDP_IFACE"
-  # XDP attaches to the host-side veth so klshield runs in the host namespace.
-  sudo "$KLT_KLSHIELD" attach-xdp \
+  echo "[proc] attaching XDP to $KLT_XDP_IFACE (in ns $KLT_XDP_NS)"
+  # Attach inside the API namespace so XDP sees ingress from clients.
+  # The bpffs is mount-ns-shared, so kliq and stats work from the host.
+  sudo ip netns exec "$KLT_XDP_NS" "$KLT_KLSHIELD" attach-xdp \
     --iface "$KLT_XDP_IFACE" \
     --obj   "$KLT_BPF_OBJ" \
     --force \
-    > "$KLT_LOG_SHIELD" 2>&1
+    >> "$KLT_LOG_SHIELD" 2>&1
   echo "[proc] XDP attached"
 }
 
 detach_xdp() {
   echo "[proc] detaching XDP"
-  sudo "$KLT_KLSHIELD" detach-xdp 2>/dev/null || true
+  sudo ip netns exec "$KLT_XDP_NS" "$KLT_KLSHIELD" detach-xdp \
+    --iface "$KLT_XDP_IFACE" 2>/dev/null || true
 }
 
 _kliq_common_flags() {

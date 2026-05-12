@@ -19,18 +19,21 @@ start_kliq_graph
 good_http_many 8
 sleep 6  # wait for promote-interval (5s) to fire
 
-# Export graph state.
+# Export graph state from the test DB.
 EDGES="$KLT_ARTIFACT_DIR/graph-edges-04.txt"
 sudo "$KLT_KLIQ" graph edges --all \
+  --db "$KLT_STATE_DIR/kliq.db" \
   > "$EDGES" 2>&1 || true
 cat "$EDGES"
 
 # The good source IP should appear as a learned or candidate edge.
 assert_contains "$EDGES" "${KLT_IP_GOOD}"
 
-# Freeze the graph.
+# Freeze the graph in the test DB.
 FREEZE_LOG="$KLT_ARTIFACT_DIR/graph-freeze-04.txt"
-sudo "$KLT_KLIQ" graph freeze > "$FREEZE_LOG" 2>&1 || true
+sudo "$KLT_KLIQ" graph freeze \
+  --db "$KLT_STATE_DIR/kliq.db" \
+  > "$FREEZE_LOG" 2>&1 || true
 cat "$FREEZE_LOG"
 
 stop_kliq
