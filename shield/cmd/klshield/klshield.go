@@ -21,8 +21,12 @@ import (
 )
 
 const (
-	// pinned link (per Kernloom docs)
-	pinXdpLink = "/sys/fs/bpf/kernloom_shield_xdp_link"
+	// bpfRoot is the BPF filesystem mount point.
+	bpfRoot = "/sys/fs/bpf"
+
+	// pinXdpLinkLegacy is kept for detecting and cleaning up old single-interface
+	// installations. New code uses xdpLinkPin(iface) which is per-interface.
+	pinXdpLinkLegacy = "/sys/fs/bpf/kernloom_shield_xdp_link"
 
 	// pinned maps (per Kernloom docs)
 	pinTotals     = "/sys/fs/bpf/kernloom_totals"
@@ -489,20 +493,56 @@ func execCommand(name string, args ...string) error {
 	return cmd.Run()
 }
 
+/* ---------------- XDP multi-interface link pins ---------------- */
+
+// ifaceSafe converts a network interface name to a string safe for use in
+// a BPF filesystem pin path (replaces '/', '.' and '@' with '_').
+func ifaceSafe(iface string) string {
+	return strings.NewReplacer("/", "_", ".", "_", "@", "_").Replace(iface)
+}
+
+// xdpLinkPin returns the per-interface BPF link pin path.
+// Each interface gets its own pin so multiple interfaces can be attached
+// simultaneously while sharing the same map set (Variante A / node-scope).
+func xdpLinkPin(iface string) string {
+	return bpfRoot + "/kernloom_shield_xdp_link_" + ifaceSafe(iface)
+}
+
+// listAttachedIfaces scans bpfRoot for active per-interface XDP link pins
+// and returns the interface names. Also detects the legacy single-interface
+// pin (kernloom_shield_xdp_link without suffix) from older installations.
+func listAttachedIfaces() []string {
+	entries, _ := os.ReadDir(bpfRoot)
+	const prefix = "kernloom_shield_xdp_link_"
+	var ifaces []string
+	for _, e := range entries {
+		if strings.HasPrefix(e.Name(), prefix) {
+			ifaces = append(ifaces, strings.TrimPrefix(e.Name(), prefix))
+		}
+	}
+	// Legacy single-interface installation (pre-multi-interface).
+	if exists(pinXdpLinkLegacy) {
+		ifaces = append(ifaces, "(legacy)")
+	}
+	return ifaces
+}
+
 /* ---------------- XDP Attach/Detach ---------------- */
 
 func attachXDP(iface, obj string, force bool) {
+	linkPin := xdpLinkPin(iface)
+
 	if force {
 		_ = execCommand("ip", "link", "set", "dev", iface, "xdp", "off")
-		_ = os.Remove(pinXdpLink)
+		_ = os.Remove(linkPin)
 	}
 
 	objs, err := loadBPFWithReplacements(obj)
 	must(err, "load BPF")
 	defer objs.Close()
 
-	if exists(pinXdpLink) {
-		fmt.Printf("XDP link already pinned at %s (detach first)\n", pinXdpLink)
+	if exists(linkPin) {
+		fmt.Printf("XDP already attached to %s (link at %s — detach first or use --force)\n", iface, linkPin)
 		return
 	}
 
@@ -523,19 +563,56 @@ func attachXDP(iface, obj string, force bool) {
 		must(err, "attach xdp (driver+generic failed)")
 	}
 
-	must(lnk.Pin(pinXdpLink), "pin xdp link")
-	fmt.Printf("Attached Kernloom Shield XDP to %s (link pinned at %s)\n", iface, pinXdpLink)
+	must(lnk.Pin(linkPin), "pin xdp link")
+	fmt.Printf("Attached XDP to %s (link pinned at %s)\n", iface, linkPin)
 }
 
-func detachXDP() {
-	lnk, err := link.LoadPinnedLink(pinXdpLink, nil)
+// detachXDP detaches the XDP program from a specific interface.
+// When iface is empty it auto-detects: if exactly one interface is attached
+// it detaches that one; if multiple are attached it prints an error.
+// The legacy single-interface pin is handled as a special case.
+func detachXDP(iface string) {
+	if iface == "" {
+		// Try legacy pin first (old single-interface installations).
+		if exists(pinXdpLinkLegacy) {
+			lnk, err := link.LoadPinnedLink(pinXdpLinkLegacy, nil)
+			if err == nil {
+				_ = os.Remove(pinXdpLinkLegacy)
+				_ = lnk.Close()
+				fmt.Println("Detached XDP (legacy link removed).")
+				return
+			}
+		}
+		// Auto-detect from per-interface pins.
+		attached := listAttachedIfaces()
+		// Filter out legacy marker.
+		var real []string
+		for _, a := range attached {
+			if a != "(legacy)" {
+				real = append(real, a)
+			}
+		}
+		switch len(real) {
+		case 0:
+			fmt.Println("No attached XDP interface found.")
+			return
+		case 1:
+			iface = real[0]
+		default:
+			fmt.Fprintf(os.Stderr, "Multiple interfaces attached: %v\nUse: klshield detach-xdp --iface <iface>\n", real)
+			os.Exit(1)
+		}
+	}
+
+	linkPin := xdpLinkPin(iface)
+	lnk, err := link.LoadPinnedLink(linkPin, nil)
 	if err != nil {
-		fmt.Printf("No pinned XDP link found at %s\n", pinXdpLink)
+		fmt.Printf("No XDP link found for interface %s (expected at %s)\n", iface, linkPin)
 		return
 	}
-	_ = os.Remove(pinXdpLink)
+	_ = os.Remove(linkPin)
 	_ = lnk.Close()
-	fmt.Println("Detached Kernloom Shield XDP (closed pinned link).")
+	fmt.Printf("Detached XDP from %s.\n", iface)
 }
 
 /* ---------------- Allow/Deny management ---------------- */
@@ -1310,7 +1387,7 @@ func usage() {
 
 ATTACH / DETACH
   attach-xdp   -iface <iface> [-obj <bpf.o>] [-force]
-  detach-xdp
+  detach-xdp   [-iface <iface>]   (auto-detects when only one interface is attached)
   status        overview: XDP state, RL config, deny counts, tuple mode
 
 SOURCE ALLOW / DENY  (CIDR allowlist and per-IP blocklist)
@@ -1365,11 +1442,17 @@ MISC
 func showStatus() {
 	fmt.Println("=== Kernloom Shield status ===")
 
-	// XDP link
-	if exists(pinXdpLink) {
-		fmt.Printf("XDP:      attached (link at %s)\n", pinXdpLink)
-	} else {
+	// XDP link(s)
+	attached := listAttachedIfaces()
+	if len(attached) == 0 {
 		fmt.Println("XDP:      NOT attached")
+	}
+	for _, iface := range attached {
+		if iface == "(legacy)" {
+			fmt.Printf("XDP:      attached (legacy link at %s)\n", pinXdpLinkLegacy)
+		} else {
+			fmt.Printf("XDP:      attached to %s (link at %s)\n", iface, xdpLinkPin(iface))
+		}
 	}
 
 	// Default RL
@@ -1463,7 +1546,10 @@ func main() {
 		attachXDP(*iface, *obj, *force)
 
 	case "detach-xdp":
-		detachXDP()
+		fs := flag.NewFlagSet("detach-xdp", flag.ExitOnError)
+		iface := fs.String("iface", "", "interface to detach (auto-detects when only one is attached)")
+		_ = fs.Parse(os.Args[2:])
+		detachXDP(*iface)
 
 	case "add-allow-cidr":
 		if len(os.Args) < 3 {

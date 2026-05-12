@@ -132,17 +132,33 @@ if [ -x "$KLSHIELD" ]; then
     "$KLSHIELD" detach-xdp || warn "detach-xdp returned non-zero (may already be detached)"
   fi
 else
-  # klshield binary already gone — remove the pinned link directly
-  LINK_PIN="$BPF_FS/kernloom_shield_xdp_link"
-  if [ -e "$LINK_PIN" ]; then
+  # klshield binary already gone — remove pinned XDP links directly.
+  # Handle both legacy single-interface pin and per-interface pins (multi-interface).
+  found_any=0
+  # Legacy pin (pre-multi-interface installations).
+  LEGACY_PIN="$BPF_FS/kernloom_shield_xdp_link"
+  if [ -e "$LEGACY_PIN" ]; then
+    found_any=1
     if [ "$DRY_RUN" -eq 1 ]; then
-      info "[dry-run] rm $LINK_PIN  (direct, klshield not found)"
+      info "[dry-run] rm $LEGACY_PIN  (direct, klshield not found)"
     else
-      rm -f "$LINK_PIN" && info "removed pinned XDP link $LINK_PIN" \
-        || warn "could not remove $LINK_PIN"
+      rm -f "$LEGACY_PIN" && info "removed pinned XDP link $LEGACY_PIN" \
+        || warn "could not remove $LEGACY_PIN"
     fi
-  else
-    info "no pinned XDP link found — already detached or never attached"
+  fi
+  # Per-interface pins: kernloom_shield_xdp_link_<iface>
+  for pin in "$BPF_FS"/kernloom_shield_xdp_link_*; do
+    [ -e "$pin" ] || continue
+    found_any=1
+    if [ "$DRY_RUN" -eq 1 ]; then
+      info "[dry-run] rm $pin  (direct, klshield not found)"
+    else
+      rm -f "$pin" && info "removed pinned XDP link $pin" \
+        || warn "could not remove $pin"
+    fi
+  done
+  if [ "$found_any" -eq 0 ]; then
+    info "no pinned XDP links found — already detached or never attached"
   fi
 fi
 
