@@ -29,8 +29,8 @@ cleanup_all() {
   fi
 
   echo "[cleanup] detaching XDP"
-  sudo ip netns exec "${KLT_XDP_NS:-klt-api}" \
-    "$KLT_KLSHIELD" detach-xdp 2>/dev/null || true
+  sudo "$KLT_KLSHIELD" detach-xdp --iface "${KLT_XDP_IFACE1:-veth-good-h}" 2>/dev/null || true
+  sudo "$KLT_KLSHIELD" detach-xdp --iface "${KLT_XDP_IFACE2:-veth-bad-h}"  2>/dev/null || true
 
   echo "[cleanup] removing network namespaces and bridge"
   sudo ip netns del "${KLT_NS_GOOD:-klt-good}" 2>/dev/null || true

@@ -40,21 +40,25 @@ start_http_server() {
 }
 
 attach_xdp() {
-  echo "[proc] attaching XDP to $KLT_XDP_IFACE (in ns $KLT_XDP_NS)"
-  # Attach inside the API namespace so XDP sees ingress from clients.
-  # The bpffs is mount-ns-shared, so kliq and stats work from the host.
-  sudo ip netns exec "$KLT_XDP_NS" "$KLT_KLSHIELD" attach-xdp \
-    --iface "$KLT_XDP_IFACE" \
-    --obj   "$KLT_BPF_OBJ" \
-    --force \
-    >> "$KLT_LOG_SHIELD" 2>&1
-  echo "[proc] XDP attached"
+  # Attach to both client-side veths in the HOST namespace.
+  # veth-good-h sees ingress from klt-good; veth-bad-h sees klt-bad.
+  # Shared maps → kliq sees both client IPs with correct SRC addresses.
+  for iface in "$KLT_XDP_IFACE1" "$KLT_XDP_IFACE2"; do
+    echo "[proc] attaching XDP to $iface"
+    sudo "$KLT_KLSHIELD" attach-xdp \
+      --iface "$iface" \
+      --obj   "$KLT_BPF_OBJ" \
+      --force \
+      >> "$KLT_LOG_SHIELD" 2>&1 \
+      || { echo "[ERROR] XDP attach failed on $iface:"; cat "$KLT_LOG_SHIELD" >&2; return 1; }
+  done
+  echo "[proc] XDP attached to $KLT_XDP_IFACE1 and $KLT_XDP_IFACE2"
 }
 
 detach_xdp() {
   echo "[proc] detaching XDP"
-  sudo ip netns exec "$KLT_XDP_NS" "$KLT_KLSHIELD" detach-xdp \
-    --iface "$KLT_XDP_IFACE" 2>/dev/null || true
+  sudo "$KLT_KLSHIELD" detach-xdp --iface "$KLT_XDP_IFACE1" 2>/dev/null || true
+  sudo "$KLT_KLSHIELD" detach-xdp --iface "$KLT_XDP_IFACE2" 2>/dev/null || true
 }
 
 _kliq_common_flags() {

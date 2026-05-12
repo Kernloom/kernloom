@@ -32,12 +32,14 @@ export KLT_IF_GOOD="good0"
 export KLT_IF_BAD="bad0"
 export KLT_IF_API="api0"
 
-# XDP attaches to api0 inside the klt-api network namespace so ingress
-# traffic from clients is seen correctly. The bpffs mount is shared with
-# the host (ip netns exec only switches network ns, not mount ns), so
-# kliq and klshield stats read the same pins from the host namespace.
-export KLT_XDP_IFACE="$KLT_IF_API"
-export KLT_XDP_NS="$KLT_NS_API"
+# XDP attaches to the HOST-side veths of the client namespaces.
+# veth-good-h sees ingress from klt-good (10.42.0.11).
+# veth-bad-h  sees ingress from klt-bad  (10.42.0.66).
+# Both run in the host namespace — no ip netns exec needed, and both
+# client IPs appear correctly in kliq telemetry. Shared maps mean one
+# kliq instance handles both interfaces (multi-interface / Variante A).
+export KLT_XDP_IFACE1="$KLT_VETH_GOOD_HOST"
+export KLT_XDP_IFACE2="$KLT_VETH_BAD_HOST"
 
 # Runtime directories (separate from production paths)
 export KLT_STATE_DIR="${KLT_STATE_DIR:-/var/lib/kernloom/iq-it}"

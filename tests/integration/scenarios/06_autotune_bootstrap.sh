@@ -47,11 +47,13 @@ sudo "$KLT_KLIQ" \
 KLIQ_PID=$!
 echo "$KLIQ_PID" > "$KLT_ARTIFACT_DIR/kliq.pid"
 
-echo "[06] kliq started, generating low-PPS traffic for reservoir"
+echo "[06] kliq started, generating traffic via good namespace for reservoir"
 
-# Generate low-PPS traffic — samples go into reservoir (well below trig-pps=100).
+# Generate low-PPS traffic so reservoir accumulates samples.
+# The good namespace HTTP server is still running from earlier scenarios.
 for _ in $(seq 1 12); do
-  good_http_once 2>/dev/null || true
+  sudo ip netns exec "$KLT_NS_GOOD" \
+    curl -fsS --max-time 3 "http://$KLT_IP_API:$KLT_API_PORT/" >/dev/null 2>&1 || true
   sleep 0.3
 done
 
