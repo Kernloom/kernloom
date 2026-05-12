@@ -157,7 +157,7 @@ func TestListAttachedIfaces_LegacyAndNew(t *testing.T) {
 
 func listAttachedEgressIfacesIn(root string) []string {
 	entries, _ := os.ReadDir(root)
-	const prefix = "kernloom_egress_link_"
+	const prefix = "kernloom_egress_prog_"
 	var ifaces []string
 	for _, e := range entries {
 		if len(e.Name()) > len(prefix) && e.Name()[:len(prefix)] == prefix {
@@ -176,7 +176,7 @@ func TestListAttachedEgressIfaces_Empty(t *testing.T) {
 
 func TestListAttachedEgressIfaces_Single(t *testing.T) {
 	dir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(dir, "kernloom_egress_link_eth0"), []byte{}, 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, "kernloom_egress_prog_eth0"), []byte{}, 0o600); err != nil {
 		t.Fatal(err)
 	}
 	ifaces := listAttachedEgressIfacesIn(dir)
@@ -187,7 +187,7 @@ func TestListAttachedEgressIfaces_Single(t *testing.T) {
 
 func TestListAttachedEgressIfaces_Multiple(t *testing.T) {
 	dir := t.TempDir()
-	for _, name := range []string{"kernloom_egress_link_eth0", "kernloom_egress_link_eth1"} {
+	for _, name := range []string{"kernloom_egress_prog_eth0", "kernloom_egress_prog_eth1"} {
 		if err := os.WriteFile(filepath.Join(dir, name), []byte{}, 0o600); err != nil {
 			t.Fatal(err)
 		}
@@ -202,7 +202,7 @@ func TestListAttachedEgressIfaces_XdpPinsIgnored(t *testing.T) {
 	// XDP pins must not appear as egress ifaces.
 	for _, name := range []string{
 		"kernloom_shield_xdp_link_eth0",
-		"kernloom_egress_link_eth1",
+		"kernloom_egress_prog_eth1",
 	} {
 		if err := os.WriteFile(filepath.Join(dir, name), []byte{}, 0o600); err != nil {
 			t.Fatal(err)

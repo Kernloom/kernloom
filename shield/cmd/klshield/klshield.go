@@ -1464,7 +1464,7 @@ func showStatus() {
 		fmt.Println("TC egress: not attached")
 	}
 	for _, iface := range egressIfaces {
-		fmt.Printf("TC egress: attached to %s (sentinel at %s)\n", iface, egressLinkPin(iface))
+		fmt.Printf("TC egress: attached to %s (prog at %s)\n", iface, egressProgPin(iface))
 	}
 
 	// Default RL
@@ -1531,7 +1531,7 @@ func showStatus() {
 			}
 		}
 	} else {
-		fmt.Println("Tuple enforcement: not available (reload Shield with new .bpf.o)")
+		fmt.Println("Tuple enforcement: not available (run 'klshield attach-xdp' first)")
 	}
 }
 

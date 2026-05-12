@@ -18,17 +18,17 @@ const (
 	pinEgressDst4Stats = "/sys/fs/bpf/kernloom_egress_dst4_stats"
 )
 
-// egressLinkPin returns the sentinel file path used to track TC egress
-// attachment state for a given interface.
-// The file's existence indicates the interface has an active TC egress filter.
-func egressLinkPin(iface string) string {
-	return bpfRoot + "/kernloom_egress_link_" + ifaceSafe(iface)
+// egressProgPin returns the path of the pinned TC egress BPF program for iface.
+// Its presence in bpffs indicates an active TC egress attachment — no separate
+// sentinel file needed since bpffs does not allow regular file creation.
+func egressProgPin(iface string) string {
+	return bpfRoot + "/kernloom_egress_prog_" + ifaceSafe(iface)
 }
 
-// listAttachedEgressIfaces scans bpffs for active TC egress sentinel files.
+// listAttachedEgressIfaces scans bpffs for pinned TC egress programs.
 func listAttachedEgressIfaces() []string {
 	entries, _ := os.ReadDir(bpfRoot)
-	const prefix = "kernloom_egress_link_"
+	const prefix = "kernloom_egress_prog_"
 	var ifaces []string
 	for _, e := range entries {
 		if strings.HasPrefix(e.Name(), prefix) {
@@ -41,11 +41,11 @@ func listAttachedEgressIfaces() []string {
 // attachEgress attaches the TC egress BPF program to iface.
 // It is observe-only: the program never drops or modifies packets.
 func attachEgress(iface, obj string, force bool) {
-	sentinel := egressLinkPin(iface)
+	progPin := egressProgPin(iface)
 
-	if exists(sentinel) {
+	if exists(progPin) {
 		if !force {
-			fmt.Printf("TC egress already attached to %s (sentinel at %s — detach first or use --force)\n", iface, sentinel)
+			fmt.Printf("TC egress already attached to %s (prog pin at %s — detach first or use --force)\n", iface, progPin)
 			return
 		}
 		_ = detachEgressFromIface(iface)
@@ -95,12 +95,12 @@ func attachEgress(iface, obj string, force bool) {
 		must(fmt.Errorf("interface %s already has a clsact qdisc (Cilium?); use --force to override", iface), "attach TC egress")
 	}
 
-	// Create clsact qdisc (idempotent with || true).
-	_ = execCommand("tc", "qdisc", "add", "dev", iface, "clsact")
+	// Create clsact qdisc only if not already present.
+	if !strings.Contains(out, "clsact") {
+		must(execCommand("tc", "qdisc", "add", "dev", iface, "clsact"), "add clsact qdisc")
+	}
 
-	// Attach TC egress filter using the pinned program.
-	// We pin the program so tc can reference it by path.
-	progPin := bpfRoot + "/kernloom_egress_prog_" + ifaceSafe(iface)
+	// Pin the program — its presence in bpffs tracks attachment state.
 	_ = os.Remove(progPin)
 	prog := coll.Programs["tc_egress"]
 	if prog == nil {
@@ -114,12 +114,7 @@ func attachEgress(iface, obj string, force bool) {
 		"attach TC egress filter",
 	)
 
-	// Write sentinel file to track attachment.
-	f, err := os.OpenFile(sentinel, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
-	must(err, "create egress sentinel")
-	_ = f.Close()
-
-	fmt.Printf("Attached TC egress to %s (sentinel at %s)\n", iface, sentinel)
+	fmt.Printf("Attached TC egress to %s (prog pinned at %s)\n", iface, progPin)
 }
 
 // detachEgress detaches the TC egress filter from iface.
@@ -146,21 +141,17 @@ func detachEgress(iface string) {
 
 // detachEgressFromIface removes the TC egress filter and clsact qdisc from iface.
 func detachEgressFromIface(iface string) error {
-	sentinel := egressLinkPin(iface)
-	if !exists(sentinel) {
-		fmt.Printf("No TC egress sentinel found for %s (already detached?)\n", iface)
+	progPin := egressProgPin(iface)
+	if !exists(progPin) {
+		fmt.Printf("No TC egress program pin found for %s (already detached?)\n", iface)
 		return nil
 	}
 
-	// Remove TC filter and qdisc. Removing the qdisc removes all filters.
-	_ = execCommand("tc", "qdisc", "del", "dev", iface, "clsact")
+	// Remove TC filter. Only delete qdisc if we created it (no other filters).
+	_ = execCommand("tc", "filter", "del", "dev", iface, "egress")
 
-	// Remove pinned program.
-	progPin := bpfRoot + "/kernloom_egress_prog_" + ifaceSafe(iface)
+	// Remove pinned program (also serves as the attachment indicator).
 	_ = os.Remove(progPin)
-
-	// Remove sentinel.
-	_ = os.Remove(sentinel)
 
 	fmt.Printf("Detached TC egress from %s.\n", iface)
 	return nil
