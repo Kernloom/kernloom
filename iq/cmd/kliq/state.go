@@ -34,6 +34,13 @@ type bootstrapInfo struct {
 	StartedAt time.Time `json:"started_at"`
 	Window    string    `json:"window,omitempty"`
 	Phase     string    `json:"phase,omitempty"`
+
+	// ObservedSeconds counts only the seconds during which kliq was actually
+	// running and processing valid (clean) telemetry. Offline time between
+	// process restarts does not count. When > 0 this value is used instead of
+	// wall-clock (now - StartedAt) to determine the current bootstrap phase.
+	// Falls back to wall-clock for state files that pre-date this field.
+	ObservedSeconds uint64 `json:"observed_seconds,omitempty"`
 }
 
 type stateActive struct {
@@ -46,6 +53,11 @@ type stateActive struct {
 	SampleCount int           `json:"sample_count"`
 	CleanRatio  float64       `json:"clean_ratio"`
 	Notes       string        `json:"notes,omitempty"`
+
+	// ConfigHash is a short hash of autotune-relevant configuration values.
+	// A mismatch between the hash in state.json and the current config causes
+	// the bootstrap state to be invalidated so learning starts fresh.
+	ConfigHash string `json:"config_hash,omitempty"`
 }
 
 type stateHistory struct {
@@ -75,6 +87,19 @@ type stateFile struct {
 	Active    stateActive    `json:"active"`
 	History   []stateHistory `json:"history"`
 	Integrity integrity      `json:"integrity"`
+}
+
+// bootstrapConfigHash returns a short (16-char) hex digest of the autotune
+// configuration fields that — if changed — would invalidate a persisted
+// bootstrap session. Only fields that affect the learning outcome are included:
+// changing cosmetic options (TopN, DryRun, log verbosity) does not reset.
+func bootstrapConfigHash(c *cfg) string {
+	key := fmt.Sprintf("%s|%s|%.2f|%.2f|%.2f|%.2f",
+		c.BPFfsRoot,
+		c.BootstrapWindow.String(),
+		c.AutoFloorPPS, c.AutoFloorSyn, c.AutoFloorScan, c.AutoFloorBPS)
+	h := sha256.Sum256([]byte(key))
+	return hex.EncodeToString(h[:8]) // 16 hex chars — collision-safe for this use case
 }
 
 func computeSHA256NoIntegrity(b []byte) string {

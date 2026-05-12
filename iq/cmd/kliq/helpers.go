@@ -72,7 +72,15 @@ func bootstrapEffective(now time.Time, info bootstrapInfo, window, p1End, p2End 
 	if !info.Enabled || info.StartedAt.IsZero() || window <= 0 {
 		return bootstrapPolicy{Active: false, Phase: "steady", Every: steadyEvery, K: steadyK, MaxUp: steadyUp, MaxDown: steadyDown, Alpha: steadyAlpha}
 	}
-	age := now.Sub(info.StartedAt)
+
+	// Use observed_seconds (real active runtime) when available.
+	// Falls back to wall-clock for older state files that pre-date this field.
+	var age time.Duration
+	if info.ObservedSeconds > 0 {
+		age = time.Duration(info.ObservedSeconds) * time.Second
+	} else {
+		age = now.Sub(info.StartedAt)
+	}
 	if age < 0 {
 		age = 0
 	}

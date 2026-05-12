@@ -194,11 +194,23 @@ func main() {
 	explicitFlags := make(map[string]bool)
 	flag.Visit(func(f *flag.Flag) { explicitFlags[f.Name] = true })
 
+	// Compute the config hash used to detect autotune-relevant config changes.
+	// A mismatch between this hash and the one stored in state.json invalidates
+	// the bootstrap session (BPFfsRoot change = different interface, floor
+	// change = different learning target).
+	cfgHash := bootstrapConfigHash(&c)
+
 	// Load persisted autotune state.
 	// Priority: explicit CLI flag > state (learned) > PDPConfig/profile default.
 	var stFile *stateFile
 	if c.StatePath != "" {
 		if st, err := loadState(c.StatePath, c.MaxStateAge); err == nil {
+			// Invalidate bootstrap state when autotune-relevant config has changed.
+			if st.Active.ConfigHash != "" && st.Active.ConfigHash != cfgHash {
+				kliqLog.Printf("Bootstrap state invalidated: config changed (stored=%s current=%s) — starting fresh",
+					st.Active.ConfigHash, cfgHash)
+				st.Active.Bootstrap = bootstrapInfo{}
+			}
 			stFile = st
 			if st.Active.Trig.TrigPPS > 0 && !explicitFlags["trig-pps"] {
 				c.TrigPPS = st.Active.Trig.TrigPPS
@@ -242,6 +254,7 @@ func main() {
 						Trig:        trigState{TrigPPS: c.TrigPPS, TrigSyn: c.TrigSyn, TrigScan: c.TrigScan, TrigBPS: c.TrigBPS},
 						Tune:        tuneMeta{Method: "median_mad", Window: "reservoir", K: c.AutoK, SigmaFactor: 1.4826},
 						Bootstrap:   bs,
+						ConfigHash:  cfgHash,
 						SampleCount: 0,
 						CleanRatio:  1.0,
 						Notes:       "bootstrap initialized",
@@ -249,9 +262,16 @@ func main() {
 					stFile.History = []stateHistory{}
 				} else {
 					stFile.Active.Bootstrap = bs
+					stFile.Active.ConfigHash = cfgHash
 				}
 				_ = writeStateAtomic(c.StatePath, stFile)
 			}
+		} else {
+			// Resuming an existing bootstrap session.
+			kliqLog.Printf("Bootstrap resumed: observed=%s required=%s phase=%s",
+				(time.Duration(bs.ObservedSeconds) * time.Second).String(),
+				c.BootstrapWindow.String(),
+				bs.Phase)
 		}
 	}
 
@@ -938,6 +958,11 @@ func main() {
 		}
 		if clean {
 			cleanLearnTicks++
+			// Increment observed_seconds: only real, clean runtime counts toward
+			// the bootstrap window. Offline time between restarts does not count.
+			if c.Bootstrap && bs.Enabled {
+				bs.ObservedSeconds++
+			}
 		}
 
 		// Track which IPs were processed this tick so the sweep below can skip them.
@@ -1021,6 +1046,15 @@ func main() {
 		// are picked up without a restart.
 		if features.TupleEnforcement && tickN%300 == 1 {
 			syncEdge4Allow()
+		}
+		// Bootstrap checkpoint every 30s: persist observed_seconds so a restart
+		// can resume from where it left off (max ~30s of progress lost on crash).
+		if c.Bootstrap && bs.Enabled && c.StatePath != "" && stFile != nil && tickN%30 == 0 {
+			stFile.Active.Bootstrap = bs
+			stFile.Active.ConfigHash = cfgHash
+			if err := writeStateAtomic(c.StatePath, stFile); err != nil {
+				kliqLog.Printf("bootstrap checkpoint failed: %v", err)
+			}
 		}
 		for ip, pv := range prev4 {
 			if nowWall.Sub(pv.LastWall) > c.PrevTTL {
@@ -1199,6 +1233,7 @@ func main() {
 					Trig:        trigState{TrigPPS: c.TrigPPS, TrigSyn: c.TrigSyn, TrigScan: c.TrigScan, TrigBPS: c.TrigBPS},
 					Tune:        tuneMeta{Method: "median_mad", Window: "reservoir", K: pol.K, SigmaFactor: 1.4826},
 					Bootstrap:   bs,
+					ConfigHash:  cfgHash,
 					SampleCount: n,
 					CleanRatio:  cleanRatio,
 					Notes:       "autotune",
