@@ -56,6 +56,9 @@ SCENARIOS=(
   tests/integration/scenarios/03_enforce_rate_limit_or_block.sh
   tests/integration/scenarios/04_graph_learn_freeze.sh
   tests/integration/scenarios/05_restart_recovery.sh
+  tests/integration/scenarios/06_autotune_bootstrap.sh
+  tests/integration/scenarios/07_good_bad_isolation.sh
+  tests/integration/scenarios/08_fsm_stepdown.sh
 )
 
 PASS=0
