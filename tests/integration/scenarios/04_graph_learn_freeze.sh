@@ -49,6 +49,6 @@ sleep 4
 
 # kliq must have signalled the new edge.
 assert_contains "$FROZEN_LOG" \
-  "new_edge\|freeze\|graph.*signal\|GRAPH\|${KLT_IP_BAD}"
+  "new_edge|freeze|GRAPH|${KLT_IP_BAD}"
 
 pass "04: graph learned normal edge, freeze detected new edge from bad source"

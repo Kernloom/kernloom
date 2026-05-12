@@ -57,7 +57,7 @@ sleep 6
 
 # Verify enforcement was applied.
 assert_contains "$STEPDOWN_LOG" "${KLT_IP_BAD}"
-assert_contains "$STEPDOWN_LOG" "SOFT\|HARD\|BLOCK\|STATE"
+assert_contains "$STEPDOWN_LOG" "ACTION ip=${KLT_IP_BAD}"
 
 echo "[08] phase 2: bad traffic stopped — waiting for recovery (TTL=5s + 2 clean ticks)"
 # TTL=5s + down-need=2 ticks + margin = ~10s
@@ -81,7 +81,7 @@ cat "$STEPDOWN_LOG" | grep -E "STATE|OBSERVE|stepdown|decay|fsm" | tail -10 || t
   || fail "08: bad source did not recover after attack stopped ($RECOVER_OK/5 requests succeeded)"
 
 # Log must show a downward FSM transition (e.g. HARD->SOFT or SOFT->OBSERVE or BLOCK->HARD).
-assert_contains "$STEPDOWN_LOG" \
-  "HARD->SOFT\|SOFT->OBSERVE\|BLOCK->HARD\|BLOCK->OBSERVE\|->OBSERVE"
+# Log shows RATE_SOFT->OBSERVE or RATE_HARD->OBSERVE on stepdown.
+assert_contains "$STEPDOWN_LOG" "->OBSERVE"
 
 pass "08: FSM stepped down after attack stopped — source recovered in ~$(( 5 + 2 ))s"

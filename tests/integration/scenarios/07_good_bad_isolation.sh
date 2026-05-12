@@ -53,7 +53,7 @@ echo "[07] good source: $GOOD_OK ok / $GOOD_FAIL failed out of 20 checks"
 
 # Verify kliq escalated the bad source.
 assert_contains "$KLT_LOG_KLIQ" "${KLT_IP_BAD}"
-assert_contains "$KLT_LOG_KLIQ" "SOFT\|HARD\|BLOCK\|rate_limit\|STATE"
+assert_contains "$KLT_LOG_KLIQ" "ACTION ip=${KLT_IP_BAD}"
 
 # Good source must have succeeded on every single check.
 [[ "$GOOD_FAIL" -eq 0 ]] \

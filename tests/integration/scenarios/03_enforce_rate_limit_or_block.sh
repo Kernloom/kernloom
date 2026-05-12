@@ -26,7 +26,7 @@ assert_http_ok "$KLT_NS_GOOD" "$(api_url)"
 
 # kliq must have logged enforcement decisions for the bad source.
 assert_contains "$KLT_LOG_KLIQ" "${KLT_IP_BAD}"
-assert_contains "$KLT_LOG_KLIQ" "STATE\|SOFT\|HARD\|BLOCK\|rate_limit\|deny\|enforce"
+assert_contains "$KLT_LOG_KLIQ" "ACTION ip=${KLT_IP_BAD}"
 
 # Shield stats must show drops (rate-limit or deny) for the bad source.
 STATS="$KLT_ARTIFACT_DIR/stats-03.txt"

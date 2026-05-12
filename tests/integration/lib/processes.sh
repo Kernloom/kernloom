@@ -16,8 +16,14 @@ stop_by_pidfile() {
   pid="$(cat "$pidfile")"
   if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null; then
     sudo kill "$pid" 2>/dev/null || true
-    sleep 0.5
+    # Wait up to 3s for graceful exit, then force-kill.
+    local i=0
+    while kill -0 "$pid" 2>/dev/null && [[ $i -lt 6 ]]; do
+      sleep 0.5
+      i=$((i + 1))
+    done
     sudo kill -9 "$pid" 2>/dev/null || true
+    sleep 0.2
   fi
   rm -f "$pidfile"
 }
