@@ -91,12 +91,25 @@ func runStatus(statePath, dbPath string) {
 		}
 
 		if !st.Active.UpdatedAt.IsZero() {
-			fmt.Fprintf(w, "Last tuned:\trev %d  %s ago  samples=%d  clean=%.1f%%\n",
+			nextIn := ""
+			if interval := phaseInterval(st.Active.Bootstrap.Phase); interval > 0 {
+				remaining := interval - time.Since(st.Active.UpdatedAt)
+				if remaining < 0 {
+					remaining = 0
+				}
+				nextIn = fmt.Sprintf("  next ~%s", fmtAge(remaining))
+			}
+			fmt.Fprintf(w, "Last tuned:\trev %d  %s ago  samples=%d  clean=%.1f%%%s\n",
 				st.Active.Revision,
 				fmtAge(time.Since(st.Active.UpdatedAt)),
 				st.Active.SampleCount,
 				st.Active.CleanRatio*100,
+				nextIn,
 			)
+		} else {
+			if interval := phaseInterval(st.Active.Bootstrap.Phase); interval > 0 {
+				fmt.Fprintf(w, "Last tuned:\tnever  (first cycle in ~%s of traffic)\n", fmtAge(interval))
+			}
 		}
 		w.Flush()
 
@@ -177,6 +190,20 @@ func runStatus(statePath, dbPath string) {
 			}
 		}
 		fmt.Printf("\nBaselines: %d learned  %d candidate\n", learned, candidate)
+	}
+}
+
+// phaseInterval returns the default autotune cycle interval for a bootstrap phase.
+func phaseInterval(phase string) time.Duration {
+	switch phase {
+	case "bootstrap-1":
+		return time.Hour
+	case "bootstrap-2":
+		return 6 * time.Hour
+	case "bootstrap-3":
+		return 24 * time.Hour
+	default:
+		return 0
 	}
 }
 

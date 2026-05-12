@@ -32,6 +32,9 @@ func (r *reservoir) ensureSeed() {
 	r.rnd = rand.New(rand.NewSource(time.Now().UnixNano()))
 }
 
+// Len returns the number of samples currently held in memory.
+func (r *reservoir) Len() int { return len(r.data) }
+
 func (r *reservoir) Add(x float64) {
 	if math.IsNaN(x) || math.IsInf(x, 0) || x < 0 {
 		return

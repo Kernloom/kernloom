@@ -1034,8 +1034,8 @@ func main() {
 				top := cands[0]
 				topSummary = fmt.Sprintf("%s sev=%.2f pps=%.0f bps=%s syn=%.0f scan=%.0f", top.ipString(), top.Severity, top.PPS, fmtBPS(top.Bps), top.SynRate, top.ScanRate)
 			}
-			kliqLog.Printf("TICK#%d sources=%d cands=%d clean=%v fsm{soft=%d hard=%d block=%d} trig{pps=%.0f bps=%s syn=%.0f scan=%.0f} top: %s",
-				tickN, seenForLearn, len(cands), clean, softN, hardN, blockN, c.TrigPPS, fmtBPS(c.TrigBPS), c.TrigSyn, c.TrigScan, topSummary)
+			kliqLog.Printf("TICK#%d sources=%d cands=%d reservoir=%d clean=%v fsm{soft=%d hard=%d block=%d} trig{pps=%.0f bps=%s syn=%.0f scan=%.0f} top: %s",
+				tickN, seenForLearn, len(cands), resPPS.Len(), clean, softN, hardN, blockN, c.TrigPPS, fmtBPS(c.TrigBPS), c.TrigSyn, c.TrigScan, topSummary)
 		}
 
 		// Housekeeping: bound memory.
