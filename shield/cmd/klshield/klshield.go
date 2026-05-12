@@ -1099,9 +1099,10 @@ func setEdgeRL(srcStr, portStr, protoStr string, rate, burst uint64) {
 }
 
 // tupleEnforceMode sets the XDP tuple enforcement mode:
-//   "off"   → mode 0 (disabled)
-//   "on"    → mode 1 (deny-mode / blacklist): denied tuples dropped; first violation passes
-//   "allow" → mode 2 (allow-mode / default-deny): only allowlisted tuples pass; no race window
+//
+//	"off"   → mode 0 (disabled)
+//	"on"    → mode 1 (deny-mode / blacklist): denied tuples dropped; first violation passes
+//	"allow" → mode 2 (allow-mode / default-deny): only allowlisted tuples pass; no race window
 func tupleEnforceMode(mode string) {
 	m, err := openPinnedMap(pinEdge4Cfg)
 	must(err, "open edge4_cfg (run 'klshield attach-xdp' with new .bpf.o first)")
@@ -1357,8 +1358,8 @@ MISC
   stats                   XDP packet/drop counters
   top-src       [-n 20] [-by pkts|bytes|drops|droprl]
   events                  live event stream from XDP ringbuf
-`)}
-
+`)
+}
 
 // showStatus prints a quick operational overview of the XDP program.
 func showStatus() {

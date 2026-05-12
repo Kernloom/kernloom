@@ -361,6 +361,7 @@ func (s *Store) Stats(nodeID string) (map[graph.EdgeState]int, error) {
 //	b) obs >= minObsTimeBased AND edge age >= minAge (time-based: useful for
 //	   low-frequency traffic like weekly cron jobs that would take too long
 //	   to accumulate minObs observations).
+//
 // UpdateEdgeBaseline is the core edge-baseline update function.
 // peakDecayHalfLife controls how quickly peaks decay over time (Sprint 5).
 // Pass 0 to disable decay (running maximum, original behaviour).

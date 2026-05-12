@@ -319,7 +319,6 @@ func main() {
 		}
 	}
 
-
 	// Decision engine: adds audit trail for FSM transitions and enforces graph-freeze signals.
 	decPolicy := decisionengine.LocalPolicy{
 		NodeID:              nodeID,

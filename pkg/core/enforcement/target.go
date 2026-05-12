@@ -25,10 +25,10 @@ const (
 
 // EdgeKey identifies a 4-tuple communication edge.
 type EdgeKey struct {
-	SrcIP  string
-	DstIP  string
+	SrcIP   string
+	DstIP   string
 	DstPort uint16
-	Proto  string
+	Proto   string
 }
 
 // Target is the unified enforcement address used by PEP adapters.
