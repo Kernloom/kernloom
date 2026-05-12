@@ -33,3 +33,12 @@ jobs:
 
       - name: Build BPF object
         run: make -C shield/bpf
+
+      - name: Build CLIs
+        run: |
+          mkdir -p bin
+          go build -o bin/klshield ./shield/cmd/klshield
+          go build -o bin/kliq     ./iq/cmd/kliq
+
+      - name: Smoke build test
+        run: bash tests/integration/scenarios/00_smoke_build.sh

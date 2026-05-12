@@ -1,0 +1,2 @@
+# Ignore all artifact run directories but keep the .gitkeep marker.
+*/

@@ -1,0 +1,2 @@
+# Integration test whitelist — empty by default.
+# Add IPs here to exclude them from enforcement during tests.
