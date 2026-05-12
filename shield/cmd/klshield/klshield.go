@@ -1386,9 +1386,12 @@ func usage() {
 	fmt.Print(`klshield — Kernloom Shield (XDP)
 
 ATTACH / DETACH
-  attach-xdp   -iface <iface> [-obj <bpf.o>] [-force]
-  detach-xdp   [-iface <iface>]   (auto-detects when only one interface is attached)
-  status        overview: XDP state, RL config, deny counts, tuple mode
+  attach-xdp    -iface <iface> [-obj <bpf.o>] [-force]
+  detach-xdp    [-iface <iface>]   (auto-detects when only one interface is attached)
+  attach-egress -iface <iface> [-obj <bpf.o>] [-force]   TC egress observe-only telemetry
+  detach-egress [-iface <iface>]
+  status         overview: XDP/egress state, RL config, deny counts, tuple mode
+  egress-stats   aggregate egress counters + top destinations
 
 SOURCE ALLOW / DENY  (CIDR allowlist and per-IP blocklist)
   add-allow-cidr  <cidr>        add to XDP source allowlist (enforce-allow must be on)
@@ -1453,6 +1456,15 @@ func showStatus() {
 		} else {
 			fmt.Printf("XDP:      attached to %s (link at %s)\n", iface, xdpLinkPin(iface))
 		}
+	}
+
+	// TC egress link(s)
+	egressIfaces := listAttachedEgressIfaces()
+	if len(egressIfaces) == 0 {
+		fmt.Println("TC egress: not attached")
+	}
+	for _, iface := range egressIfaces {
+		fmt.Printf("TC egress: attached to %s (sentinel at %s)\n", iface, egressLinkPin(iface))
 	}
 
 	// Default RL
@@ -1550,6 +1562,23 @@ func main() {
 		iface := fs.String("iface", "", "interface to detach (auto-detects when only one is attached)")
 		_ = fs.Parse(os.Args[2:])
 		detachXDP(*iface)
+
+	case "attach-egress":
+		fs := flag.NewFlagSet("attach-egress", flag.ExitOnError)
+		iface := fs.String("iface", "eth0", "interface")
+		obj := fs.String("obj", "bpf/tc_kernloom_egress.bpf.o", "TC egress BPF object path")
+		force := fs.Bool("force", false, "replace existing TC egress attachment (WARNING)")
+		_ = fs.Parse(os.Args[2:])
+		attachEgress(*iface, *obj, *force)
+
+	case "detach-egress":
+		fs := flag.NewFlagSet("detach-egress", flag.ExitOnError)
+		iface := fs.String("iface", "", "interface to detach (auto-detects when only one is attached)")
+		_ = fs.Parse(os.Args[2:])
+		detachEgress(*iface)
+
+	case "egress-stats":
+		egressStats()
 
 	case "add-allow-cidr":
 		if len(os.Args) < 3 {

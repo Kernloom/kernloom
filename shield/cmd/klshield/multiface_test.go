@@ -153,6 +153,67 @@ func TestListAttachedIfaces_LegacyAndNew(t *testing.T) {
 	}
 }
 
+// ---- listAttachedEgressIfaces (using a temp dir as bpfRoot) ----
+
+func listAttachedEgressIfacesIn(root string) []string {
+	entries, _ := os.ReadDir(root)
+	const prefix = "kernloom_egress_link_"
+	var ifaces []string
+	for _, e := range entries {
+		if len(e.Name()) > len(prefix) && e.Name()[:len(prefix)] == prefix {
+			ifaces = append(ifaces, e.Name()[len(prefix):])
+		}
+	}
+	return ifaces
+}
+
+func TestListAttachedEgressIfaces_Empty(t *testing.T) {
+	dir := t.TempDir()
+	if ifaces := listAttachedEgressIfacesIn(dir); len(ifaces) != 0 {
+		t.Fatalf("expected 0 egress ifaces, got %v", ifaces)
+	}
+}
+
+func TestListAttachedEgressIfaces_Single(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "kernloom_egress_link_eth0"), []byte{}, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	ifaces := listAttachedEgressIfacesIn(dir)
+	if len(ifaces) != 1 || ifaces[0] != "eth0" {
+		t.Fatalf("expected [eth0], got %v", ifaces)
+	}
+}
+
+func TestListAttachedEgressIfaces_Multiple(t *testing.T) {
+	dir := t.TempDir()
+	for _, name := range []string{"kernloom_egress_link_eth0", "kernloom_egress_link_eth1"} {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte{}, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if ifaces := listAttachedEgressIfacesIn(dir); len(ifaces) != 2 {
+		t.Fatalf("expected 2 egress ifaces, got %v", ifaces)
+	}
+}
+
+func TestListAttachedEgressIfaces_XdpPinsIgnored(t *testing.T) {
+	dir := t.TempDir()
+	// XDP pins must not appear as egress ifaces.
+	for _, name := range []string{
+		"kernloom_shield_xdp_link_eth0",
+		"kernloom_egress_link_eth1",
+	} {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte{}, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	ifaces := listAttachedEgressIfacesIn(dir)
+	if len(ifaces) != 1 || ifaces[0] != "eth1" {
+		t.Fatalf("expected only eth1, got %v", ifaces)
+	}
+}
+
 func TestListAttachedIfaces_UnrelatedFilesIgnored(t *testing.T) {
 	dir := t.TempDir()
 	// Unrelated files should be ignored.
