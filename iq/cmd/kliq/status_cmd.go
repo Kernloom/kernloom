@@ -107,9 +107,7 @@ func runStatus(statePath, dbPath string) {
 				nextIn,
 			)
 		} else {
-			if interval := phaseInterval(st.Active.Bootstrap.Phase); interval > 0 {
-				fmt.Fprintf(w, "Last tuned:\tnever  (first cycle in ~%s of traffic)\n", fmtAge(interval))
-			}
+			fmt.Fprintf(w, "Last tuned:\tnever\n")
 		}
 		w.Flush()
 
