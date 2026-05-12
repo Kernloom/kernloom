@@ -1,5 +1,7 @@
 # Kernloom
 
+[![CI](https://github.com/adrianenderlin/kernloom/actions/workflows/ci.yml/badge.svg)](https://github.com/adrianenderlin/kernloom/actions/workflows/ci.yml)
+
 Kernloom is a Linux network security system built on XDP/eBPF. It provides DoS prevention and traffic microsegmentation without touching application code or adding a sidecar proxy.
 
 Two components, one mission:
