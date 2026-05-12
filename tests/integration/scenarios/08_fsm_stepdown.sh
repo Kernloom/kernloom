@@ -15,6 +15,10 @@ source "$SCRIPT_DIR/../lib/traffic.sh"
 
 stop_kliq
 
+# Clear any deny/rate-limit entries left by previous scenarios so the bad
+# source is not already blocked when this scenario starts.
+sudo "$KLT_KLSHIELD" reset 2>/dev/null || true
+
 sudo mkdir -p "$KLT_STATE_DIR" "$KLT_ETC_DIR"
 sudo cp "$KLT_ROOT/tests/integration/testdata/whitelist.txt" "$KLT_ETC_DIR/whitelist.txt"
 sudo cp "$KLT_ROOT/tests/integration/testdata/feedback.json" "$KLT_STATE_DIR/feedback.json"
@@ -51,15 +55,25 @@ sudo "$KLT_KLIQ" \
 echo "$!" > "$KLT_ARTIFACT_DIR/kliq.pid"
 sleep 2
 
-echo "[08] phase 1: generating bad traffic to trigger enforcement"
-bad_http_burst 200
-sleep 6
+echo "[08] phase 1: generating bad traffic for 15s to trigger enforcement"
+sudo ip netns exec "$KLT_NS_BAD" bash -c "
+  while true; do
+    curl -s --max-time 1 http://$KLT_IP_API:$KLT_API_PORT/ >/dev/null 2>&1 || true
+    sleep 0.05
+  done
+" &
+BAD_PID=$!
 
-# Verify enforcement was applied.
+# Give kliq time to escalate (TTL=5s, soft-at=2 → ~3 ticks).
+sleep 8
+
+# Verify enforcement was applied while traffic is still running.
 assert_contains "$STEPDOWN_LOG" "${KLT_IP_BAD}"
 assert_contains "$STEPDOWN_LOG" "ACTION ip=${KLT_IP_BAD}"
 
-echo "[08] phase 2: bad traffic stopped — waiting for recovery (TTL=5s + 2 clean ticks)"
+echo "[08] phase 2: stopping bad traffic — waiting for recovery (TTL=5s + 2 clean ticks)"
+sudo kill "$BAD_PID" 2>/dev/null || true
+wait "$BAD_PID" 2>/dev/null || true
 # TTL=5s + down-need=2 ticks + margin = ~10s
 sleep 12
 
@@ -74,7 +88,7 @@ for _ in $(seq 1 5); do
 done
 
 echo "[08] recovery checks: $RECOVER_OK/5 succeeded"
-cat "$STEPDOWN_LOG" | grep -E "STATE|OBSERVE|stepdown|decay|fsm" | tail -10 || true
+grep -E -- "STATE|OBSERVE|stepdown|decay|fsm" "$STEPDOWN_LOG" | tail -10 || true
 
 # At least 4/5 requests must succeed after recovery.
 [[ "$RECOVER_OK" -ge 4 ]] \

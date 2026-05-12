@@ -36,7 +36,7 @@ sudo "$KLT_KLIQ" \
   --autotune=true \
   --trig-pps=100 \
   --autotune-floor-pps=5 \
-  --autotune-min-samples=5 \
+  --autotune-min-samples=2 \
   --autotune-k=3.5 \
   --autotune-alpha=0.10 \
   --bootstrap-every1=8s \

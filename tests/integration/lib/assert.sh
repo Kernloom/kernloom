@@ -28,7 +28,7 @@ assert_file_not_empty() {
 assert_contains() {
   local file="$1"
   local pattern="$2"
-  grep -qE "$pattern" "$file" || {
+  grep -qE -- "$pattern" "$file" || {
     echo "--- $file ---" >&2
     tail -50 "$file" >&2 || true
     fail "pattern '$pattern' not found in $file"
@@ -38,7 +38,7 @@ assert_contains() {
 assert_not_contains() {
   local file="$1"
   local pattern="$2"
-  if grep -qE "$pattern" "$file" 2>/dev/null; then
+  if grep -qE -- "$pattern" "$file" 2>/dev/null; then
     fail "unexpected pattern '$pattern' found in $file"
   fi
 }

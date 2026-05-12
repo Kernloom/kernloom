@@ -147,7 +147,6 @@ start_kliq_graph() {
     --trig-scan=100 \
     --graph \
     --graph-mode=learn \
-    --graph-node-id=it-node \
     --graph-min-seen=3 \
     --graph-min-windows=1 \
     --graph-min-age=3s \
@@ -173,7 +172,6 @@ start_kliq_frozen() {
     --trig-scan=100 \
     --graph \
     --graph-mode=frozen-observe \
-    --graph-node-id=it-node \
     --graph-freeze-action=signal \
     --graph-freeze-min-severity=0 \
     > "$logfile" 2>&1 &
