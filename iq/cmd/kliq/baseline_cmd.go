@@ -10,6 +10,7 @@ import (
 	"strings"
 	"text/tabwriter"
 
+	"github.com/adrianenderlin/kernloom/pkg/core/baseline"
 	gstore "github.com/adrianenderlin/kernloom/pkg/graphstore/sqlite"
 )
 
@@ -32,10 +33,10 @@ func runBaselineStatus(storePath, nodeID string, showAll bool, sortBy string) {
 	switch strings.ToLower(sortBy) {
 	case "state":
 		sort.Slice(edges, func(i, j int) bool {
-			if edges[i].BLState != edges[j].BLState {
-				return edges[i].BLState < edges[j].BLState // learned < candidate alphabetically reversed
+			if edges[i].Profile.State != edges[j].Profile.State {
+				return edges[i].Profile.State < edges[j].Profile.State // learned < candidate alphabetically reversed
 			}
-			return edges[i].BLObs > edges[j].BLObs
+			return edges[i].Profile.Observations > edges[j].Profile.Observations
 		})
 	case "src":
 		sort.Slice(edges, func(i, j int) bool {
@@ -53,15 +54,15 @@ func runBaselineStatus(storePath, nodeID string, showAll bool, sortBy string) {
 		})
 	case "pps":
 		sort.Slice(edges, func(i, j int) bool {
-			return edges[i].BLPPSMedian > edges[j].BLPPSMedian
+			return edges[i].Profile.PPSMedian > edges[j].Profile.PPSMedian
 		})
 	case "bps":
 		sort.Slice(edges, func(i, j int) bool {
-			return edges[i].BLBytesMedian > edges[j].BLBytesMedian
+			return edges[i].Profile.BytesMedian > edges[j].Profile.BytesMedian
 		})
 	default: // "obs"
 		sort.Slice(edges, func(i, j int) bool {
-			return edges[i].BLObs > edges[j].BLObs
+			return edges[i].Profile.Observations > edges[j].Profile.Observations
 		})
 	}
 
@@ -70,7 +71,7 @@ func runBaselineStatus(storePath, nodeID string, showAll bool, sortBy string) {
 	// State summary.
 	candidateN, learnedN := 0, 0
 	for _, e := range edges {
-		if e.BLState == "learned" {
+		if e.Profile.State == baseline.StateLearned {
 			learnedN++
 		} else {
 			candidateN++
@@ -98,10 +99,10 @@ func runBaselineStatus(storePath, nodeID string, showAll bool, sortBy string) {
 	}
 	for _, e := range shown {
 		fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%d\t%d\t%.1f\t%.1f\t%.0f\t%.0f\t%.0f\t%.0f\n",
-			e.BLState, e.GraphState,
+			e.Profile.State, e.GraphState,
 			e.SourceID, e.DestinationID, e.Protocol, e.DestinationPort,
-			e.BLObs, e.BLPPSMedian, e.BLPPSMad, e.BLPPSPeak,
-			e.BLBytesMedian, e.BLBytesMad, e.BLBPSPeak,
+			e.Profile.Observations, e.Profile.PPSMedian, e.Profile.PPSMad, e.Profile.PPSPeak,
+			e.Profile.BytesMedian, e.Profile.BytesMad, e.Profile.BPSPeak,
 		)
 	}
 	w.Flush()

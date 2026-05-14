@@ -10,6 +10,7 @@ import (
 	"text/tabwriter"
 	"time"
 
+	"github.com/adrianenderlin/kernloom/pkg/core/baseline"
 	"github.com/adrianenderlin/kernloom/pkg/core/featureset"
 	"github.com/adrianenderlin/kernloom/pkg/core/graph"
 	gstore "github.com/adrianenderlin/kernloom/pkg/graphstore/sqlite"
@@ -181,7 +182,7 @@ func runStatus(statePath, dbPath string) {
 	if err == nil && len(bl) > 0 {
 		candidate, learned := 0, 0
 		for _, e := range bl {
-			if e.BLState == "learned" {
+			if e.Profile.State == baseline.StateLearned {
 				learned++
 			} else {
 				candidate++

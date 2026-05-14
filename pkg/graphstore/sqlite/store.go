@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/adrianenderlin/kernloom/pkg/core/baseline"
 	"github.com/adrianenderlin/kernloom/pkg/core/graph"
 	"github.com/adrianenderlin/kernloom/pkg/core/observation"
 	_ "modernc.org/sqlite"
@@ -399,22 +400,28 @@ func (s *Store) UpdateEdgeBaselineDecay(key graph.EdgeKey, pps, bytesPS, alphaSt
 
 	nowUnix := float64(time.Now().UnixNano()) / 1e9
 
-	// Sprint 5: apply half-life decay to peaks before comparing with current value.
-	// Decay formula: decayed = peak * 0.5^(elapsed/halfLife)
-	// This prevents a single historical spike from permanently blocking detection.
+	// Apply half-life decay to peaks before comparing with current value.
+	// The effective half-life is extended for sparse/session-based edges so that
+	// a peak set during one backup or chat session is not flagged by the next
+	// equally-sized session (adaptive peak decay).
 	if peakDecayHalfLife > 0 {
-		halfLifeSec := peakDecayHalfLife.Seconds()
+		effective := adaptivePeakHalfLife(peakDecayHalfLife, obs, firstSeenNano, nowUnix)
+		halfLifeSec := effective.Seconds()
 		if ppsPeak > 0 && ppsPeakTS > 0 {
 			elapsedPPS := nowUnix - ppsPeakTS
 			if elapsedPPS > 0 {
 				ppsPeak *= math.Pow(0.5, elapsedPPS/halfLifeSec)
 			}
+			// Always advance ppsPeakTS to now after applying decay so that the
+			// next call only applies incremental decay (prevents double-decay).
+			ppsPeakTS = nowUnix
 		}
 		if bpsPeak > 0 && bpsPeakTS > 0 {
 			elapsedBPS := nowUnix - bpsPeakTS
 			if elapsedBPS > 0 {
 				bpsPeak *= math.Pow(0.5, elapsedBPS/halfLifeSec)
 			}
+			bpsPeakTS = nowUnix
 		}
 	}
 
@@ -446,13 +453,13 @@ func (s *Store) UpdateEdgeBaselineDecay(key graph.EdgeKey, pps, bytesPS, alphaSt
 	obs++
 
 	newState := blState
-	if blState == "candidate" {
+	if baseline.State(blState) == baseline.StateCandidate {
 		edgeAge := time.Since(time.Unix(0, firstSeenNano))
 		normalPromotion := obs >= minObs
 		timeBasedPromotion := minObsTimeBased > 0 && minAge > 0 &&
 			obs >= minObsTimeBased && edgeAge >= minAge
 		if normalPromotion || timeBasedPromotion {
-			newState = "learned"
+			newState = string(baseline.StateLearned)
 		}
 	}
 
@@ -488,7 +495,7 @@ func (s *Store) EdgeBaselinePeakDeviation(key graph.EdgeKey, pps, bytesPS float6
 	if err := row.Scan(&ppsPeak, &bpsPeak, &blState); err != nil {
 		return 0, 0
 	}
-	if blState != "learned" {
+	if baseline.State(blState) != baseline.StateLearned {
 		return 0, 0 // only check peak for promoted edges
 	}
 	if ppsPeak > 0.001 {
@@ -544,7 +551,7 @@ func (s *Store) EdgeBaselineDeviation(key graph.EdgeKey, pps, bytesPS float64) (
 	if err := row.Scan(&ppsMedian, &ppsMad, &bytesMedian, &bytesMad, &blState); err != nil {
 		return 0, 0
 	}
-	if blState != "learned" {
+	if baseline.State(blState) != baseline.StateLearned {
 		return 0, 0
 	}
 	if ppsMad > 0.001 {
@@ -556,30 +563,51 @@ func (s *Store) EdgeBaselineDeviation(key graph.EdgeKey, pps, bytesPS float64) (
 	return
 }
 
+// adaptivePeakHalfLife extends the configured peak decay half-life for edges
+// that are sparse or session-based (weekly batch jobs, interactive chat sessions,
+// etc.) so that a peak set during one session is not falsely flagged by the next
+// equally-sized session.
+//
+// The adjustment is based on observation density: the fraction of elapsed time
+// during which the edge was actually active. A continuously active edge
+// (density ≈ 1) receives no adjustment. A weekly batch job (density ≈ 0.01)
+// receives up to maxMultiplier× the configured half-life.
+//
+//	density = bl_obs / elapsed_seconds_since_first_seen
+//	burstiness = 1 - density                         (0=continuous, 1=fully sparse)
+//	multiplier = 1 + burstiness × (maxMultiplier - 1)
+//	effectiveHalfLife = configured × multiplier
+//
+// A minimum of minElapsedSec of history and minObsForDensity observations are
+// required before the adjustment kicks in; otherwise the configured value is
+// returned unchanged.
+func adaptivePeakHalfLife(configured time.Duration, obs uint64, firstSeenNano int64, nowUnix float64) time.Duration {
+	const (
+		minElapsedSec    = 3600.0 // 1 h of history required
+		minObsForDensity = 20     // enough observations to estimate density
+		maxMultiplier    = 10.0   // sparse edges get at most 10× the configured half-life
+	)
+	if obs < minObsForDensity {
+		return configured
+	}
+	elapsedSec := nowUnix - float64(firstSeenNano)/1e9
+	if elapsedSec < minElapsedSec {
+		return configured
+	}
+	density := float64(obs) / elapsedSec
+	if density >= 1.0 {
+		return configured
+	}
+	burstiness := 1.0 - density // ∈ (0, 1)
+	multiplier := 1.0 + burstiness*(maxMultiplier-1.0)
+	return time.Duration(float64(configured) * multiplier)
+}
+
 func abs64(x float64) float64 {
 	if x < 0 {
 		return -x
 	}
 	return x
-}
-
-// EdgeBaselineSummary holds the per-edge baseline stats alongside the edge key
-// fields needed for display (source, destination, protocol, port, direction).
-type EdgeBaselineSummary struct {
-	SourceID        string
-	DestinationID   string
-	Protocol        string
-	DestinationPort uint16
-	Direction       string
-	GraphState      string
-	BLState         string
-	BLObs           uint64
-	BLPPSMedian     float64
-	BLPPSMad        float64
-	BLBytesMedian   float64
-	BLBytesMad      float64
-	BLPPSPeak       float64
-	BLBPSPeak       float64
 }
 
 // ResetEdgeBaselines zeros the bl_* columns for all edges belonging to nodeID.
@@ -600,7 +628,7 @@ func (s *Store) ResetEdgeBaselines(nodeID string) (int, error) {
 
 // ListEdgeBaselines returns all edges for nodeID that have at least one
 // baseline observation, ordered by bl_state (learned first) then by obs count.
-func (s *Store) ListEdgeBaselines(nodeID string) ([]EdgeBaselineSummary, error) {
+func (s *Store) ListEdgeBaselines(nodeID string) ([]baseline.Summary, error) {
 	rows, err := s.db.Query(`
 		SELECT source_id, destination_id, protocol, destination_port, direction,
 		       state, bl_state, bl_obs,
@@ -616,17 +644,19 @@ func (s *Store) ListEdgeBaselines(nodeID string) ([]EdgeBaselineSummary, error) 
 		return nil, err
 	}
 	defer rows.Close()
-	var out []EdgeBaselineSummary
+	var out []baseline.Summary
 	for rows.Next() {
-		var e EdgeBaselineSummary
+		var e baseline.Summary
+		var blState string
 		if err := rows.Scan(
 			&e.SourceID, &e.DestinationID, &e.Protocol, &e.DestinationPort, &e.Direction,
-			&e.GraphState, &e.BLState, &e.BLObs,
-			&e.BLPPSMedian, &e.BLPPSMad, &e.BLBytesMedian, &e.BLBytesMad,
-			&e.BLPPSPeak, &e.BLBPSPeak,
+			&e.GraphState, &blState, &e.Profile.Observations,
+			&e.Profile.PPSMedian, &e.Profile.PPSMad, &e.Profile.BytesMedian, &e.Profile.BytesMad,
+			&e.Profile.PPSPeak, &e.Profile.BPSPeak,
 		); err != nil {
 			return nil, err
 		}
+		e.Profile.State = baseline.State(blState)
 		out = append(out, e)
 	}
 	return out, rows.Err()
