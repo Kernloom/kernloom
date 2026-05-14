@@ -289,15 +289,24 @@ func (a *Adapter) handleSignal(sig signal.Signal) {
 		return
 	}
 
-	// For sources with established learned/approved/frozen edges, PPS- and
-	// BPS-based global trigger signals should not block edge baseline learning.
-	// The edge baseline (peak model + EWMA) is the relevant detector for known
-	// sources. SYN, scan and RL signals still apply — these indicate threats
-	// even for known sources.
+	// For sources with established learned/approved/frozen edges, signals that
+	// originate from the edge baseline itself must not block baseline updates —
+	// doing so creates a deadlock: the signal prevents the update that would
+	// resolve the signal.
+	//
+	// Global heuristic signals (PPS/BPS) are also suppressed for known sources
+	// because the per-edge model is the right detector there.
+	//
+	// SYN, scan and RL signals still apply — they indicate threats regardless
+	// of whether we have a learned edge for the source.
 	if a.sourceIsKnown(sig.Subject.ID) {
 		switch sig.Type {
-		case signal.SignalPPSHigh, signal.SignalBPSHigh:
-			return // edge baseline handles known sources
+		case signal.SignalPPSHigh, signal.SignalBPSHigh,
+			signal.SignalGraphEdgeBaselinePPSDeviation,
+			signal.SignalGraphEdgeBaselineBytesDeviation,
+			signal.SignalGraphEdgeBaselinePPSPeakExceeded,
+			signal.SignalGraphEdgeBaselineBPSPeakExceeded:
+			return
 		}
 	}
 	ttl := sig.TTL
