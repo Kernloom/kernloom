@@ -394,8 +394,19 @@ func main() {
 				if !ok {
 					return
 				}
-				kliqLog.Printf("SIGNAL type=%s subject=%s score=%d confidence=%d ttl=%s reasons=%v",
+				logLine := fmt.Sprintf("SIGNAL type=%s subject=%s score=%d confidence=%d ttl=%s reasons=%v",
 					sig.Type, sig.Subject.ID, sig.Score, sig.Confidence, sig.TTL, sig.ReasonCodes)
+				if len(sig.Attributes) > 0 {
+					keys := make([]string, 0, len(sig.Attributes))
+					for k := range sig.Attributes {
+						keys = append(keys, k)
+					}
+					sort.Strings(keys)
+					for _, k := range keys {
+						logLine += fmt.Sprintf(" %s=%s", k, sig.Attributes[k])
+					}
+				}
+				kliqLog.Print(logLine)
 
 				if _, _, err := decisionEng.EvaluateSignal(sigCtx, sig); err != nil {
 					kliqLog.Printf("SIGNAL decision error: %v", err)
