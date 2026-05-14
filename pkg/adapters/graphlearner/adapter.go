@@ -165,6 +165,11 @@ type pendingBaselineUpdate struct {
 
 // Adapter is the graph learner adapter.
 type Adapter struct {
+	// cfgMu guards mutable fields on cfg that may change at runtime.
+	// Only BaselineTrigPPS and BaselineTrigBPS are mutated post-Start (autotune
+	// updates the host-level trigger thresholds). All other cfg fields are
+	// effectively immutable after Start and are read without the lock.
+	cfgMu        sync.RWMutex
 	cfg          Config
 	store        Store
 	excludeCIDRs []net.IPNet
@@ -185,10 +190,26 @@ type Adapter struct {
 	pendingUpdates []pendingBaselineUpdate
 }
 
+// UpdateTriggers updates the host-level trigger thresholds used for the
+// anti-poisoning cap. Call this whenever autotune produces new trigger values
+// so baseline updates respect the current learned host limits.
+func (a *Adapter) UpdateTriggers(trigPPS, trigBPS float64) {
+	a.cfgMu.Lock()
+	a.cfg.BaselineTrigPPS = trigPPS
+	a.cfg.BaselineTrigBPS = trigBPS
+	a.cfgMu.Unlock()
+}
+
 // CommitDelay is how long a baseline update is held in the pending buffer before
 // being committed. Long enough for a signal to fire and mark the source suspicious,
 // but short enough not to lag the learning curve significantly.
 const CommitDelay = 30 * time.Second
+
+// maxPendingBaselines bounds the pending baseline update buffer so a slow DB
+// commit cannot let the slice grow without limit under high edge cardinality.
+// Once full, new updates are dropped (anti-DoS); they will be re-observed on
+// the next tick and queued again.
+const maxPendingBaselines = 10000
 
 // New creates a new graph learner adapter.
 func New(cfg Config, store Store) *Adapter {
@@ -226,8 +247,9 @@ func (a *Adapter) Start(ctx context.Context, bus adapterruntime.EventBus) error 
 	a.wg.Add(1)
 	go a.observationLoop(ctx, bus)
 
+	sigCh := bus.SubscribeSignals(64)
 	a.wg.Add(1)
-	go a.signalLoop(ctx, bus)
+	go a.signalLoop(ctx, sigCh)
 
 	if a.cfg.PromoteInterval > 0 {
 		a.wg.Add(1)
@@ -253,13 +275,13 @@ func (a *Adapter) Stop(_ context.Context) error {
 // signalLoop watches for heuristic signals and marks sources as suspicious.
 // Observations from suspicious sources are skipped by handleObservation so that
 // traffic seen during an attack is not learned as normal baseline behaviour.
-func (a *Adapter) signalLoop(ctx context.Context, bus adapterruntime.EventBus) {
+func (a *Adapter) signalLoop(ctx context.Context, signals <-chan signal.Signal) {
 	defer a.wg.Done()
 	for {
 		select {
 		case <-ctx.Done():
 			return
-		case sig, ok := <-bus.Signals():
+		case sig, ok := <-signals:
 			if !ok {
 				return
 			}
@@ -492,10 +514,14 @@ func (a *Adapter) handleObservation(ctx context.Context, bus adapterruntime.Even
 	bps := obs.Metrics["bps"]
 
 	baselineClean := true
-	if a.cfg.BaselineTrigPPS > 0 && pps > a.cfg.BaselineTrigPPS {
+	a.cfgMu.RLock()
+	trigPPS := a.cfg.BaselineTrigPPS
+	trigBPS := a.cfg.BaselineTrigBPS
+	a.cfgMu.RUnlock()
+	if trigPPS > 0 && pps > trigPPS {
 		baselineClean = false
 	}
-	if a.cfg.BaselineTrigBPS > 0 && bps > a.cfg.BaselineTrigBPS {
+	if trigBPS > 0 && bps > trigBPS {
 		baselineClean = false
 	}
 	// Skip very-low-traffic ticks (keepalives, noise) that would drag the
@@ -525,13 +551,15 @@ func (a *Adapter) handleObservation(ctx context.Context, bus adapterruntime.Even
 		// the baseline before the signal fires.
 		now := time.Now()
 		a.pendingMu.Lock()
-		a.pendingUpdates = append(a.pendingUpdates, pendingBaselineUpdate{
-			Key:        current.Key(),
-			PPS:        pps,
-			BPS:        bps,
-			ObservedAt: now,
-			CommitAt:   now.Add(CommitDelay),
-		})
+		if len(a.pendingUpdates) < maxPendingBaselines {
+			a.pendingUpdates = append(a.pendingUpdates, pendingBaselineUpdate{
+				Key:        current.Key(),
+				PPS:        pps,
+				BPS:        bps,
+				ObservedAt: now,
+				CommitAt:   now.Add(CommitDelay),
+			})
+		}
 		a.pendingMu.Unlock()
 	}
 
@@ -678,7 +706,10 @@ func (a *Adapter) maintenanceLoop(ctx context.Context) {
 func (a *Adapter) commitPendingBaselines() {
 	now := time.Now()
 	a.pendingMu.Lock()
-	remaining := a.pendingUpdates[:0]
+	// Use a fresh backing array for `remaining` to avoid aliasing
+	// `a.pendingUpdates`: appending into a sliced-down version of the same
+	// backing array can overwrite entries we still need to read in the loop.
+	remaining := make([]pendingBaselineUpdate, 0, len(a.pendingUpdates))
 	ready := make([]pendingBaselineUpdate, 0, len(a.pendingUpdates))
 	for _, u := range a.pendingUpdates {
 		if now.Before(u.CommitAt) {

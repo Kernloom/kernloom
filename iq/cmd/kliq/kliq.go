@@ -383,14 +383,17 @@ func main() {
 	graphStrikeCh := make(chan graphStrikeMsg, 512)
 
 	// Signal consumer: logs signals, injects graph strikes into FSM state.
+	// Use a dedicated subscriber channel — the bus fans signals out to every
+	// subscriber, so both this loop and the graphlearner see every signal.
 	sigCtx, sigCancel := context.WithCancel(context.Background())
 	defer sigCancel()
+	kliqSigCh := mainBus.SubscribeSignals(256)
 	go func() {
 		for {
 			select {
 			case <-sigCtx.Done():
 				return
-			case sig, ok := <-mainBus.Signals():
+			case sig, ok := <-kliqSigCh:
 				if !ok {
 					return
 				}
@@ -459,6 +462,7 @@ func main() {
 	// Graph learner (optional).
 	var graphStore *gstore.Store
 	var graphCtxCancel context.CancelFunc
+	var learner *graphlearner.Adapter
 
 	if c.GraphEnabled {
 		gs, err := gstore.Open(c.GraphStorePath)
@@ -500,7 +504,7 @@ func main() {
 			kliqLog.Printf("Graph: excluding source CIDRs from learning: %s", c.GraphExcludeSourceCIDR)
 		}
 
-		learner := graphlearner.New(graphlearner.Config{
+		learner = graphlearner.New(graphlearner.Config{
 			NodeID: nodeID,
 			Mode:   mode,
 			Promotion: graph.PromotionConfig{
@@ -629,12 +633,19 @@ func main() {
 	ticker := time.NewTicker(c.Interval)
 	defer ticker.Stop()
 	var tickN uint64
+	lastExpiredCleanup := time.Now()
 
 	// SIGUSR1: de-escalate all enforced IPs to OBSERVE so kliq state stays in
 	// sync after an external map reset (e.g. klshield reset).
 	resetCh := make(chan os.Signal, 1)
 	ossignal.Notify(resetCh, syscall.SIGUSR1)
 	defer ossignal.Stop(resetCh)
+
+	// SIGTERM/SIGINT: terminate the main loop cleanly so deferred cleanups run
+	// (graph store close, telemetry/learner Stop, pending baseline commits).
+	stopCh := make(chan os.Signal, 1)
+	ossignal.Notify(stopCh, syscall.SIGTERM, syscall.SIGINT)
+	defer ossignal.Stop(stopCh)
 
 	bootstrapPhase := "steady"
 	if bs.Enabled && bs.Phase != "" {
@@ -643,7 +654,13 @@ func main() {
 	kliqLog.Printf("Kernloom IQ started profile=%s bootstrap=%s interval=%s dry_run=%v top=%d trig{pps=%.1f bps=%s syn=%.1f scan=%.1f} weights{pps=%.2f bps=%.2f syn=%.2f scan=%.2f} cap=%.1f (ipv6=%v)",
 		p.Name, bootstrapPhase, c.Interval.String(), c.DryRun, c.TopN, c.TrigPPS, fmtBPS(c.TrigBPS), c.TrigSyn, c.TrigScan, c.WPPS, c.WBps, c.WSyn, c.WScan, c.SevCap, maps.Src6 != nil)
 
-	for range ticker.C {
+	for {
+		select {
+		case <-stopCh:
+			kliqLog.Println("shutting down")
+			return
+		case <-ticker.C:
+		}
 		nowWall := time.Now()
 
 		// Handle SIGUSR1: clear FSM state to sync with an external map reset.
@@ -722,6 +739,15 @@ func main() {
 				if sec <= 0 {
 					sec = 1
 				}
+			}
+
+			// Counter-reset guard: if any of the eBPF counters appears to have
+			// shrunk (e.g. after `klshield reset`), reseed prev and skip the tick.
+			// Without this, uint64 wraparound produces deltas ≈ 2^64 → instant BLOCK.
+			if v4.Pkts < pv.Pkts || v4.Bytes < pv.Bytes || v4.Syn < pv.Syn ||
+				v4.DportChanges < pv.Scan || v4.DropRL < pv.DropRL {
+				prev4[k4] = prevV4{Pkts: v4.Pkts, Bytes: v4.Bytes, Syn: v4.Syn, Scan: v4.DportChanges, DropRL: v4.DropRL, LastWall: nowWall}
+				continue
 			}
 
 			dPkts := v4.Pkts - pv.Pkts
@@ -806,6 +832,13 @@ func main() {
 					}
 				}
 
+				// Counter-reset guard (see IPv4 path above).
+				if v6.Pkts < pv.Pkts || v6.Bytes < pv.Bytes || v6.Syn < pv.Syn ||
+					v6.DportChanges < pv.Scan || v6.DropRL < pv.DropRL {
+					prev6[ip6] = prevV6{Pkts: v6.Pkts, Bytes: v6.Bytes, Syn: v6.Syn, Scan: v6.DportChanges, DropRL: v6.DropRL, LastWall: nowWall}
+					continue
+				}
+
 				dPkts := v6.Pkts - pv.Pkts
 				dBytes := v6.Bytes - pv.Bytes
 				dSyn := v6.Syn - pv.Syn
@@ -884,7 +917,9 @@ func main() {
 				if gs.isV6 {
 					st := state6[gs.ip6]
 					if gs.forceBlock {
-						st.Strikes = c.BlockAt + 1
+						if needed := c.BlockAt + 1; st.Strikes < needed {
+							st.Strikes = needed
+						}
 						st.ForceBlock = true
 					} else {
 						st.Strikes += gs.n
@@ -912,7 +947,9 @@ func main() {
 				} else {
 					st := state4[gs.ip4]
 					if gs.forceBlock {
-						st.Strikes = c.BlockAt + 1
+						if needed := c.BlockAt + 1; st.Strikes < needed {
+							st.Strikes = needed
+						}
 						st.ForceBlock = true
 					} else {
 						st.Strikes += gs.n
@@ -971,8 +1008,14 @@ func main() {
 			cleanLearnTicks++
 			// Increment observed_seconds: only real, clean runtime counts toward
 			// the bootstrap window. Offline time between restarts does not count.
+			// Accumulate real elapsed seconds per tick rather than ticks themselves,
+			// so non-1s intervals (e.g. 500ms, 2s) still measure wall time correctly.
 			if c.Bootstrap && bs.Enabled {
-				bs.ObservedSeconds++
+				sec := uint64(math.Round(c.Interval.Seconds()))
+				if sec == 0 {
+					sec = 1
+				}
+				bs.ObservedSeconds += sec
 			}
 		}
 
@@ -1057,6 +1100,17 @@ func main() {
 		// are picked up without a restart.
 		if features.TupleEnforcement && tickN%300 == 1 {
 			syncEdge4Allow()
+		}
+		// DB housekeeping: every 24 h delete edges that have been in 'expired'
+		// state long enough so the SQLite file does not grow without bound.
+		if graphStore != nil && nowWall.Sub(lastExpiredCleanup) >= 24*time.Hour {
+			cutoff := nowWall.Add(-c.GraphExpireTTL)
+			if n, err := graphStore.DeleteExpired(nodeID, cutoff); err != nil {
+				kliqLog.Printf("delete expired edges: %v", err)
+			} else if n > 0 {
+				kliqLog.Printf("deleted %d expired edges older than %s", n, c.GraphExpireTTL)
+			}
+			lastExpiredCleanup = nowWall
 		}
 		// Bootstrap checkpoint every 30s: persist observed_seconds so a restart
 		// can resume from where it left off (max ~30s of progress lost on crash).
@@ -1214,6 +1268,14 @@ func main() {
 				WPPS: c.WPPS, WSyn: c.WSyn, WScan: c.WScan, WBps: c.WBps,
 				SevCap: c.SevCap,
 			})
+
+			// Keep the graph learner's anti-poisoning cap in sync with the
+			// just-learned host triggers. Without this it stays on the cold-start
+			// bootstrap values and either over-rejects (cap too low) or fails to
+			// reject attack-level traffic (cap too high) once autotune diverges.
+			if learner != nil {
+				learner.UpdateTriggers(c.TrigPPS, c.TrigBPS)
+			}
 
 			kliqLog.Printf("AUTOTUNE applied: trig_pps %.1f->%.1f trig_syn %.1f->%.1f trig_scan %.1f->%.1f trig_bps %.0f->%.0f (median+MAD k=%.2f) samples=%d cleanRatio=%.4f clean=%v dropRatio=%.4f phase=%s",
 				oldPPS, c.TrigPPS, oldSyn, c.TrigSyn, oldScan, c.TrigScan, oldBPS, c.TrigBPS, pol.K, n, cleanRatio, clean, dropRatio, pol.Phase)

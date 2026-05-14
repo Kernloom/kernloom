@@ -7,6 +7,7 @@ package sqlite
 import (
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"math"
 	"strings"
@@ -108,7 +109,28 @@ func Open(path string) (*Store, error) {
 			}
 		}
 	}
+	// Enable WAL mode for better concurrent read performance.
+	// In-memory databases ignore journal_mode but accept the PRAGMA without error.
+	if _, err := db.Exec(`PRAGMA journal_mode=WAL`); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("enable WAL: %w", err)
+	}
 	return &Store{db: db}, nil
+}
+
+// DeleteExpired removes edges in state 'expired' that have not been seen since
+// cutoff. Should be called periodically to bound DB growth.
+func (s *Store) DeleteExpired(nodeID string, cutoff time.Time) (int, error) {
+	res, err := s.db.Exec(`
+		DELETE FROM graph_edges
+		WHERE node_id=? AND state=? AND last_seen_at < ?`,
+		nodeID, string(graph.EdgeExpired), cutoff.UnixNano(),
+	)
+	if err != nil {
+		return 0, err
+	}
+	n, _ := res.RowsAffected()
+	return int(n), nil
 }
 
 // Close closes the underlying database connection.
@@ -395,7 +417,10 @@ func (s *Store) UpdateEdgeBaselineDecay(key graph.EdgeKey, pps, bytesPS, alphaSt
 	if err := row.Scan(&ppsMedian, &ppsMad, &bytesMedian, &bytesMad,
 		&ppsPeak, &bpsPeak, &ppsPeakTS, &bpsPeakTS,
 		&obs, &blState, &edgeID, &firstSeenNano); err != nil {
-		return nil // edge not found yet — skip
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil // edge not found yet — skip
+		}
+		return fmt.Errorf("scan baseline row: %w", err)
 	}
 
 	nowUnix := float64(time.Now().UnixNano()) / 1e9

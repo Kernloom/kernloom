@@ -112,10 +112,11 @@ func TestAdapter_FrozenObserve_EmitsSignal(t *testing.T) {
 	defer a.Stop(context.Background())
 
 	obs := flowObs("203.0.113.55", "10.0.0.2", 443)
+	sigCh := bus.SubscribeSignals(64)
 	_ = bus.PublishObservation(ctx, obs)
 
 	select {
-	case sig := <-bus.Signals():
+	case sig := <-sigCh:
 		if sig.Type != "graph.new_edge_after_freeze" {
 			t.Errorf("unexpected signal type: %s", sig.Type)
 		}
