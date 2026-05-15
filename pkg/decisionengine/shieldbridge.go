@@ -8,10 +8,10 @@ import (
 	"fmt"
 	"net"
 
+	"github.com/cilium/ebpf"
 	"github.com/kernloom/kernloom/pkg/adapters/shieldpep"
 	"github.com/kernloom/kernloom/pkg/core/decision"
 	"github.com/kernloom/kernloom/pkg/shieldclient"
-	"github.com/cilium/ebpf"
 )
 
 // ShieldBridge implements PEPAdapter backed by the Shield eBPF PEP.

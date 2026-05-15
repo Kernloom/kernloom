@@ -15,11 +15,11 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/cilium/ebpf"
 	"github.com/kernloom/kernloom/pkg/adapterruntime"
 	"github.com/kernloom/kernloom/pkg/core/capability"
 	"github.com/kernloom/kernloom/pkg/core/fsm"
 	"github.com/kernloom/kernloom/pkg/shieldclient"
-	"github.com/cilium/ebpf"
 )
 
 var logger = log.New(os.Stderr, "[shield-pep] ", log.LstdFlags)
