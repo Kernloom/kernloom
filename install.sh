@@ -4,12 +4,12 @@ set -eu
 # Kernloom installer
 #
 # Examples:
-#   curl -fsSL https://raw.githubusercontent.com/adrianenderlin/kernloom/main/install.sh | sudo sh
-#   curl -fsSL https://raw.githubusercontent.com/adrianenderlin/kernloom/main/install.sh | sudo sh -s -- klshield
-#   curl -fsSL https://raw.githubusercontent.com/adrianenderlin/kernloom/main/install.sh | sudo KERNLOOM_VERSION=v0.0.1 sh
-#   curl -fsSL https://raw.githubusercontent.com/adrianenderlin/kernloom/main/install.sh | sh -s -- --prefix "$HOME/.local/bin"
+#   curl -fsSL https://raw.githubusercontent.com/Kernloom/kernloom/main/install.sh | sudo sh
+#   curl -fsSL https://raw.githubusercontent.com/Kernloom/kernloom/main/install.sh | sudo sh -s -- klshield
+#   curl -fsSL https://raw.githubusercontent.com/Kernloom/kernloom/main/install.sh | sudo KERNLOOM_VERSION=v0.0.1 sh
+#   curl -fsSL https://raw.githubusercontent.com/Kernloom/kernloom/main/install.sh | sh -s -- --prefix "$HOME/.local/bin"
 
-REPO="adrianenderlin/kernloom"
+REPO="Kernloom/kernloom"
 COMPONENT="all"            # all | kliq | klshield
 KERNLOOM_VERSION="${KERNLOOM_VERSION:-latest}"
 PREFIX="${PREFIX:-}"
