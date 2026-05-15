@@ -7,9 +7,9 @@ import (
 	"context"
 	"sync"
 
-	"github.com/adrianenderlin/kernloom/pkg/core/decision"
-	"github.com/adrianenderlin/kernloom/pkg/core/observation"
-	"github.com/adrianenderlin/kernloom/pkg/core/signal"
+	"github.com/kernloom/kernloom/pkg/core/decision"
+	"github.com/kernloom/kernloom/pkg/core/observation"
+	"github.com/kernloom/kernloom/pkg/core/signal"
 )
 
 // EventBus is the internal message bus connecting adapters to the KLIQ pipeline.

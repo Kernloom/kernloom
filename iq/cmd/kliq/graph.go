@@ -12,8 +12,8 @@ import (
 	"text/tabwriter"
 	"time"
 
-	"github.com/adrianenderlin/kernloom/pkg/core/graph"
-	gstore "github.com/adrianenderlin/kernloom/pkg/graphstore/sqlite"
+	"github.com/kernloom/kernloom/pkg/core/graph"
+	gstore "github.com/kernloom/kernloom/pkg/graphstore/sqlite"
 	"gopkg.in/yaml.v3"
 )
 

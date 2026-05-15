@@ -8,7 +8,7 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/adrianenderlin/kernloom/pkg/core/observation"
+	"github.com/kernloom/kernloom/pkg/core/observation"
 )
 
 // Decider describes which component made the decision.

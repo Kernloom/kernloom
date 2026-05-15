@@ -6,8 +6,8 @@ package main
 import (
 	"time"
 
-	"github.com/adrianenderlin/kernloom/pkg/adapters/shieldpep"
-	"github.com/adrianenderlin/kernloom/pkg/core/fsm"
+	"github.com/kernloom/kernloom/pkg/adapters/shieldpep"
+	"github.com/kernloom/kernloom/pkg/core/fsm"
 )
 
 /* ---------------- Per-candidate FSM logic ---------------- */

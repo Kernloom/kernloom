@@ -8,7 +8,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/adrianenderlin/kernloom/pkg/core/policy"
+	"github.com/kernloom/kernloom/pkg/core/policy"
 )
 
 func writeYAML(t *testing.T, content string) string {

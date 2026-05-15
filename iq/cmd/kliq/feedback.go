@@ -11,8 +11,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/adrianenderlin/kernloom/pkg/core/fsm"
-	"github.com/adrianenderlin/kernloom/pkg/shieldclient"
+	"github.com/kernloom/kernloom/pkg/core/fsm"
+	"github.com/kernloom/kernloom/pkg/shieldclient"
 	"github.com/cilium/ebpf"
 )
 

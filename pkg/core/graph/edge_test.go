@@ -7,8 +7,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/adrianenderlin/kernloom/pkg/core/graph"
-	"github.com/adrianenderlin/kernloom/pkg/core/observation"
+	"github.com/kernloom/kernloom/pkg/core/graph"
+	"github.com/kernloom/kernloom/pkg/core/observation"
 )
 
 func srcRef(id string) observation.EntityRef {

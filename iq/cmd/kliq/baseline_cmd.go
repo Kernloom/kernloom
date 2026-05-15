@@ -10,8 +10,8 @@ import (
 	"strings"
 	"text/tabwriter"
 
-	"github.com/adrianenderlin/kernloom/pkg/core/baseline"
-	gstore "github.com/adrianenderlin/kernloom/pkg/graphstore/sqlite"
+	"github.com/kernloom/kernloom/pkg/core/baseline"
+	gstore "github.com/kernloom/kernloom/pkg/graphstore/sqlite"
 )
 
 // runBaselineStatus prints per-edge baseline stats (stored in graph_edges.bl_*).

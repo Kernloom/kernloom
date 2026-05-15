@@ -7,7 +7,7 @@ import (
 	"fmt"
 	"sync"
 
-	"github.com/adrianenderlin/kernloom/pkg/core/capability"
+	"github.com/kernloom/kernloom/pkg/core/capability"
 )
 
 // Registry tracks which capabilities are available at runtime.

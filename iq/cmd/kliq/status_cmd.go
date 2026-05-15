@@ -10,10 +10,10 @@ import (
 	"text/tabwriter"
 	"time"
 
-	"github.com/adrianenderlin/kernloom/pkg/core/baseline"
-	"github.com/adrianenderlin/kernloom/pkg/core/featureset"
-	"github.com/adrianenderlin/kernloom/pkg/core/graph"
-	gstore "github.com/adrianenderlin/kernloom/pkg/graphstore/sqlite"
+	"github.com/kernloom/kernloom/pkg/core/baseline"
+	"github.com/kernloom/kernloom/pkg/core/featureset"
+	"github.com/kernloom/kernloom/pkg/core/graph"
+	gstore "github.com/kernloom/kernloom/pkg/graphstore/sqlite"
 )
 
 // handleStatusSubcommand handles "kliq status" and "kliq runtime status"

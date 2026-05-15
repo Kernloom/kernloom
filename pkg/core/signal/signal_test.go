@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/adrianenderlin/kernloom/pkg/core/observation"
+	"github.com/kernloom/kernloom/pkg/core/observation"
 )
 
 func TestNewSignal(t *testing.T) {

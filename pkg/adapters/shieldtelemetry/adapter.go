@@ -17,10 +17,10 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/adrianenderlin/kernloom/pkg/adapterruntime"
-	"github.com/adrianenderlin/kernloom/pkg/core/capability"
-	"github.com/adrianenderlin/kernloom/pkg/core/observation"
-	"github.com/adrianenderlin/kernloom/pkg/shieldclient"
+	"github.com/kernloom/kernloom/pkg/adapterruntime"
+	"github.com/kernloom/kernloom/pkg/core/capability"
+	"github.com/kernloom/kernloom/pkg/core/observation"
+	"github.com/kernloom/kernloom/pkg/shieldclient"
 )
 
 var logger = log.New(os.Stderr, "[shield-telemetry] ", log.LstdFlags)

@@ -21,12 +21,12 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/adrianenderlin/kernloom/pkg/adapterruntime"
-	"github.com/adrianenderlin/kernloom/pkg/core/capability"
-	"github.com/adrianenderlin/kernloom/pkg/core/graph"
-	"github.com/adrianenderlin/kernloom/pkg/core/observation"
-	"github.com/adrianenderlin/kernloom/pkg/core/signal"
-	"github.com/adrianenderlin/kernloom/pkg/core/suspicious"
+	"github.com/kernloom/kernloom/pkg/adapterruntime"
+	"github.com/kernloom/kernloom/pkg/core/capability"
+	"github.com/kernloom/kernloom/pkg/core/graph"
+	"github.com/kernloom/kernloom/pkg/core/observation"
+	"github.com/kernloom/kernloom/pkg/core/signal"
+	"github.com/kernloom/kernloom/pkg/core/suspicious"
 )
 
 var logger = log.New(os.Stderr, "[graph-learner] ", log.LstdFlags)

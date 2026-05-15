@@ -10,8 +10,8 @@ import (
 	"os"
 	"time"
 
-	"github.com/adrianenderlin/kernloom/pkg/adapters/shieldpep"
-	"github.com/adrianenderlin/kernloom/pkg/core/fsm"
+	"github.com/kernloom/kernloom/pkg/adapters/shieldpep"
+	"github.com/kernloom/kernloom/pkg/core/fsm"
 )
 
 /* ---------------- CLI configuration ---------------- */

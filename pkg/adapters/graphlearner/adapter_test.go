@@ -9,12 +9,12 @@ import (
 	"testing"
 	"time"
 
-	"github.com/adrianenderlin/kernloom/pkg/adapterruntime"
-	"github.com/adrianenderlin/kernloom/pkg/adapters/graphlearner"
-	"github.com/adrianenderlin/kernloom/pkg/core/graph"
-	"github.com/adrianenderlin/kernloom/pkg/core/observation"
-	"github.com/adrianenderlin/kernloom/pkg/core/signal"
-	gstore "github.com/adrianenderlin/kernloom/pkg/graphstore/sqlite"
+	"github.com/kernloom/kernloom/pkg/adapterruntime"
+	"github.com/kernloom/kernloom/pkg/adapters/graphlearner"
+	"github.com/kernloom/kernloom/pkg/core/graph"
+	"github.com/kernloom/kernloom/pkg/core/observation"
+	"github.com/kernloom/kernloom/pkg/core/signal"
+	gstore "github.com/kernloom/kernloom/pkg/graphstore/sqlite"
 )
 
 func newBus() *adapterruntime.Bus { return adapterruntime.NewBus(64) }

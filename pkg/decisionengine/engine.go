@@ -13,11 +13,11 @@ import (
 	"sync"
 	"time"
 
-	"github.com/adrianenderlin/kernloom/pkg/core/decision"
-	"github.com/adrianenderlin/kernloom/pkg/core/fsm"
-	"github.com/adrianenderlin/kernloom/pkg/core/observation"
-	"github.com/adrianenderlin/kernloom/pkg/core/reason"
-	"github.com/adrianenderlin/kernloom/pkg/core/signal"
+	"github.com/kernloom/kernloom/pkg/core/decision"
+	"github.com/kernloom/kernloom/pkg/core/fsm"
+	"github.com/kernloom/kernloom/pkg/core/observation"
+	"github.com/kernloom/kernloom/pkg/core/reason"
+	"github.com/kernloom/kernloom/pkg/core/signal"
 )
 
 var logger = log.New(os.Stderr, "[decision-engine] ", log.LstdFlags)

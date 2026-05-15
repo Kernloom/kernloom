@@ -15,10 +15,10 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/adrianenderlin/kernloom/pkg/adapterruntime"
-	"github.com/adrianenderlin/kernloom/pkg/core/capability"
-	"github.com/adrianenderlin/kernloom/pkg/core/fsm"
-	"github.com/adrianenderlin/kernloom/pkg/shieldclient"
+	"github.com/kernloom/kernloom/pkg/adapterruntime"
+	"github.com/kernloom/kernloom/pkg/core/capability"
+	"github.com/kernloom/kernloom/pkg/core/fsm"
+	"github.com/kernloom/kernloom/pkg/shieldclient"
 	"github.com/cilium/ebpf"
 )
 

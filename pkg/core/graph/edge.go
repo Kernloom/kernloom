@@ -10,7 +10,7 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/adrianenderlin/kernloom/pkg/core/observation"
+	"github.com/kernloom/kernloom/pkg/core/observation"
 )
 
 // EdgeState represents the lifecycle state of a graph edge.

@@ -3,7 +3,7 @@
 
 package adapterruntime
 
-import "github.com/adrianenderlin/kernloom/pkg/core/capability"
+import "github.com/kernloom/kernloom/pkg/core/capability"
 
 // Well-known capability IDs used across adapters, policy packs, and Forge.
 // Adapters reference these constants when registering; policy packs use the

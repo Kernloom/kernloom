@@ -4,9 +4,9 @@
 package main
 
 import (
-	"github.com/adrianenderlin/kernloom/pkg/adapters/shieldpep"
-	"github.com/adrianenderlin/kernloom/pkg/core/pdp"
-	"github.com/adrianenderlin/kernloom/pkg/core/policy"
+	"github.com/kernloom/kernloom/pkg/adapters/shieldpep"
+	"github.com/kernloom/kernloom/pkg/core/pdp"
+	"github.com/kernloom/kernloom/pkg/core/policy"
 )
 
 // pdpConfigToProfile converts a PDPConfig into the internal profile struct.

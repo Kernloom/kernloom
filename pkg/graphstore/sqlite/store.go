@@ -13,9 +13,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/adrianenderlin/kernloom/pkg/core/baseline"
-	"github.com/adrianenderlin/kernloom/pkg/core/graph"
-	"github.com/adrianenderlin/kernloom/pkg/core/observation"
+	"github.com/kernloom/kernloom/pkg/core/baseline"
+	"github.com/kernloom/kernloom/pkg/core/graph"
+	"github.com/kernloom/kernloom/pkg/core/observation"
 	_ "modernc.org/sqlite"
 )
 

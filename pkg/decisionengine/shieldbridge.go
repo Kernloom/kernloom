@@ -8,9 +8,9 @@ import (
 	"fmt"
 	"net"
 
-	"github.com/adrianenderlin/kernloom/pkg/adapters/shieldpep"
-	"github.com/adrianenderlin/kernloom/pkg/core/decision"
-	"github.com/adrianenderlin/kernloom/pkg/shieldclient"
+	"github.com/kernloom/kernloom/pkg/adapters/shieldpep"
+	"github.com/kernloom/kernloom/pkg/core/decision"
+	"github.com/kernloom/kernloom/pkg/shieldclient"
 	"github.com/cilium/ebpf"
 )
 

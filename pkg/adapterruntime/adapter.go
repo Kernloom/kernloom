@@ -9,7 +9,7 @@ package adapterruntime
 import (
 	"context"
 
-	"github.com/adrianenderlin/kernloom/pkg/core/capability"
+	"github.com/kernloom/kernloom/pkg/core/capability"
 )
 
 // AdapterKind classifies the role of an adapter.

@@ -6,7 +6,7 @@ package adapterruntime
 import (
 	"testing"
 
-	"github.com/adrianenderlin/kernloom/pkg/core/capability"
+	"github.com/kernloom/kernloom/pkg/core/capability"
 )
 
 func TestRegistryRegisterAndLookup(t *testing.T) {

@@ -8,7 +8,7 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/adrianenderlin/kernloom/pkg/core/observation"
+	"github.com/kernloom/kernloom/pkg/core/observation"
 )
 
 // SignalProducer describes which component produced the signal.

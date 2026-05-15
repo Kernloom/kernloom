@@ -7,9 +7,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/adrianenderlin/kernloom/pkg/core/graph"
-	"github.com/adrianenderlin/kernloom/pkg/core/observation"
-	gstore "github.com/adrianenderlin/kernloom/pkg/graphstore/sqlite"
+	"github.com/kernloom/kernloom/pkg/core/graph"
+	"github.com/kernloom/kernloom/pkg/core/observation"
+	gstore "github.com/kernloom/kernloom/pkg/graphstore/sqlite"
 )
 
 func openStore(t *testing.T) *gstore.Store {

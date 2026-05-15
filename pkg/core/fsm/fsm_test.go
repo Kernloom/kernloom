@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/adrianenderlin/kernloom/pkg/core/fsm"
+	"github.com/kernloom/kernloom/pkg/core/fsm"
 )
 
 /* ---------------- helper -------------------------------------------------- */

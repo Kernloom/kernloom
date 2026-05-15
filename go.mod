@@ -1,4 +1,4 @@
-module github.com/adrianenderlin/kernloom
+module github.com/kernloom/kernloom
 
 go 1.25.1
 
