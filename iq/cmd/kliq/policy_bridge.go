@@ -9,6 +9,49 @@ import (
 	"github.com/kernloom/kernloom/pkg/core/policy"
 )
 
+// forgeCapabilityToKLIQ maps Forge vocabulary capability IDs to KLIQ's internal
+// abstract capability IDs (used in the well-known capability registry).
+//
+// This is the initial PluginTranslationCatalog for the KLShield adapter.
+// It bridges the Forge standard vocabulary and KLIQ's existing capability naming
+// until a shared SDK or full Plugin Adapter framework is in place.
+//
+// Forge vocabulary:       KLIQ internal:
+//   enforce.traffic.rate_limit  →  network.rate_limit_source
+//   enforce.access.deny         →  network.block_source
+//   enforce.access.allow        →  network.allow_source
+var forgeCapabilityToKLIQ = map[string]string{
+	// Generic access control
+	"enforce.access.deny":         "network.block_source",
+	"enforce.access.allow":        "network.allow_source",
+	"enforce.access.default_deny": "network.enforce_allowlist",
+
+	// Generic traffic control
+	"enforce.traffic.rate_limit":       "network.rate_limit_source",
+	"enforce.traffic.connection_limit": "network.rate_limit_source",
+	"enforce.traffic.bandwidth_limit":  "network.rate_limit_source",
+	"enforce.traffic.drop":             "network.block_source",
+	"enforce.traffic.quarantine":       "network.block_source",
+	"enforce.traffic.tarpit":           "network.rate_limit_source",
+
+	// Legacy enforce.network.* (Forge maintains these for backward compatibility)
+	"enforce.network.deny":         "network.block_source",
+	"enforce.network.rate_limit":   "network.rate_limit_source",
+	"enforce.network.default_deny": "network.enforce_allowlist",
+	"enforce.network.quarantine":   "network.block_source",
+	"enforce.network.syn_protect":  "network.rate_limit_source",
+}
+
+// normalizeCapabilityID converts a Forge capability ID to KLIQ's internal
+// capability ID. Returns the input unchanged if it is already a KLIQ ID or
+// is unknown (forward-compatibility: unknown IDs pass through for logging).
+func normalizeCapabilityID(id string) string {
+	if kliq, ok := forgeCapabilityToKLIQ[id]; ok {
+		return kliq
+	}
+	return id
+}
+
 // pdpConfigToProfile converts a PDPConfig into the internal profile struct.
 func pdpConfigToProfile(c *pdp.Config) profile {
 	s := c.Spec
