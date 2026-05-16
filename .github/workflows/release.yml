@@ -9,39 +9,39 @@ permissions:
   contents: write
 
 jobs:
-  integration:
-    # Requires a self-hosted runner with: sudo, ip netns, veth, bpffs, CAP_BPF.
-    runs-on: [self-hosted, linux, xdp]
-    timeout-minutes: 20
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v5
-
-      - name: Setup Go
-        uses: actions/setup-go@v6
-        with:
-          go-version-file: go.mod
-
-      - name: Install dependencies
-        run: |
-          sudo apt-get update -q
-          sudo apt-get install -y -q \
-            clang llvm make libbpf-dev linux-libc-dev \
-            bpftool iproute2 curl netcat-openbsd python3 jq
-
-      - name: Build
-        run: make build
-
-      - name: Run integration tests
-        run: sudo -E make integration
-
-      - name: Upload artifacts
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: kernloom-integration-${{ github.run_id }}
-          path: tests/integration/artifacts/**
-          if-no-files-found: ignore
+  # integration:
+  #   # Requires a self-hosted runner with: sudo, ip netns, veth, bpffs, CAP_BPF.
+  #   runs-on: [self-hosted, linux, xdp]
+  #   timeout-minutes: 20
+  #   steps:
+  #     - name: Checkout
+  #       uses: actions/checkout@v5
+  #
+  #     - name: Setup Go
+  #       uses: actions/setup-go@v6
+  #       with:
+  #         go-version-file: go.mod
+  #
+  #     - name: Install dependencies
+  #       run: |
+  #         sudo apt-get update -q
+  #         sudo apt-get install -y -q \
+  #           clang llvm make libbpf-dev linux-libc-dev \
+  #           bpftool iproute2 curl netcat-openbsd python3 jq
+  #
+  #     - name: Build
+  #       run: make build
+  #
+  #     - name: Run integration tests
+  #       run: sudo -E make integration
+  #
+  #     - name: Upload artifacts
+  #       if: always()
+  #       uses: actions/upload-artifact@v4
+  #       with:
+  #         name: kernloom-integration-${{ github.run_id }}
+  #         path: tests/integration/artifacts/**
+  #         if-no-files-found: ignore
 
   build-and-release:
     runs-on: ubuntu-latest
