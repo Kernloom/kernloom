@@ -32,10 +32,11 @@ type cfg struct {
 	// policy file is loaded — unsigned packs are rejected (CLAUDE.md rule #8).
 	PolicyVerifyKeyPath string
 
-	// Forge control-plane coordinates (populated from deployment config; not
-	// used until forge serve is available).
-	ForgeURL string
-	FailMode string // fail_static | fail_open
+	// Forge control-plane coordinates.
+	ForgeURL       string
+	ForgeEnrollKey string // shared enrollment secret (Authorization: Bearer)
+	ForgeHeartbeat time.Duration
+	FailMode       string // fail_static | fail_open
 
 	// Mode + policy + pdp config
 	Mode       string // "standalone" or "managed"
@@ -409,6 +410,9 @@ AGENT FLAGS
 	flag.StringVar(&c.DeploymentConfigPath, "deployment-config", "", "path to a KliqDeploymentConfig YAML (node identity, mode, runtime paths, Forge URL); overrides flag defaults when set")
 	flag.StringVar(&c.ComponentConfigPath, "component-config", "", "path to a KliqComponentConfig YAML (enabled adapters and analyzers); reserved for future use")
 	flag.StringVar(&c.PolicyVerifyKeyPath, "policy-verify-key", "", "path to Ed25519 public key for verifying LocalPolicyPack signatures; required in managed mode")
+	flag.StringVar(&c.ForgeURL, "forge-url", "", "forge serve base URL (e.g. http://forge.example.com:8080); enables enrollment and heartbeat when set")
+	flag.StringVar(&c.ForgeEnrollKey, "forge-enroll-key", "", "shared enrollment key for forge serve (Authorization: Bearer)")
+	flag.DurationVar(&c.ForgeHeartbeat, "forge-heartbeat", 5*time.Minute, "heartbeat interval to forge serve")
 
 	flag.StringVar(&c.Mode, "mode", "standalone", `agent mode: standalone (local policy) or managed (Forge-managed; currently logs a warning and runs as standalone)`)
 	flag.StringVar(&c.PolicyFile, "policy-file", "", "path to a LocalPolicyPack YAML (abstract enforcement rules: autonomy, rules, graph, exports)")

@@ -375,6 +375,70 @@ func main() {
 	report := buildConfigAssetReport(c, nodeID, features)
 	logInventoryAndReport(inv, report, c.StatePath)
 
+	// Forge enrollment + heartbeat loop (only when --forge-url is set).
+	var forgeC *forgeClient
+	var enrolledPackName string
+	if c.ForgeURL != "" {
+		forgeC = newForgeClient(c.ForgeURL, c.ForgeEnrollKey, nodeID)
+		enrollCtx, enrollCancel := context.WithTimeout(context.Background(), 30*time.Second)
+		er, err := forgeC.Enroll(enrollCtx, c.Mode, inv, report)
+		enrollCancel()
+		if err != nil {
+			kliqLog.Printf("WARNING: forge enrollment failed: %v — continuing with local config", err)
+		} else {
+			kliqLog.Printf("FORGE enrolled: node=%s status=%s", er.NodeID, er.Status)
+			if er.Status == "approved" {
+				if packBytes, packName, err := forgeC.PullPack(context.Background()); err != nil {
+					kliqLog.Printf("WARNING: forge pack pull failed: %v", err)
+				} else if packBytes != nil {
+					enrolledPackName = packName
+					if err := applyForgePack(packBytes, packName, c.PolicyVerifyKeyPath, &c); err != nil {
+						kliqLog.Printf("WARNING: forge pack apply failed: %v — using local config", err)
+						forgeC.ReportPackStatus(context.Background(), packName, false, err.Error())
+					} else {
+						kliqLog.Printf("FORGE pack applied: %s", packName)
+						forgeC.ReportPackStatus(context.Background(), packName, true, "")
+					}
+				}
+			}
+		}
+
+		// Heartbeat goroutine.
+		hbCtx, hbCancel := context.WithCancel(context.Background())
+		defer hbCancel()
+		go func() {
+			ticker := time.NewTicker(c.ForgeHeartbeat)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-hbCtx.Done():
+					return
+				case <-ticker.C:
+					packUpdated, err := forgeC.Heartbeat(context.Background(), enrolledPackName, false)
+					if err != nil {
+						kliqLog.Printf("FORGE heartbeat failed: %v", err)
+						continue
+					}
+					if packUpdated {
+						kliqLog.Printf("FORGE pack update available — pulling")
+						if packBytes, packName, err := forgeC.PullPack(context.Background()); err != nil {
+							kliqLog.Printf("FORGE pack pull failed: %v", err)
+						} else if packBytes != nil {
+							if err := applyForgePack(packBytes, packName, c.PolicyVerifyKeyPath, &c); err != nil {
+								kliqLog.Printf("FORGE pack apply failed: %v", err)
+								forgeC.ReportPackStatus(context.Background(), packName, false, err.Error())
+							} else {
+								enrolledPackName = packName
+								kliqLog.Printf("FORGE pack updated: %s", packName)
+								forgeC.ReportPackStatus(context.Background(), packName, true, "")
+							}
+						}
+					}
+				}
+			}
+		}()
+	}
+
 	// Tuple enforcement: activate XDP edge maps when the feature is enabled.
 	if features.TupleEnforcement {
 		if pep.TupleAvailable() {
