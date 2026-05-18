@@ -149,7 +149,31 @@ func main() {
 	// Policy: abstract enforcement rules (autonomy, when/then, exports).
 	// Optional — without a policy file, profile defaults + CLI flags apply.
 	if c.PolicyFile != "" {
-		pp, err := corepolicy.LoadFromFile(c.PolicyFile)
+		var pp *corepolicy.PolicyPack
+		var err error
+
+		if c.Mode == string(corepolicy.ModeManaged) {
+			// Managed mode: signature verification is mandatory (CLAUDE.md rule #8).
+			if c.PolicyVerifyKeyPath == "" {
+				log.Fatalf("managed mode requires --policy-verify-key to verify pack signature")
+			}
+			pubKey, kerr := corepolicy.LoadPublicKey(c.PolicyVerifyKeyPath)
+			if kerr != nil {
+				log.Fatalf("load policy verify key: %v", kerr)
+			}
+			pp, err = corepolicy.LoadAndVerify(c.PolicyFile, pubKey)
+		} else {
+			// Standalone mode: signature verification is optional.
+			if c.PolicyVerifyKeyPath != "" {
+				pubKey, kerr := corepolicy.LoadPublicKey(c.PolicyVerifyKeyPath)
+				if kerr != nil {
+					log.Fatalf("load policy verify key: %v", kerr)
+				}
+				pp, err = corepolicy.LoadAndVerify(c.PolicyFile, pubKey)
+			} else {
+				pp, err = corepolicy.LoadFromFile(c.PolicyFile)
+			}
+		}
 		if err != nil {
 			log.Fatalf("load policy file: %v", err)
 		}

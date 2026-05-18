@@ -27,6 +27,11 @@ type cfg struct {
 	DeploymentConfigPath string
 	ComponentConfigPath  string
 
+	// PolicyVerifyKeyPath is the path to the Ed25519 public key used to verify
+	// the signature on LocalPolicyPack files. Required in managed mode when a
+	// policy file is loaded — unsigned packs are rejected (CLAUDE.md rule #8).
+	PolicyVerifyKeyPath string
+
 	// Forge control-plane coordinates (populated from deployment config; not
 	// used until forge serve is available).
 	ForgeURL string
@@ -403,6 +408,7 @@ AGENT FLAGS
 
 	flag.StringVar(&c.DeploymentConfigPath, "deployment-config", "", "path to a KliqDeploymentConfig YAML (node identity, mode, runtime paths, Forge URL); overrides flag defaults when set")
 	flag.StringVar(&c.ComponentConfigPath, "component-config", "", "path to a KliqComponentConfig YAML (enabled adapters and analyzers); reserved for future use")
+	flag.StringVar(&c.PolicyVerifyKeyPath, "policy-verify-key", "", "path to Ed25519 public key for verifying LocalPolicyPack signatures; required in managed mode")
 
 	flag.StringVar(&c.Mode, "mode", "standalone", `agent mode: standalone (local policy) or managed (Forge-managed; currently logs a warning and runs as standalone)`)
 	flag.StringVar(&c.PolicyFile, "policy-file", "", "path to a LocalPolicyPack YAML (abstract enforcement rules: autonomy, rules, graph, exports)")
