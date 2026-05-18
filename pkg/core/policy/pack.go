@@ -57,22 +57,25 @@ type Spec struct {
 	TargetSelector TargetSelectorSpec `yaml:"target_selector,omitempty"`
 
 	// CapabilitiesRequired lists the abstract capability IDs that this policy
-	// needs. Forge validates that the target node's PEP adapters provide all
-	// required capabilities before distributing the pack.
+	// needs. Preserved for backward compatibility; new packs use
+	// ActionAuthorization.AllowedCapabilities instead.
 	CapabilitiesRequired []string `yaml:"capabilities_required,omitempty"`
 
-	// Autonomy defines what kliq is permitted to enforce locally without Forge
-	// approval. In managed mode Forge can further restrict these.
-	Autonomy AutonomySpec `yaml:"autonomy"`
+	// ActionAuthorization is the v1.1 authorization section that replaces the
+	// Autonomy section. It uses Forge capability IDs throughout. KLIQ derives
+	// the enforcement ceiling from AllowedCapabilities — no max_action shorthand.
+	ActionAuthorization ActionAuthorizationSpec `yaml:"action_authorization,omitempty"`
 
-	// Rules express the enforcement policy as when/then pairs:
-	// "when the FSM reaches level X, apply abstract action Y via capability Z".
-	// The PDP evaluates rules and the PEP adapter translates the abstract action
-	// into its concrete implementation.
+	// Autonomy is the v1.0 authorization section. Kept for backward compat with
+	// packs generated before v1.1. New packs must use ActionAuthorization.
+	// Deprecated: DryRun belongs in KliqDeploymentConfig; MaxAction and
+	// AllowLocalBlock are replaced by ActionAuthorization.
+	Autonomy AutonomySpec `yaml:"autonomy,omitempty"`
+
+	// Rules express the enforcement policy as when/then pairs.
 	Rules []RuleSpec `yaml:"rules"`
 
 	// Exports configures where kliq sends telemetry, decisions and receipts.
-	// All targets are disabled by default in standalone mode.
 	Exports ExportsSpec `yaml:"exports,omitempty"`
 }
 
@@ -81,18 +84,32 @@ type TargetSelectorSpec struct {
 	MatchLabels map[string]string `yaml:"match_labels,omitempty"`
 }
 
-// AutonomySpec defines what kliq is permitted to enforce locally.
+// ActionAuthorizationSpec is the v1.1 replacement for AutonomySpec.
+// It uses Forge capability IDs throughout and avoids KLIQ-internal shorthands.
+type ActionAuthorizationSpec struct {
+	// AllowedCapabilities is the explicit set of Forge capability IDs that this
+	// policy authorises. KLIQ derives the enforcement ceiling from this list:
+	// the highest-severity capability in the list becomes the effective cap.
+	// Empty means no capability restriction (all capabilities allowed).
+	AllowedCapabilities []string `yaml:"allowed_capabilities,omitempty"`
+
+	// DefaultEffect determines what happens when a proposed capability is not
+	// in AllowedCapabilities. "deny" (default) de-enforces to observe.
+	DefaultEffect string `yaml:"default_effect,omitempty"` // "deny" | "allow"
+}
+
+// AutonomySpec is the v1.0 authorization section. Deprecated in v1.1.
+// See ActionAuthorizationSpec for the replacement.
 type AutonomySpec struct {
-	// DryRun disables all eBPF map writes; decisions are logged only.
-	DryRun bool `yaml:"dry_run"`
+	// DryRun: deprecated — move to KliqDeploymentConfig.runtime.dry_run.
+	DryRun bool `yaml:"dry_run,omitempty"`
 
-	// MaxAction is the ceiling on enforcement actions.
-	// Valid values: observe, signal, rate_limit, block.
-	MaxAction string `yaml:"max_action"`
+	// MaxAction: deprecated — derived automatically from ActionAuthorization.AllowedCapabilities.
+	// Valid values: observe, rate_limit, rate_limit_hard, block.
+	MaxAction string `yaml:"max_action,omitempty"`
 
-	// AllowLocalBlock permits block decisions without Forge approval.
-	// When false MaxAction is effectively capped at rate_limit.
-	AllowLocalBlock bool `yaml:"allow_local_block"`
+	// AllowLocalBlock: deprecated — implicit when enforce.access.deny is in AllowedCapabilities.
+	AllowLocalBlock bool `yaml:"allow_local_block,omitempty"`
 }
 
 // RuleSpec expresses a single enforcement rule as a when/then pair.
@@ -107,22 +124,30 @@ type RuleSpec struct {
 
 // WhenSpec describes the condition that triggers a rule.
 type WhenSpec struct {
-	// FsmLevel matches when the FSM reaches a given level: soft | hard | block.
+	// Capability is the v1.1 trigger: the Forge capability ID that this rule
+	// applies to. KLIQ maps the capability to its FSM level internally.
+	Capability string `yaml:"capability,omitempty"`
+
+	// FsmLevel is the v1.0 trigger. Deprecated in v1.1; use Capability instead.
+	// Kept for backward compatibility with packs generated before v1.1.
 	FsmLevel string `yaml:"fsm_level,omitempty"`
+
 	// Signal matches a specific signal type (e.g. graph.new_edge_after_freeze).
 	Signal string `yaml:"signal,omitempty"`
 }
 
 // ThenSpec describes the enforcement action to take when a rule matches.
 type ThenSpec struct {
-	// Action is the abstract enforcement action: observe | signal | rate_limit | block.
-	Action string `yaml:"action"`
-	// Capability is the abstract capability ID the PEP adapter must implement.
+	// Capability is the Forge capability ID the PEP adapter must implement.
 	Capability string `yaml:"capability"`
 	// TTL is how long the enforcement entry should remain active.
 	TTL Duration `yaml:"ttl,omitempty"`
-	// Params are optional capability-specific parameters (passed to the adapter).
+	// Params are optional capability-specific parameters.
 	Params map[string]string `yaml:"params,omitempty"`
+
+	// Action is the v1.0 action shorthand. Deprecated in v1.1; the capability
+	// ID is now the sole source of truth for what action to take.
+	Action string `yaml:"action,omitempty"`
 }
 
 // ExportsSpec configures telemetry export destinations.
@@ -173,9 +198,12 @@ func (p *PolicyPack) Validate() error {
 	if p.Metadata.Name == "" {
 		return fmt.Errorf("metadata.name is required")
 	}
-	validActions := map[string]bool{"observe": true, "signal": true, "rate_limit": true, "block": true, "": true}
-	if !validActions[p.Spec.Autonomy.MaxAction] {
-		return fmt.Errorf("spec.autonomy.max_action %q is not valid (observe|signal|rate_limit|block)", p.Spec.Autonomy.MaxAction)
+	// Backward compat: validate max_action only when Autonomy section is used.
+	if p.Spec.ActionAuthorization.AllowedCapabilities == nil {
+		validActions := map[string]bool{"observe": true, "signal": true, "rate_limit": true, "rate_limit_hard": true, "block": true, "": true}
+		if !validActions[p.Spec.Autonomy.MaxAction] {
+			return fmt.Errorf("spec.autonomy.max_action %q is not valid (observe|rate_limit|rate_limit_hard|block)", p.Spec.Autonomy.MaxAction)
+		}
 	}
 	if len(p.Spec.Rules) == 0 {
 		return fmt.Errorf("spec.rules must contain at least one rule")
