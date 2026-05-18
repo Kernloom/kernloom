@@ -21,8 +21,8 @@ func proposal(level, action string) actions.ActionProposal {
 
 func managed(maxAction string, caps ...string) actions.PolicyResolver {
 	r := actions.PolicyResolver{
-		Mode:          "managed",
-		HasPolicyPack: true,
+		Mode:            "managed",
+		HasPolicyPack:   true,
 		PolicyMaxAction: maxAction,
 	}
 	if len(caps) > 0 {
@@ -114,8 +114,8 @@ func TestResolve_Observe_Cap_ObservePassesWithoutReason(t *testing.T) {
 func TestResolve_RateLimit_Cap(t *testing.T) {
 	r := managed("rate_limit", "enforce.traffic.rate_limit")
 	cases := []struct {
-		level    string
-		wantLevel string
+		level      string
+		wantLevel  string
 		wantReason string
 	}{
 		{"soft", "soft", ""},
@@ -137,9 +137,9 @@ func TestResolve_RateLimit_Cap(t *testing.T) {
 func TestResolve_RateLimitHard_Cap(t *testing.T) {
 	r := managed("rate_limit_hard", "enforce.traffic.rate_limit")
 	cases := []struct {
-		level    string
+		level     string
 		wantLevel string
-		capped   bool
+		capped    bool
 	}{
 		{"soft", "soft", false},
 		{"hard", "hard", false},

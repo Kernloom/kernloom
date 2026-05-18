@@ -20,8 +20,8 @@ func newDryRunExecutor() *actions.ShieldActionExecutor {
 
 func allowedResolution(level string) actions.ActionResolution {
 	return actions.ActionResolution{
-		Allowed:         true,
-		ExecutableLevel: level,
+		Allowed:          true,
+		ExecutableLevel:  level,
 		ExecutableAction: "enforce.traffic.rate_limit",
 	}
 }
@@ -35,11 +35,11 @@ func deniedResolution(reason string) actions.ActionResolution {
 }
 
 var (
-	testIP4   = [4]byte{10, 0, 0, 1}
-	testIP6   = [16]byte{0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xff, 0xff, 10, 0, 0, 1}
-	testState = fsm.State{Level: fsm.LevelObserve}
+	testIP4    = [4]byte{10, 0, 0, 1}
+	testIP6    = [16]byte{0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xff, 0xff, 10, 0, 0, 1}
+	testState  = fsm.State{Level: fsm.LevelObserve}
 	testParams = shieldpep.EnforcementParams{SoftRate: 100, SoftBurst: 200, HardRate: 20, HardBurst: 40}
-	testNow   = time.Now()
+	testNow    = time.Now()
 )
 
 // ── Apply4 ────────────────────────────────────────────────────────────────────
