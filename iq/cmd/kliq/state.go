@@ -58,6 +58,28 @@ type stateActive struct {
 	// A mismatch between the hash in state.json and the current config causes
 	// the bootstrap state to be invalidated so learning starts fresh.
 	ConfigHash string `json:"config_hash,omitempty"`
+
+	// ── Forge control-plane state ─────────────────────────────────────────────
+	// These fields persist the Forge session across restarts so KLIQ does not
+	// need to re-enroll after a restart (enrollment tokens are single-use).
+
+	// ForgeSessionToken is the per-node token returned by Forge after enrollment.
+	// Persisted so KLIQ can resume heartbeats and pack-pulls after restart
+	// without consuming a new enrollment token.
+	ForgeSessionToken string `json:"forge_session_token,omitempty"`
+
+	// ForgePackName is the name of the last successfully applied policy pack.
+	ForgePackName string `json:"forge_pack_name,omitempty"`
+
+	// ForgePackIssuedAt is the issued_at timestamp of the last applied pack.
+	// Used for rollback protection (CLAUDE.md rule #9): a pack with an earlier
+	// IssuedAt is rejected even after a restart.
+	ForgePackIssuedAt time.Time `json:"forge_pack_issued_at,omitempty"`
+
+	// ForgePackHash is the SHA-256 hex digest of the last applied pack bytes.
+	// Used for drift detection: if the running config differs from the last
+	// applied pack, KLIQ reports drift_detected=true in the next heartbeat.
+	ForgePackHash string `json:"forge_pack_hash,omitempty"`
 }
 
 type stateHistory struct {

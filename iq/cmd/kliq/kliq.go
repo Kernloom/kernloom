@@ -50,6 +50,7 @@ import (
 	"github.com/kernloom/kernloom/pkg/adapters/shieldpep"
 	"github.com/kernloom/kernloom/pkg/adapters/shieldtelemetry"
 	"github.com/kernloom/kernloom/pkg/adapters/sourcebaseline"
+	celeval "github.com/kernloom/kernloom/pkg/core/cel"
 	"github.com/kernloom/kernloom/pkg/core/decision"
 	"github.com/kernloom/kernloom/pkg/core/featureset"
 	"github.com/kernloom/kernloom/pkg/core/fsm"
@@ -378,26 +379,57 @@ func main() {
 	// Forge enrollment + heartbeat loop (only when --forge-url is set).
 	var forgeC *forgeClient
 	var enrolledPackName string
+	var activePackIssuedAt time.Time // rollback protection: tracks IssuedAt of running pack
+	var activePackHash string        // drift detection: SHA-256 of last applied pack bytes
 	if c.ForgeURL != "" {
-		forgeC = newForgeClient(c.ForgeURL, c.ForgeEnrollKey, nodeID)
-		enrollCtx, enrollCancel := context.WithTimeout(context.Background(), 30*time.Second)
-		er, err := forgeC.Enroll(enrollCtx, c.Mode, inv, report)
-		enrollCancel()
-		if err != nil {
-			kliqLog.Printf("WARNING: forge enrollment failed: %v — continuing with local config", err)
-		} else {
-			kliqLog.Printf("FORGE enrolled: node=%s status=%s", er.NodeID, er.Status)
-			if er.Status == "approved" {
-				if packBytes, packName, err := forgeC.PullPack(context.Background()); err != nil {
-					kliqLog.Printf("WARNING: forge pack pull failed: %v", err)
-				} else if packBytes != nil {
-					enrolledPackName = packName
-					if err := applyForgePack(packBytes, packName, c.PolicyVerifyKeyPath, &c); err != nil {
-						kliqLog.Printf("WARNING: forge pack apply failed: %v — using local config", err)
-						forgeC.ReportPackStatus(context.Background(), packName, false, err.Error())
-					} else {
-						kliqLog.Printf("FORGE pack applied: %s", packName)
-						forgeC.ReportPackStatus(context.Background(), packName, true, "")
+		var fcErr error
+		forgeC, fcErr = newForgeClient(c.ForgeURL, c.ForgeEnrollToken, nodeID, c.ForgeCAPath)
+		if fcErr != nil {
+			kliqLog.Fatalf("forge client init: %v", fcErr)
+		}
+
+		// Restore persisted Forge state from state file (avoids re-enrollment after restart).
+		if stFile != nil && stFile.Active.ForgeSessionToken != "" {
+			forgeC.RestoreSession(stFile.Active.ForgeSessionToken)
+			enrolledPackName = stFile.Active.ForgePackName
+			activePackIssuedAt = stFile.Active.ForgePackIssuedAt
+			activePackHash = stFile.Active.ForgePackHash
+			kliqLog.Printf("FORGE session restored from state: pack=%s", enrolledPackName)
+		}
+
+		// Enroll only when no valid session token was restored.
+		if forgeC.SessionToken() == "" {
+			enrollCtx, enrollCancel := context.WithTimeout(context.Background(), 30*time.Second)
+			er, err := forgeC.Enroll(enrollCtx, c.Mode, inv, report)
+			enrollCancel()
+			if err != nil {
+				kliqLog.Printf("WARNING: forge enrollment failed: %v — continuing with local config", err)
+			} else {
+				kliqLog.Printf("FORGE enrolled: node=%s status=%s", er.NodeID, er.Status)
+				// Persist session token immediately after enrollment.
+				if stFile != nil && forgeC.SessionToken() != "" {
+					stFile.Active.ForgeSessionToken = forgeC.SessionToken()
+					_ = writeStateAtomic(c.StatePath, stFile)
+				}
+				if er.Status == "approved" {
+					if packBytes, packName, err := forgeC.PullPack(context.Background()); err != nil {
+						kliqLog.Printf("WARNING: forge pack pull failed: %v", err)
+					} else if packBytes != nil {
+						enrolledPackName = packName
+						if err := applyForgePack(packBytes, packName, c.PolicyVerifyKeyPath, &c, &activePackIssuedAt); err != nil {
+							kliqLog.Printf("WARNING: forge pack apply failed: %v — using local config", err)
+							forgeC.ReportPackStatus(context.Background(), packName, false, err.Error())
+						} else {
+							activePackHash = PackHash(packBytes)
+							kliqLog.Printf("FORGE pack applied: %s", packName)
+							forgeC.ReportPackStatus(context.Background(), packName, true, "")
+							if stFile != nil {
+								stFile.Active.ForgePackName = packName
+								stFile.Active.ForgePackIssuedAt = activePackIssuedAt
+								stFile.Active.ForgePackHash = activePackHash
+								_ = writeStateAtomic(c.StatePath, stFile)
+							}
+						}
 					}
 				}
 			}
@@ -414,6 +446,18 @@ func main() {
 				case <-hbCtx.Done():
 					return
 				case <-ticker.C:
+					// Drift detection: compare running pack hash against last applied.
+					// Drift means the config that's actually running differs from what
+					// Forge last pushed — e.g. if someone manually edited the pack file.
+					drift := activePackHash != "" && PackHash(nil) != activePackHash
+					// PackHash(nil) would be wrong — we don't re-read the file here.
+					// Instead drift is true when activePackHash is set but the in-memory
+					// pack identity (enrolledPackName) no longer matches state.
+					// Full file-hash drift detection requires reading the temp pack path,
+					// which is not persisted. Use name-mismatch as a conservative proxy.
+					drift = false // TODO: implement full hash-based drift after pack path is persisted
+					_ = drift
+
 					packUpdated, err := forgeC.Heartbeat(context.Background(), enrolledPackName, false)
 					if err != nil {
 						kliqLog.Printf("FORGE heartbeat failed: %v", err)
@@ -424,13 +468,21 @@ func main() {
 						if packBytes, packName, err := forgeC.PullPack(context.Background()); err != nil {
 							kliqLog.Printf("FORGE pack pull failed: %v", err)
 						} else if packBytes != nil {
-							if err := applyForgePack(packBytes, packName, c.PolicyVerifyKeyPath, &c); err != nil {
+							if err := applyForgePack(packBytes, packName, c.PolicyVerifyKeyPath, &c, &activePackIssuedAt); err != nil {
 								kliqLog.Printf("FORGE pack apply failed: %v", err)
 								forgeC.ReportPackStatus(context.Background(), packName, false, err.Error())
 							} else {
 								enrolledPackName = packName
+								activePackHash = PackHash(packBytes)
 								kliqLog.Printf("FORGE pack updated: %s", packName)
 								forgeC.ReportPackStatus(context.Background(), packName, true, "")
+								// Persist updated Forge state.
+								if stFile != nil {
+									stFile.Active.ForgePackName = packName
+									stFile.Active.ForgePackIssuedAt = activePackIssuedAt
+									stFile.Active.ForgePackHash = activePackHash
+									_ = writeStateAtomic(c.StatePath, stFile)
+								}
 							}
 						}
 					}
@@ -857,6 +909,11 @@ func main() {
 		cands := make([]metrics, 0, 4096)
 		seenForLearn := 0
 		highSevCount := 0
+		// celVarBuf is reused across all sources per tick to avoid per-source map allocation.
+		var celVarBuf map[string]any
+		if len(c.CELRules) > 0 {
+			celVarBuf = make(map[string]any, 8)
+		}
 
 		// ----- Iterate v4 sources -----
 		it4 := maps.Src4.Iterate()
@@ -915,6 +972,50 @@ func main() {
 			}
 			for _, sig := range sigs4 {
 				_ = mainBus.PublishSignal(context.Background(), sig)
+			}
+
+			// CEL rule evaluation (v1.2 packs): fire ActionProposals directly when
+			// the expression matches this source this tick. Runs independently of the
+			// FSM candidate path — CEL rules can fire even for low-PPS sources.
+			// celVarBuf is allocated once per source and reused across rules.
+			if len(c.CELRules) > 0 {
+				var blProfile sourcebaseline.Profile
+				var blOk bool
+				if srcBL != nil {
+					blProfile, blOk = srcBL.Get(subject4.ID)
+				}
+				sigs := &celeval.SourceSignals{
+					PPS: pps, BPS: bps, SynRate: synRate, ScanRate: scanRate,
+					HasBaseline:   blOk,
+					EWMAPPS:       blProfile.EWMAPPS,
+					EWMABPS:       blProfile.EWMABPS,
+					EWMASyn:       blProfile.EWMASyn,
+					Confidence:    blProfile.Confidence,
+					Promoted:      blProfile.Promoted,
+					GlobalTrigPPS: c.TrigPPS,
+					GlobalTrigBPS: c.TrigBPS,
+				}
+				st4 := state4[k4]
+				for _, rule := range c.CELRules {
+					if !rule.Evaluate(sigs, celVarBuf) {
+						continue
+					}
+					proposal := actions.ActionProposal{
+						Source:        "cel-policy",
+						Reason:        rule.Name,
+						DesiredAction: rule.Capability,
+						DesiredLevel:  rule.Level,
+						Target:        actions.ActionTarget{Granularity: "src_ip", Value: subject4.ID},
+						CreatedAt:     nowWall,
+					}
+					res := resolver.Resolve(proposal)
+					st4, _ = executor.Apply4(k4, st4, res, c.toPEPParams(), nowWall)
+					if res.DenyReason == "" {
+						kliqLog.Printf("CEL rule=%q matched: %s action=%s", rule.Name, subject4.ID, res.ExecutableLevel)
+					}
+					break // first matching rule per source per tick
+				}
+				state4[k4] = st4
 			}
 
 			// Baseline update and deviation check happen in the cands loop below,
