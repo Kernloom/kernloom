@@ -6,6 +6,10 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"crypto/tls"
+	"crypto/x509"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -20,23 +24,44 @@ import (
 
 // forgeClient is a minimal HTTP client for the forge serve control-plane API.
 type forgeClient struct {
-	baseURL    string
-	enrollKey  string
-	nodeID     string
-	httpClient *http.Client
+	baseURL      string
+	enrollToken  string // one-time token used only for the initial enrollment request
+	sessionToken string // per-node token returned by Forge after enrollment; used for all subsequent requests
+	nodeID       string
+	httpClient   *http.Client
 }
 
-func newForgeClient(baseURL, enrollKey, nodeID string) *forgeClient {
-	return &forgeClient{
-		baseURL:    baseURL,
-		enrollKey:  enrollKey,
-		nodeID:     nodeID,
-		httpClient: &http.Client{Timeout: 15 * time.Second},
+// newForgeClient creates a forgeClient.
+// caPath is the path to a PEM CA certificate for TLS; empty means system roots.
+// Returns an error only when caPath is non-empty but cannot be loaded.
+func newForgeClient(baseURL, enrollToken, nodeID, caPath string) (*forgeClient, error) {
+	transport := http.DefaultTransport
+	if caPath != "" {
+		pemBytes, err := os.ReadFile(caPath)
+		if err != nil {
+			return nil, fmt.Errorf("forge-ca: read %s: %w", caPath, err)
+		}
+		pool := x509.NewCertPool()
+		if !pool.AppendCertsFromPEM(pemBytes) {
+			return nil, fmt.Errorf("forge-ca: no valid certificates found in %s", caPath)
+		}
+		transport = &http.Transport{
+			TLSClientConfig: &tls.Config{RootCAs: pool},
+		}
 	}
+	return &forgeClient{
+		baseURL:     baseURL,
+		enrollToken: enrollToken,
+		nodeID:      nodeID,
+		httpClient:  &http.Client{Transport: transport, Timeout: 15 * time.Second},
+	}, nil
 }
 
 // ── request builder ───────────────────────────────────────────────────────────
 
+// do sends an authenticated HTTP request.
+// After enrollment, sessionToken is used for all requests.
+// Before enrollment (the enrollment request itself), enrollToken is used.
 func (c *forgeClient) do(ctx context.Context, method, path string, body any) (*http.Response, error) {
 	var bodyReader io.Reader
 	if body != nil {
@@ -52,8 +77,11 @@ func (c *forgeClient) do(ctx context.Context, method, path string, body any) (*h
 		return nil, err
 	}
 	req.Header.Set("Content-Type", "application/json")
-	if c.enrollKey != "" {
-		req.Header.Set("Authorization", "Bearer "+c.enrollKey)
+	switch {
+	case c.sessionToken != "":
+		req.Header.Set("Authorization", "Bearer "+c.sessionToken)
+	case c.enrollToken != "":
+		req.Header.Set("Authorization", "Bearer "+c.enrollToken)
 	}
 	return c.httpClient.Do(req)
 }
@@ -69,10 +97,18 @@ type enrollRequest struct {
 }
 
 type enrollResponse struct {
-	NodeID  string `json:"node_id"`
-	Status  string `json:"status"`
-	Message string `json:"message,omitempty"`
+	NodeID       string `json:"node_id"`
+	Status       string `json:"status"`
+	SessionToken string `json:"session_token"` // stored and used for all subsequent requests
+	Message      string `json:"message,omitempty"`
 }
+
+// SessionToken returns the active session token (empty before enrollment).
+func (c *forgeClient) SessionToken() string { return c.sessionToken }
+
+// RestoreSession sets the session token from a persisted state without re-enrolling.
+// Call this on startup when a valid session token was saved in the state file.
+func (c *forgeClient) RestoreSession(token string) { c.sessionToken = token }
 
 // Enroll sends POST /api/v1/nodes/enroll with the node's inventory and config.
 // Returns the node status ("pending", "approved", "rejected").
@@ -97,6 +133,10 @@ func (c *forgeClient) Enroll(
 	var er enrollResponse
 	if err := json.NewDecoder(resp.Body).Decode(&er); err != nil {
 		return enrollResponse{}, fmt.Errorf("enroll: decode response: %w", err)
+	}
+	// Store the session token — all subsequent requests use it instead of the one-time token.
+	if er.SessionToken != "" {
+		c.sessionToken = er.SessionToken
 	}
 	return er, nil
 }
@@ -188,10 +228,21 @@ func (c *forgeClient) ReportPackStatus(ctx context.Context, packName string, app
 
 // ── Pack application ──────────────────────────────────────────────────────────
 
+// PackHash returns the SHA-256 hex digest of the given pack bytes.
+// Used for drift detection: stored on apply, compared on heartbeat.
+func PackHash(packBytes []byte) string {
+	h := sha256.Sum256(packBytes)
+	return hex.EncodeToString(h[:])
+}
+
 // applyForgePack saves the received pack bytes to a temp file, optionally
 // verifies the signature, then applies it to cfg via applyPolicyPackToCfg +
 // rulesFromPolicyPack. This mirrors the --policy-file path in main().
-func applyForgePack(packBytes []byte, packName, verifyKeyPath string, c *cfg) error {
+//
+// activeIssuedAt tracks the IssuedAt of the currently running pack. If non-nil
+// and non-zero, packs with an earlier IssuedAt are rejected (rollback protection,
+// CLAUDE.md rule #9). On success, *activeIssuedAt is updated to the new value.
+func applyForgePack(packBytes []byte, packName, verifyKeyPath string, c *cfg, activeIssuedAt *time.Time) error {
 	// Write to a temp file so LoadFromFile / LoadAndVerify can read it.
 	dir := os.TempDir()
 	if c.StatePath != "" {
@@ -226,7 +277,24 @@ func applyForgePack(packBytes []byte, packName, verifyKeyPath string, c *cfg) er
 		}
 	}
 
+	// Rollback protection: reject a pack whose IssuedAt predates the active pack.
+	if activeIssuedAt != nil && !activeIssuedAt.IsZero() {
+		if newAt, ok := pp.Metadata.ParseIssuedAt(); ok {
+			if newAt.Before(*activeIssuedAt) {
+				return fmt.Errorf("rollback rejected: pack %s issued_at %s is before active pack issued_at %s",
+					packName, newAt.Format(time.RFC3339), activeIssuedAt.Format(time.RFC3339))
+			}
+		}
+	}
+
 	applyPolicyPackToCfg(pp, c)
 	rulesFromPolicyPack(pp, c)
+
+	// Update the caller's issued_at tracking on success.
+	if activeIssuedAt != nil {
+		if newAt, ok := pp.Metadata.ParseIssuedAt(); ok {
+			*activeIssuedAt = newAt
+		}
+	}
 	return nil
 }
