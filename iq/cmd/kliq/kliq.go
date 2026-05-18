@@ -44,6 +44,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/kernloom/kernloom/iq/internal/actions"
 	"github.com/kernloom/kernloom/pkg/adapterruntime"
 	"github.com/kernloom/kernloom/pkg/adapters/graphlearner"
 	"github.com/kernloom/kernloom/pkg/adapters/shieldpep"
@@ -53,6 +54,7 @@ import (
 	"github.com/kernloom/kernloom/pkg/core/featureset"
 	"github.com/kernloom/kernloom/pkg/core/fsm"
 	"github.com/kernloom/kernloom/pkg/core/graph"
+	kliqconfig "github.com/kernloom/kernloom/pkg/core/kliqconfig"
 	"github.com/kernloom/kernloom/pkg/core/observation"
 	corepdp "github.com/kernloom/kernloom/pkg/core/pdp"
 	corepolicy "github.com/kernloom/kernloom/pkg/core/policy"
@@ -138,6 +140,7 @@ func main() {
 		applyPDPBaselineToCfg(pdpc, &c)
 		applyPDPAutotuneToCfg(pdpc, &c)
 		c.adapterParams = adapterParamsFromPDPConfig(pdpc)
+		applyPDPAdaptiveRatesToCfg(pdpc, &c)
 	} else {
 		p = profileByName(c.ProfileName)
 		c.adapterParams = shieldpep.DefaultCapabilityParams()
@@ -193,6 +196,17 @@ func main() {
 	// left at their default values. State (autotune) must not override these.
 	explicitFlags := make(map[string]bool)
 	flag.Visit(func(f *flag.Flag) { explicitFlags[f.Name] = true })
+
+	// Deployment config: overrides flag defaults for operational fields
+	// (mode, dry_run, paths, Forge URL). Explicit CLI flags always win.
+	if c.DeploymentConfigPath != "" {
+		dc, err := kliqconfig.LoadDeploymentConfig(c.DeploymentConfigPath)
+		if err != nil {
+			log.Fatalf("load deployment config: %v", err)
+		}
+		kliqLog.Printf("Deployment config loaded: file=%s name=%s", c.DeploymentConfigPath, dc.Metadata.Name)
+		applyDeploymentConfig(dc, &c, explicitFlags)
+	}
 
 	// Compute the config hash used to detect autotune-relevant config changes.
 	// A mismatch between this hash and the one stored in state.json invalidates
@@ -326,6 +340,17 @@ func main() {
 		log.Fatalf("init shield pep: %v", err)
 	}
 
+	// Central enforcement pipeline: resolver is the policy gate; executor is the
+	// only component authorized to call TransitionV4/V6.
+	resolver := c.buildPolicyResolver()
+	executor := buildExecutor(pep)
+
+	// Runtime inventory and config-asset report — built once after all config
+	// sources are applied and maps are open. Logged and saved alongside state.
+	inv := pep.BuildInventory(nodeID)
+	report := buildConfigAssetReport(c, nodeID, features)
+	logInventoryAndReport(inv, report, c.StatePath)
+
 	// Tuple enforcement: activate XDP edge maps when the feature is enabled.
 	if features.TupleEnforcement {
 		if pep.TupleAvailable() {
@@ -340,10 +365,12 @@ func main() {
 	}
 
 	// Decision engine: adds audit trail for FSM transitions and enforces graph-freeze signals.
+	// LocalPolicy MaxAction is resolved via the Action Resolver so that
+	// managed-no-pack and PolicyMaxAction rules apply to the decision engine path too.
 	decPolicy := decisionengine.LocalPolicy{
 		NodeID:              nodeID,
 		DryRun:              c.DryRun,
-		MaxAction:           decision.ActionType(c.GraphFreezeMaxAction),
+		MaxAction:           c.resolveDecisionAction(decision.ActionType(c.GraphFreezeMaxAction)),
 		AllowLocalBlock:     c.GraphFreezeAllowBlock,
 		GraphFreezeAction:   decision.ActionType(c.GraphFreezeAction),
 		GraphFreezeTTL:      c.GraphFreezeTTL,
@@ -355,8 +382,7 @@ func main() {
 		BlockTTL:            c.BlockTTL,
 		MinSeverityForBlock: c.GraphFreezeMinSeverity,
 	}
-	shieldBridge := decisionengine.NewShieldBridge(maps, c.DryRun, nodeID, c.toPEPParams())
-	decisionEng := decisionengine.New(decPolicy, shieldBridge)
+	decisionEng := decisionengine.New(decPolicy)
 
 	// Heuristic signal engine: converts per-source metrics → Signals + fsm.Metrics.
 	// Replaces inline fsm.CalcSeverity calls throughout the main loop.
@@ -423,9 +449,9 @@ func main() {
 				if sig.Type == signal.SignalGraphNewEdgeAfterFreeze && sig.Subject.ID != "" {
 					sendStrike(graphStrikeCh, sig.Subject.ID, graphStrikesFromScore(sig.Score), sig.Score >= 90, true)
 
-					// Tuple enforcement (graph-enforce profile): write an XDP edge deny
-					// for the specific (src, dst_port, proto) tuple rather than blocking
-					// all traffic from the source. More surgical than source-level deny.
+					// Tuple enforcement (graph-enforce profile): deny the specific
+					// (src, dst_port, proto) tuple via the ActionResolver instead of
+					// calling pep.DenyEdge4 directly.
 					if features.TupleEnforcement && sig.Score >= 90 && pep.TupleAvailable() {
 						portStr := sig.Attributes["destination_port"]
 						proto := sig.Attributes["protocol"]
@@ -435,10 +461,35 @@ func main() {
 						}
 						if port > 0 && proto != "" {
 							if ekey, ok := shieldclient.NewEdge4Key(sig.Subject.ID, uint16(port), proto); ok {
-								if err := pep.DenyEdge4(ekey); err != nil {
-									kliqLog.Printf("TUPLE deny edge %s:%d/%s failed: %v", sig.Subject.ID, port, proto, err)
-								} else {
-									kliqLog.Printf("TUPLE deny edge: %s port=%d proto=%s (freeze violation)", sig.Subject.ID, port, proto)
+								proposal := actions.ActionProposal{
+									Source:        "graph",
+									Reason:        "graph_new_edge_after_freeze",
+									DesiredAction: "enforce.access.deny",
+									DesiredLevel:  "block",
+									Target: actions.ActionTarget{
+										Granularity: "tuple_src_dst_port",
+										Value:       sig.Subject.ID,
+										Attributes: map[string]string{
+											"src_ip":   sig.Subject.ID,
+											"dst_port": portStr,
+											"protocol": proto,
+										},
+									},
+									Confidence: float64(sig.Confidence) / 100.0,
+									CreatedAt:  time.Now(),
+								}
+								res := resolver.Resolve(proposal)
+								if res.DenyReason != "" {
+									kliqLog.Printf("ACTION-RESOLVER tuple %s:%s/%s %s→%s reason=%q",
+										sig.Subject.ID, portStr, proto,
+										proposal.DesiredLevel, res.ExecutableLevel, res.DenyReason)
+								}
+								result := executor.ApplyTuple4(ekey, res, time.Now())
+								switch result.Status {
+								case "applied":
+									kliqLog.Printf("TUPLE deny edge: %s port=%s proto=%s (freeze violation)", sig.Subject.ID, portStr, proto)
+								case "failed":
+									kliqLog.Printf("TUPLE deny edge %s:%s/%s failed: %s", sig.Subject.ID, portStr, proto, result.Reason)
 								}
 							}
 						}
@@ -670,18 +721,16 @@ func main() {
 			pepParams := c.toPEPParams()
 			for ip, st := range state4 {
 				if st.Level != fsm.LevelObserve {
-					pep.TransitionV4(ip, st, fsm.LevelObserve, nowWall, pepParams)
+					st = executor.ApplyDeEnforce4(ip, st, pepParams, nowWall)
 					st.Strikes, st.UpStreak, st.DownStreak, st.NonCompTicks = 0, 0, 0, 0
-					st.Level = fsm.LevelObserve
 					state4[ip] = st
 					n++
 				}
 			}
 			for ip, st := range state6 {
 				if st.Level != fsm.LevelObserve {
-					pep.TransitionV6(ip, st, fsm.LevelObserve, nowWall, pepParams)
+					st = executor.ApplyDeEnforce6(ip, st, pepParams, nowWall)
 					st.Strikes, st.UpStreak, st.DownStreak, st.NonCompTicks = 0, 0, 0, 0
-					st.Level = fsm.LevelObserve
 					state6[ip] = st
 					n++
 				}
@@ -1024,10 +1073,10 @@ func main() {
 		inCands6 := make(map[[16]byte]bool)
 		for _, m := range cands {
 			if m.IPVer == 4 {
-				state4[m.IP4] = processCandidate4(m, state4[m.IP4], nowWall, c, wl, fb, pep, resPPS, resSyn, resScan, resBps, clean)
+				state4[m.IP4] = processCandidate4(m, state4[m.IP4], nowWall, c, wl, fb, resolver, executor, resPPS, resSyn, resScan, resBps, clean)
 				inCands4[m.IP4] = true
 			} else {
-				state6[m.IP6] = processCandidate6(m, state6[m.IP6], nowWall, c, wl, fb, pep, resPPS, resSyn, resScan, resBps, clean)
+				state6[m.IP6] = processCandidate6(m, state6[m.IP6], nowWall, c, wl, fb, resolver, executor, resPPS, resSyn, resScan, resBps, clean)
 				inCands6[m.IP6] = true
 			}
 		}
@@ -1045,7 +1094,21 @@ func main() {
 			}
 			ip := ip4 // capture
 			doT := func(s fsm.State, target fsm.Level) fsm.State {
-				return pep.TransitionV4(ip, s, target, nowWall, pepParams)
+				proposal := actions.ActionProposal{
+					Source:        "housekeeping",
+					Reason:        "fsm_downscale",
+					DesiredAction: actions.FsmLevelToCapability(target),
+					DesiredLevel:  actions.FsmLevelName(target),
+					Target:        actions.ActionTarget{Granularity: "src_ip", Value: ip4String(ip)},
+					CreatedAt:     nowWall,
+				}
+				res := resolver.Resolve(proposal)
+				if res.DenyReason != "" {
+					kliqLog.Printf("ACTION-RESOLVER housekeeping %s %s→%s reason=%q",
+						ip4String(ip), proposal.DesiredLevel, res.ExecutableLevel, res.DenyReason)
+				}
+				newSt, _ := executor.Apply4(ip, s, res, pepParams, nowWall)
+				return newSt
 			}
 			state4[ip4], _ = fsm.Advance(zeroM, st, nowWall, c.toFSMConfig(), doT)
 		}
@@ -1055,7 +1118,21 @@ func main() {
 			}
 			ip := ip6 // capture
 			doT := func(s fsm.State, target fsm.Level) fsm.State {
-				return pep.TransitionV6(ip, s, target, nowWall, pepParams)
+				proposal := actions.ActionProposal{
+					Source:        "housekeeping",
+					Reason:        "fsm_downscale",
+					DesiredAction: actions.FsmLevelToCapability(target),
+					DesiredLevel:  actions.FsmLevelName(target),
+					Target:        actions.ActionTarget{Granularity: "src_ip", Value: ip6String(ip)},
+					CreatedAt:     nowWall,
+				}
+				res := resolver.Resolve(proposal)
+				if res.DenyReason != "" {
+					kliqLog.Printf("ACTION-RESOLVER housekeeping %s %s→%s reason=%q",
+						ip6String(ip), proposal.DesiredLevel, res.ExecutableLevel, res.DenyReason)
+				}
+				newSt, _ := executor.Apply6(ip, s, res, pepParams, nowWall)
+				return newSt
 			}
 			state6[ip6], _ = fsm.Advance(zeroM, st, nowWall, c.toFSMConfig(), doT)
 		}
