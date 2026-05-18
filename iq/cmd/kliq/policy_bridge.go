@@ -7,6 +7,7 @@ import (
 	"strconv"
 
 	"github.com/kernloom/kernloom/pkg/adapters/shieldpep"
+	celeval "github.com/kernloom/kernloom/pkg/core/cel"
 	"github.com/kernloom/kernloom/pkg/core/fsm"
 	"github.com/kernloom/kernloom/pkg/core/pdp"
 	"github.com/kernloom/kernloom/pkg/core/policy"
@@ -174,8 +175,34 @@ func rulesFromPolicyPack(pp *policy.PolicyPack, c *cfg) {
 		}
 	}
 
+	// Compile v1.2 CEL rules. These are evaluated per-source-IP on every tick
+	// independently of the FSM-level rules above.
+	c.CELRules = nil
+	for i, rule := range pp.Spec.Rules {
+		if rule.When.Language != "cel" || rule.When.Expression == "" {
+			continue
+		}
+		level := capabilityToFsmLevel(rule.Then.Capability)
+		compiled, err := celeval.Compile(
+			rule.Name,
+			rule.Then.Capability,
+			level,
+			rule.Then.TTL.D.String(),
+			rule.Then.Params,
+			rule.When,
+		)
+		if err != nil {
+			kliqLog.Printf("WARNING: pack rule[%d] %q CEL compile error: %v — rule skipped", i, rule.Name, err)
+			continue
+		}
+		c.CELRules = append(c.CELRules, compiled)
+		kliqLog.Printf("Policy pack: CEL rule %q compiled (capability=%s level=%s)", rule.Name, rule.Then.Capability, level)
+	}
+
 	// Log enforcement mode so operators can verify pack intent after all rules are read.
-	if c.SoftDirectiveRatePPS > 0 || c.HardDirectiveRatePPS > 0 {
+	if len(c.CELRules) > 0 {
+		kliqLog.Printf("Policy pack: %d CEL rule(s) active (v1.2 expression-based enforcement)", len(c.CELRules))
+	} else if c.SoftDirectiveRatePPS > 0 || c.HardDirectiveRatePPS > 0 {
 		kliqLog.Printf("Policy pack: directive mode — soft=%dpps hard=%dpps (access-control, fixed rate from pack)",
 			c.SoftDirectiveRatePPS, c.HardDirectiveRatePPS)
 	} else {

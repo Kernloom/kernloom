@@ -44,6 +44,23 @@ type Metadata struct {
 	Name        string            `yaml:"name"`
 	Description string            `yaml:"description,omitempty"`
 	Labels      map[string]string `yaml:"labels,omitempty"`
+	// IssuedAt is set by Forge at render/sign time (RFC3339). KLIQ uses it for
+	// rollback protection: a pack whose IssuedAt is before the active pack's
+	// IssuedAt is rejected without applying it (CLAUDE.md rule #9).
+	IssuedAt string `yaml:"issued_at,omitempty"`
+}
+
+// ParseIssuedAt parses the IssuedAt field as a UTC time.
+// Returns zero time and false when the field is absent or malformed.
+func (m *Metadata) ParseIssuedAt() (time.Time, bool) {
+	if m.IssuedAt == "" {
+		return time.Time{}, false
+	}
+	t, err := time.Parse(time.RFC3339, m.IssuedAt)
+	if err != nil {
+		return time.Time{}, false
+	}
+	return t.UTC(), true
 }
 
 // Spec is the policy body.
@@ -122,18 +139,31 @@ type RuleSpec struct {
 	Then ThenSpec `yaml:"then"`
 }
 
+// Binding declares a named CEL variable resolved from live signal data or
+// baseline statistics at evaluation time.
+type Binding struct {
+	From      string `yaml:"from"`                // "signal" | "baseline"
+	ID        string `yaml:"id,omitempty"`        // signal id  (from: signal)
+	Signal    string `yaml:"signal,omitempty"`    // signal id  (from: baseline)
+	Scope     string `yaml:"scope,omitempty"`     // "src_ip" | "global" | ...
+	Statistic string `yaml:"statistic,omitempty"` // "upper_bound" | "confidence" | "phase" | ...
+}
+
 // WhenSpec describes the condition that triggers a rule.
+// Two forms are supported:
+//   - v1.1 (capability-based): Capability is set; KLIQ maps it to an FSM level.
+//   - v1.2 (CEL-based): Language=="cel", Expression is a CEL predicate evaluated
+//     per-source on every tick against live signals and baseline statistics.
 type WhenSpec struct {
-	// Capability is the v1.1 trigger: the Forge capability ID that this rule
-	// applies to. KLIQ maps the capability to its FSM level internally.
+	// v1.1 fields
 	Capability string `yaml:"capability,omitempty"`
+	FsmLevel   string `yaml:"fsm_level,omitempty"` // deprecated v1.0; use Capability
+	Signal     string `yaml:"signal,omitempty"`
 
-	// FsmLevel is the v1.0 trigger. Deprecated in v1.1; use Capability instead.
-	// Kept for backward compatibility with packs generated before v1.1.
-	FsmLevel string `yaml:"fsm_level,omitempty"`
-
-	// Signal matches a specific signal type (e.g. graph.new_edge_after_freeze).
-	Signal string `yaml:"signal,omitempty"`
+	// v1.2 CEL fields — present when Language == "cel"
+	Language   string             `yaml:"language,omitempty"`
+	Bindings   map[string]Binding `yaml:"bindings,omitempty"`
+	Expression string             `yaml:"expression,omitempty"`
 }
 
 // ThenSpec describes the enforcement action to take when a rule matches.
@@ -183,7 +213,10 @@ func (d *Duration) UnmarshalYAML(unmarshal func(interface{}) error) error {
 }
 
 const (
-	expectedAPIVersion = "kernloom.io/v1alpha1"
+	// expectedAPIVersion uses the KLIQ-specific API group to distinguish
+	// compiled runtime packs from Forge canonical source policies.
+	// Forge source policies use forge.kernloom.io/v1alpha2.
+	expectedAPIVersion = "kernloom.io/kliq/v1alpha1"
 	expectedKind       = "LocalPolicyPack"
 )
 

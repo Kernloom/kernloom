@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/kernloom/kernloom/pkg/adapters/shieldpep"
+	celeval "github.com/kernloom/kernloom/pkg/core/cel"
 	"github.com/kernloom/kernloom/pkg/core/fsm"
 )
 
@@ -32,11 +33,16 @@ type cfg struct {
 	// policy file is loaded — unsigned packs are rejected (CLAUDE.md rule #8).
 	PolicyVerifyKeyPath string
 
+	// CELRules holds compiled v1.2 CEL rules from the active policy pack.
+	// Populated by rulesFromPolicyPack; evaluated per-source-IP on every tick.
+	CELRules []*celeval.CompiledRule
+
 	// Forge control-plane coordinates.
-	ForgeURL       string
-	ForgeEnrollKey string // shared enrollment secret (Authorization: Bearer)
-	ForgeHeartbeat time.Duration
-	FailMode       string // fail_static | fail_open
+	ForgeURL         string
+	ForgeEnrollToken string // one-time enrollment token (consumed at enrollment, replaced by session token)
+	ForgeCAPath      string // path to CA certificate for TLS verification (PEM); empty = system roots
+	ForgeHeartbeat   time.Duration
+	FailMode         string // fail_static | fail_open
 
 	// Mode + policy + pdp config
 	Mode       string // "standalone" or "managed"
@@ -410,8 +416,9 @@ AGENT FLAGS
 	flag.StringVar(&c.DeploymentConfigPath, "deployment-config", "", "path to a KliqDeploymentConfig YAML (node identity, mode, runtime paths, Forge URL); overrides flag defaults when set")
 	flag.StringVar(&c.ComponentConfigPath, "component-config", "", "path to a KliqComponentConfig YAML (enabled adapters and analyzers); reserved for future use")
 	flag.StringVar(&c.PolicyVerifyKeyPath, "policy-verify-key", "", "path to Ed25519 public key for verifying LocalPolicyPack signatures; required in managed mode")
-	flag.StringVar(&c.ForgeURL, "forge-url", "", "forge serve base URL (e.g. http://forge.example.com:8080); enables enrollment and heartbeat when set")
-	flag.StringVar(&c.ForgeEnrollKey, "forge-enroll-key", "", "shared enrollment key for forge serve (Authorization: Bearer)")
+	flag.StringVar(&c.ForgeURL, "forge-url", "", "forge serve base URL (e.g. https://forge.example.com:8443); enables enrollment and heartbeat when set")
+	flag.StringVar(&c.ForgeEnrollToken, "forge-enroll-token", "", "one-time enrollment token issued by 'forge token create' (consumed on first enrollment)")
+	flag.StringVar(&c.ForgeCAPath, "forge-ca", "", "path to PEM CA certificate for TLS verification of forge serve; empty = system roots")
 	flag.DurationVar(&c.ForgeHeartbeat, "forge-heartbeat", 5*time.Minute, "heartbeat interval to forge serve")
 
 	flag.StringVar(&c.Mode, "mode", "standalone", `agent mode: standalone (local policy) or managed (Forge-managed; currently logs a warning and runs as standalone)`)
