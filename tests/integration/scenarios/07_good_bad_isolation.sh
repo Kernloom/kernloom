@@ -20,16 +20,25 @@ good_http_many 5
 sleep 3
 
 echo "[07] starting sustained bad traffic in background"
+# Rate: ~10 req/s (sleep 0.1) — enough to trigger enforcement without
+# overwhelming the single-threaded python HTTP server.
 sudo ip netns exec "$KLT_NS_BAD" bash -c "
   while true; do
     curl -s --max-time 1 http://$KLT_IP_API:$KLT_API_PORT/ >/dev/null 2>&1 || true
-    sleep 0.05
+    sleep 0.1
   done
 " &
 BAD_PID=$!
 
-# Give kliq time to escalate bad source.
-sleep 6
+# Wait for kliq to escalate bad source to at least RATE_HARD/BLOCK.
+# With --soft-at=2 --hard-at=4 --block-at=6 and 1s tick, needs ~8s.
+sleep 10
+
+# Verify the HTTP server is still alive before measuring good source.
+# If the server died from overload the test result would be a false negative.
+sudo ip netns exec "$KLT_NS_GOOD" \
+  curl -fsS --max-time 3 "$(api_url)" >/dev/null 2>&1 \
+  || fail "07: HTTP server unreachable before measurement phase (server may have crashed)"
 
 echo "[07] measuring good source reachability during enforcement (20 checks)"
 GOOD_OK=0

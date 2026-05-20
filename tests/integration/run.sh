@@ -49,6 +49,26 @@ cleanup_all
 # Make sure bpffs is mounted.
 mount -t bpf bpf /sys/fs/bpf 2>/dev/null || true
 
+# Build forge binary for scenarios 09+10 (no XDP required).
+# Skips silently if the kernloom-forge repo is not found — scenarios will
+# then fail with a clear "forge not found" message rather than silently skip.
+if [[ ! -x "$KLT_FORGE" ]]; then
+  FORGE_REPO="${KLT_FORGE_ROOT:-}"
+  if [[ -z "$FORGE_REPO" ]] && [[ -d "$ROOT/../kernloom-forge" ]]; then
+    FORGE_REPO="$(cd "$ROOT/../kernloom-forge" && pwd)"
+  fi
+  if [[ -n "$FORGE_REPO" && -d "$FORGE_REPO" ]]; then
+    echo "[runner] building forge from $FORGE_REPO"
+    mkdir -p "$ROOT/bin"
+    (cd "$FORGE_REPO" && go build -o "$KLT_FORGE" ./cmd/forge/) \
+      && echo "[runner] forge built: $KLT_FORGE" \
+      || echo "[runner] WARNING: forge build failed — scenarios 09+10 will fail"
+  else
+    echo "[runner] WARNING: kernloom-forge repo not found — scenarios 09+10 will fail"
+    echo "         Set KLT_FORGE_ROOT or place kernloom-forge next to kernloom"
+  fi
+fi
+
 SCENARIOS=(
   tests/integration/scenarios/00_smoke_build.sh
   tests/integration/scenarios/01_attach_stats.sh
