@@ -87,22 +87,12 @@ assert_contains "$NODES_OUT" "$NODE_ID"
 pass "09.5: node approved"
 
 # ── 7. Pack registration and assignment ───────────────────────────────────────
-
-"$KLT_FORGE" keygen --out "$KLT_FORGE_SIGNING_KEY" 2>/dev/null
+# Write a minimal LocalPolicyPack directly — no compile/sign needed for this test.
+# Forge stores the raw content and delivers it to KLIQ; signature is verified by KLIQ,
+# not Forge. The test only checks that the delivery API works (HTTP 200).
 
 PACK_FILE="$RESULTS_DIR/test.pack.yaml"
-# Use an existing example policy if available, otherwise create a minimal one.
-POLICY_SRC="$KLT_ROOT/tests/integration/testdata/policies"
-if [[ -d "$POLICY_SRC" ]]; then
-  "$KLT_FORGE" pack build "$POLICY_SRC" \
-    --sign-key "$KLT_FORGE_SIGNING_KEY" \
-    --registry "${KLT_FORGE_ROOT}/registries/core" \
-    -o "$PACK_FILE" 2>/dev/null || true
-fi
-
-# Fallback: create a minimal valid pack using pack compile directly.
-if [[ ! -f "$PACK_FILE" ]]; then
-  cat > "$RESULTS_DIR/minimal-policy.yaml" << 'YAML'
+cat > "$PACK_FILE" << 'YAML'
 apiVersion: kernloom.io/kliq/v1alpha1
 kind: LocalPolicyPack
 metadata:
@@ -114,15 +104,10 @@ spec:
     max_action: observe
   rules: []
 YAML
-  # Sign with forge signing tool if available, else write unsigned.
-  "$KLT_FORGE" pack build "$RESULTS_DIR/minimal-policy.yaml" \
-    --sign-key "$KLT_FORGE_SIGNING_KEY" \
-    -o "$PACK_FILE" 2>/dev/null || cp "$RESULTS_DIR/minimal-policy.yaml" "$PACK_FILE"
-fi
 
 "$KLT_FORGE" pack register it-test-pack \
   --file "$PACK_FILE" \
-  --db   "$KLT_FORGE_DB" 2>/dev/null
+  --db   "$KLT_FORGE_DB"
 
 forge_admin -X POST "$KLT_FORGE_URL/api/v1/nodes/$NODE_ID/assign-pack?pack=it-test-pack" > /dev/null
 

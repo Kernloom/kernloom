@@ -74,6 +74,12 @@ assert_contains "$STEPDOWN_LOG" "ACTION ip=${KLT_IP_BAD}"
 echo "[08] phase 2: stopping bad traffic — waiting for recovery (TTL=5s + 2 clean ticks)"
 sudo kill "$BAD_PID" 2>/dev/null || true
 wait "$BAD_PID" 2>/dev/null || true
+# The curl/bash loop runs inside a network namespace via 'sudo ip netns exec'.
+# Killing the parent sudo process does NOT kill the inner bash+curl processes.
+# Explicitly kill all remaining curl and bash processes in the bad namespace.
+sudo ip netns exec "$KLT_NS_BAD" pkill -9 curl 2>/dev/null || true
+sudo ip netns exec "$KLT_NS_BAD" pkill -9 bash 2>/dev/null || true
+sleep 0.5  # brief wait for processes to exit
 # TTL=5s + down-need=2 ticks + margin = ~10s
 # Full stepdown chain: BLOCK(up to 9s) → RATE_HARD(5s) → RATE_SOFT(5s) → OBSERVE.
 # Observed total: ~22s. Sleep 25s to have margin.
