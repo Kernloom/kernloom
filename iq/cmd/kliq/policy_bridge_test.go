@@ -125,7 +125,7 @@ func TestCapEnforcementLevel_UnknownValueNoOp(t *testing.T) {
 
 func makeTestPack(rules []policy.RuleSpec, maxAction string, allowBlock bool) *policy.PolicyPack {
 	return &policy.PolicyPack{
-		APIVersion: "kernloom.io/v1alpha1",
+		APIVersion: "kernloom.io/kliq/v1alpha1",
 		Kind:       "LocalPolicyPack",
 		Metadata:   policy.Metadata{Name: "test-pack"},
 		Spec: policy.Spec{
@@ -546,7 +546,7 @@ func TestRulesFromPolicyPack_DirectiveRatePPS(t *testing.T) {
 
 func TestV11PackWithDirectiveRate(t *testing.T) {
 	const packWithRate = `
-apiVersion: kernloom.io/v1alpha1
+apiVersion: kernloom.io/kliq/v1alpha1
 kind: LocalPolicyPack
 metadata:
   name: api-rate-limit

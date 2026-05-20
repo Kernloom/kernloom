@@ -226,6 +226,82 @@ func (c *forgeClient) ReportPackStatus(ctx context.Context, packName string, app
 	return err
 }
 
+// ── Runtime bundle ────────────────────────────────────────────────────────────
+
+// PullBundle fetches GET /api/v1/nodes/{id}/runtime-bundle.
+// Returns the raw signed YAML bytes and bundle generation, or nil if none assigned.
+func (c *forgeClient) PullBundle(ctx context.Context) ([]byte, int, error) {
+	resp, err := c.do(ctx, http.MethodGet,
+		"/api/v1/nodes/"+c.nodeID+"/runtime-bundle", nil)
+	if err != nil {
+		return nil, 0, fmt.Errorf("pull-bundle: %w", err)
+	}
+	defer resp.Body.Close()
+
+	switch resp.StatusCode {
+	case http.StatusOK:
+		b, err := io.ReadAll(resp.Body)
+		if err != nil {
+			return nil, 0, fmt.Errorf("pull-bundle: read body: %w", err)
+		}
+		gen := 0
+		if s := resp.Header.Get("X-Bundle-Generation"); s != "" {
+			fmt.Sscanf(s, "%d", &gen)
+		}
+		return b, gen, nil
+	case http.StatusNotFound:
+		return nil, 0, nil // no bundle assigned yet
+	case http.StatusForbidden:
+		return nil, 0, nil // pending or revoked
+	default:
+		return nil, 0, fmt.Errorf("pull-bundle: server returned %d", resp.StatusCode)
+	}
+}
+
+// ReportBundleStatus sends POST /api/v1/nodes/{id}/runtime-bundle/status.
+func (c *forgeClient) ReportBundleStatus(ctx context.Context, generation int, applied, drift bool, statusJSON, errDetail string) error {
+	_, err := c.do(ctx, http.MethodPost,
+		"/api/v1/nodes/"+c.nodeID+"/runtime-bundle/status",
+		map[string]any{
+			"node_id":           c.nodeID,
+			"bundle_generation": generation,
+			"applied":           applied,
+			"drift_detected":    drift,
+			"status_json":       statusJSON,
+			"error_detail":      errDetail,
+		},
+	)
+	return err
+}
+
+// UploadBaselineProposal sends POST /api/v1/nodes/{id}/baseline-proposals
+// with the raw YAML proposal bytes.
+func (c *forgeClient) UploadBaselineProposal(ctx context.Context, proposalYAML []byte) (string, error) {
+	var bodyReader io.Reader = bytes.NewReader(proposalYAML)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost,
+		c.baseURL+"/api/v1/nodes/"+c.nodeID+"/baseline-proposals", bodyReader)
+	if err != nil {
+		return "", fmt.Errorf("upload-proposal: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/yaml")
+	if c.sessionToken != "" {
+		req.Header.Set("Authorization", "Bearer "+c.sessionToken)
+	}
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("upload-proposal: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusCreated {
+		return "", fmt.Errorf("upload-proposal: server returned %d", resp.StatusCode)
+	}
+	var result struct {
+		ID string `json:"id"`
+	}
+	_ = json.NewDecoder(resp.Body).Decode(&result)
+	return result.ID, nil
+}
+
 // ── Pack application ──────────────────────────────────────────────────────────
 
 // PackHash returns the SHA-256 hex digest of the given pack bytes.

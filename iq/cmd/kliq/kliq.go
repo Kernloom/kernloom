@@ -45,6 +45,8 @@ import (
 	"time"
 
 	"github.com/kernloom/kernloom/iq/internal/actions"
+	"github.com/kernloom/kernloom/iq/internal/lifecycle/bootstrapautotune"
+	lgraph "github.com/kernloom/kernloom/iq/internal/lifecycle/graph"
 	"github.com/kernloom/kernloom/pkg/adapterruntime"
 	"github.com/kernloom/kernloom/pkg/adapters/graphlearner"
 	"github.com/kernloom/kernloom/pkg/adapters/shieldpep"
@@ -376,6 +378,53 @@ func main() {
 	report := buildConfigAssetReport(c, nodeID, features)
 	logInventoryAndReport(inv, report, c.StatePath)
 
+	// ── Managed lifecycle controllers ─────────────────────────────────────────
+	// Both controllers are initialised from defaults; if a RuntimeBundle is
+	// present (persisted or pulled at startup) applyBundleUpdate will rebuild
+	// them with the bundle-provided config.
+
+	// Bootstrap/autotune lifecycle controller.
+	bsCfg := bootstrapautotune.DefaultConfig()
+	bsCfg.Enabled = c.Bootstrap
+	var bsInitState *bootstrapautotune.State
+	if stFile != nil && stFile.Active.Bootstrap.Enabled {
+		bsInitState = &bootstrapautotune.State{
+			Enabled:         stFile.Active.Bootstrap.Enabled,
+			StartedAt:       stFile.Active.Bootstrap.StartedAt,
+			Phase:           stFile.Active.Bootstrap.Phase,
+			ObservedSeconds: stFile.Active.Bootstrap.ObservedSeconds,
+		}
+	}
+	bsCtl := bootstrapautotune.New(bsCfg, bsInitState)
+
+	// Graph lifecycle controller (managed mode only; stays at learn by default).
+	graphCfg := lgraph.DefaultConfig()
+	graphCfg.Enabled = c.Mode == "managed"
+	graphPhase := ""
+	graphLifecycleStart := time.Time{}
+	if stFile != nil {
+		graphPhase = stFile.Active.GraphLifecyclePhase
+		graphLifecycleStart = stFile.Active.GraphLifecycleStartedAt
+	}
+	graphCtl := lgraph.New(graphCfg, graphPhase, graphLifecycleStart)
+
+	// managedState tracks bundle-level persistence (generation, hash).
+	ms := managedState{}
+	if stFile != nil {
+		ms.BundleGeneration = stFile.Active.ForgeBundleGeneration
+		ms.BundleHash = stFile.Active.ForgeBundleHash
+	}
+
+	// bundleUpdateCh receives raw bundle YAML from the heartbeat goroutine.
+	// Non-blocking: the main loop drains it once per tick.
+	bundleUpdateCh := make(chan []byte, 1)
+
+	// Apply last-known-good bundle on startup (fail_static).
+	if lkg := loadLastKnownGoodBundle(c.StatePath); lkg != nil {
+		kliqLog.Printf("MANAGED: applying last-known-good bundle from disk")
+		applyBundleUpdate(lkg, &c, &bsCtl, &graphCtl, &ms, stFile)
+	}
+
 	// Forge enrollment + heartbeat loop (only when --forge-url is set).
 	var forgeC *forgeClient
 	var enrolledPackName string
@@ -462,6 +511,13 @@ func main() {
 					if err != nil {
 						kliqLog.Printf("FORGE heartbeat failed: %v", err)
 						continue
+					}
+					// Pull and deliver RuntimeBundle when available (non-blocking send).
+					if bundleBytes, _, bundleErr := forgeC.PullBundle(context.Background()); bundleErr == nil && bundleBytes != nil {
+						select {
+						case bundleUpdateCh <- bundleBytes:
+						default: // channel full — drop; next heartbeat will retry
+						}
 					}
 					if packUpdated {
 						kliqLog.Printf("FORGE pack update available — pulling")
@@ -853,6 +909,19 @@ func main() {
 		case <-ticker.C:
 		}
 		nowWall := time.Now()
+
+		// Process pending bundle update (non-blocking; delivered by heartbeat goroutine).
+		select {
+		case rawBundle := <-bundleUpdateCh:
+			applyBundleUpdate(rawBundle, &c, &bsCtl, &graphCtl, &ms, stFile)
+			// Persist updated managed state immediately.
+			if stFile != nil {
+				stFile.Active.ForgeBundleGeneration = ms.BundleGeneration
+				stFile.Active.ForgeBundleHash = ms.BundleHash
+				_ = writeStateAtomic(c.StatePath, stFile)
+			}
+		default:
+		}
 
 		// Handle SIGUSR1: clear FSM state to sync with an external map reset.
 		select {
@@ -1255,6 +1324,14 @@ func main() {
 				}
 				bs.ObservedSeconds += sec
 			}
+			// Mirror into lifecycle controller (managed-mode status reporting).
+			{
+				sec := uint64(math.Round(c.Interval.Seconds()))
+				if sec == 0 {
+					sec = 1
+				}
+				bsCtl.RecordTick(clean, sec, nil)
+			}
 		}
 
 		// Track which IPs were processed this tick so the sweep below can skip them.
@@ -1383,8 +1460,37 @@ func main() {
 		if c.Bootstrap && bs.Enabled && c.StatePath != "" && stFile != nil && tickN%30 == 0 {
 			stFile.Active.Bootstrap = bs
 			stFile.Active.ConfigHash = cfgHash
+			// Also persist managed lifecycle state.
+			stFile.Active.GraphLifecyclePhase = graphCtl.Phase()
+			stFile.Active.GraphLifecycleStartedAt = graphCtl.StartedAt()
 			if err := writeStateAtomic(c.StatePath, stFile); err != nil {
 				kliqLog.Printf("bootstrap checkpoint failed: %v", err)
+			}
+		}
+
+		// Managed graph lifecycle tick (advance phase state machine).
+		if c.Mode == "managed" {
+			gStats := lgraph.GraphStats{
+				BootstrapPhase:   bsCtl.Effective().Phase,
+				CleanLearningSec: bsCtl.ObservedSeconds(),
+			}
+			if changed := graphCtl.Tick(gStats, nowWall); changed {
+				kliqLog.Printf("MANAGED: graph lifecycle phase → %s", graphCtl.Phase())
+				if stFile != nil {
+					stFile.Active.GraphLifecyclePhase = graphCtl.Phase()
+					stFile.Active.GraphLifecycleStartedAt = graphCtl.StartedAt()
+					_ = writeStateAtomic(c.StatePath, stFile)
+				}
+				// Upload proposal when reaching freeze_ready.
+				if graphCtl.Phase() == lgraph.PhaseFreezeReady && forgeC != nil && graphCfg.ProposalUpload {
+					go func() {
+						id := uploadBaselineProposal(context.Background(), forgeC, nodeID,
+							graphCtl, bsCtl, gStats, &c)
+						if id != "" {
+							graphCtl.MarkProposalSent(time.Now())
+						}
+					}()
+				}
 			}
 		}
 		for ip, pv := range prev4 {

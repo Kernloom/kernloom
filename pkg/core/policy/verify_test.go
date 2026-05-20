@@ -35,7 +35,7 @@ func genKeyPair(t *testing.T) (ed25519.PublicKey, ed25519.PrivateKey) {
 	return pub, priv
 }
 
-const minimalPack = `apiVersion: kernloom.io/v1alpha1
+const minimalPack = `apiVersion: kernloom.io/kliq/v1alpha1
 kind: LocalPolicyPack
 metadata:
   name: test-pack

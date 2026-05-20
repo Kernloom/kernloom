@@ -80,6 +80,19 @@ type stateActive struct {
 	// Used for drift detection: if the running config differs from the last
 	// applied pack, KLIQ reports drift_detected=true in the next heartbeat.
 	ForgePackHash string `json:"forge_pack_hash,omitempty"`
+
+	// ForgeBundleGeneration is the generation number of the last applied RuntimeBundle.
+	ForgeBundleGeneration int `json:"forge_bundle_generation,omitempty"`
+
+	// ForgeBundleHash is the content hash of the last applied RuntimeBundle.
+	ForgeBundleHash string `json:"forge_bundle_hash,omitempty"`
+
+	// GraphLifecyclePhase is the persisted managed-mode graph lifecycle phase
+	// (learning, freeze_ready, frozen_observe, frozen_enforce).
+	GraphLifecyclePhase string `json:"graph_lifecycle_phase,omitempty"`
+
+	// GraphLifecycleStartedAt is when the current graph lifecycle session started.
+	GraphLifecycleStartedAt time.Time `json:"graph_lifecycle_started_at,omitempty"`
 }
 
 type stateHistory struct {
