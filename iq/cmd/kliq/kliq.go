@@ -49,6 +49,8 @@ import (
 	lgraph "github.com/kernloom/kernloom/iq/internal/lifecycle/graph"
 	"github.com/kernloom/kernloom/pkg/adapterruntime"
 	"github.com/kernloom/kernloom/pkg/adapters/graphlearner"
+	"github.com/kernloom/kernloom/pkg/adapters/klshieldguard"
+	"github.com/kernloom/kernloom/pkg/adapters/klshieldshadow"
 	"github.com/kernloom/kernloom/pkg/adapters/shieldpep"
 	"github.com/kernloom/kernloom/pkg/adapters/shieldtelemetry"
 	"github.com/kernloom/kernloom/pkg/adapters/sourcebaseline"
@@ -64,6 +66,7 @@ import (
 	"github.com/kernloom/kernloom/pkg/core/signal"
 	"github.com/kernloom/kernloom/pkg/decisionengine"
 	gstore "github.com/kernloom/kernloom/pkg/graphstore/sqlite"
+	"github.com/kernloom/kernloom/pkg/pipeline"
 	"github.com/kernloom/kernloom/pkg/shieldclient"
 	"github.com/kernloom/kernloom/pkg/signalengine/shieldheuristic"
 
@@ -418,6 +421,25 @@ func main() {
 	// bundleUpdateCh receives raw bundle YAML from the heartbeat goroutine.
 	// Non-blocking: the main loop drains it once per tick.
 	bundleUpdateCh := make(chan []byte, 1)
+
+	// ── Shadow metric pipeline ──────────────────────────────────────────────────
+	// Disabled by default (metric_pipeline.enabled=false). When enabled in shadow
+	// mode, KLShield telemetry is mirrored into the generic metric baseline engine
+	// alongside the existing shieldheuristic+FSM path (no enforcement change).
+	shadowPipelineCfg := pipeline.DefaultConfig()
+	// TODO: read from KliqComponentConfig.Analyzers.MetricPipeline when available
+	// For now: check environment variable for easy testing
+	if os.Getenv("KLIQ_METRIC_PIPELINE") == "shadow" {
+		shadowPipelineCfg.Enabled = true
+		shadowPipelineCfg.Mode = pipeline.ModeShadow
+	}
+	guardCfg := klshieldguard.DefaultConfig()
+	shadowPipeline := pipeline.New(pipeline.Options{
+		Config: shadowPipelineCfg,
+		Guards: []adapterruntime.LearningGuard{klshieldguard.New(guardCfg)},
+	})
+	// shadowSamples accumulates per-source samples during the tick for batch submission.
+	var shadowSamples []klshieldshadow.TelemetrySample
 
 	// Apply last-known-good bundle on startup (fail_static).
 	if lkg := loadLastKnownGoodBundle(c.StatePath); lkg != nil {
@@ -877,6 +899,11 @@ func main() {
 		syncEdge4Allow()
 	}
 
+	// Start shadow pipeline (no-op when disabled).
+	pipelineCtx, pipelineCancel := context.WithCancel(context.Background())
+	defer pipelineCancel()
+	shadowPipeline.Start(pipelineCtx)
+
 	ticker := time.NewTicker(c.Interval)
 	defer ticker.Stop()
 	var tickN uint64
@@ -1026,6 +1053,15 @@ func main() {
 			dropRLRate := float64(dDropRL) / sec
 
 			subject4 := observation.EntityRef{Kind: observation.KindIP, ID: ip4String(k4)}
+
+			// Mirror telemetry into shadow metric pipeline (no enforcement effect).
+			if shadowPipeline.IsActive() {
+				shadowSamples = append(shadowSamples, klshieldshadow.TelemetrySample{
+					SourceIP: subject4.ID, PPS: pps, BPS: bps,
+					SYNRate: synRate, ScanRate: scanRate, DropRLRate: dropRLRate,
+					Window: c.Interval, Timestamp: nowWall,
+				})
+			}
 
 			// Source baseline update + per-source effective thresholds.
 			var fsmM4 fsm.Metrics
@@ -1466,6 +1502,13 @@ func main() {
 			if err := writeStateAtomic(c.StatePath, stFile); err != nil {
 				kliqLog.Printf("bootstrap checkpoint failed: %v", err)
 			}
+		}
+
+		// Flush shadow metric pipeline samples collected during this tick.
+		if shadowPipeline.IsActive() && len(shadowSamples) > 0 {
+			batch := klshieldshadow.BatchSamplesToMetrics(shadowSamples)
+			_ = batch // submitted directly; future extractor path for Track D
+			shadowSamples = shadowSamples[:0]
 		}
 
 		// Managed graph lifecycle tick (advance phase state machine).
