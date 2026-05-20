@@ -493,6 +493,7 @@ func main() {
 						} else {
 							activePackHash = PackHash(packBytes)
 							kliqLog.Printf("FORGE pack applied: %s", packName)
+							updateSidecarPack(c.StatePath, packName, c.PolicyMaxAction)
 							forgeC.ReportPackStatus(context.Background(), packName, true, "")
 							if stFile != nil {
 								stFile.Active.ForgePackName = packName
@@ -559,6 +560,7 @@ func main() {
 								enrolledPackName = packName
 								activePackHash = PackHash(packBytes)
 								kliqLog.Printf("FORGE pack updated: %s", packName)
+								updateSidecarPack(c.StatePath, packName, c.PolicyMaxAction)
 								forgeC.ReportPackStatus(context.Background(), packName, true, "")
 								// Persist updated Forge state.
 								if stFile != nil {

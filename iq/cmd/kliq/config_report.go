@@ -104,6 +104,28 @@ type runtimeReport struct {
 	ConfigReport componentinventory.KliqConfigAssetReport     `json:"config_report"`
 }
 
+// updateSidecarPack rewrites the sidecar to reflect that a policy pack was
+// applied after startup (e.g. pulled from Forge on first heartbeat).
+func updateSidecarPack(statePath, packName, maxAction string) {
+	sidecar := reportSidecarPath(statePath)
+	if sidecar == "" {
+		return
+	}
+	data, err := os.ReadFile(sidecar)
+	if err != nil {
+		return
+	}
+	var rep runtimeReport
+	if err := json.Unmarshal(data, &rep); err != nil {
+		return
+	}
+	rep.ConfigReport.HasPolicyPack = true
+	rep.ConfigReport.PolicyMaxAction = maxAction
+	if updated, err := json.MarshalIndent(rep, "", "  "); err == nil {
+		_ = os.WriteFile(sidecar, updated, 0o644)
+	}
+}
+
 // logInventoryAndReport logs a summary of the inventory and policy config, and
 // saves the full report as JSON to a sidecar file for "kliq status".
 func logInventoryAndReport(
