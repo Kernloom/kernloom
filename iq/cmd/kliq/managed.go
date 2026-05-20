@@ -50,6 +50,12 @@ func applyBundleUpdate(
 	ms *managedState,
 	stFile *stateFile,
 ) {
+	// Skip if the bundle hasn't changed — prevents repeated log spam every heartbeat.
+	newHash := fmt.Sprintf("%x", hashBundleBytes(rawBundle))[:16]
+	if newHash == ms.BundleHash {
+		return
+	}
+
 	b, err := bundle.Parse(rawBundle)
 	if err != nil {
 		kliqLog.Printf("BUNDLE apply: parse failed: %v", err)
