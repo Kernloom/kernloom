@@ -75,7 +75,9 @@ echo "[08] phase 2: stopping bad traffic — waiting for recovery (TTL=5s + 2 cl
 sudo kill "$BAD_PID" 2>/dev/null || true
 wait "$BAD_PID" 2>/dev/null || true
 # TTL=5s + down-need=2 ticks + margin = ~10s
-sleep 12
+# Full stepdown chain: BLOCK(up to 9s) → RATE_HARD(5s) → RATE_SOFT(5s) → OBSERVE.
+# Observed total: ~22s. Sleep 25s to have margin.
+sleep 25
 
 echo "[08] phase 3: verifying bad source can reach API again"
 RECOVER_OK=0
