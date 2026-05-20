@@ -20,10 +20,13 @@ good_http_many 5
 sleep 3
 
 echo "[07] starting sustained bad traffic in background"
+# 2 req/s — each HTTP request is ~10-15 packets, so 20-30 pps > trig-pps=5.
+# Do NOT use sleep 0.05 (20 req/s): that spawns hundreds of curl processes
+# and triggers the OOM killer on memory-constrained test hosts.
 sudo ip netns exec "$KLT_NS_BAD" bash -c "
   while true; do
     curl -s --max-time 1 http://$KLT_IP_API:$KLT_API_PORT/ >/dev/null 2>&1 || true
-    sleep 0.05
+    sleep 0.5
   done
 " &
 BAD_PID=$!
@@ -32,9 +35,9 @@ BAD_PID=$!
 # We test isolation property: when bad source is being rate-limited or blocked,
 # good source must be completely unaffected.
 # We don't require BLOCK specifically because rate-limiting may keep strikes low.
-echo "[07] waiting for bad source enforcement (RATE_SOFT) to start (max 10s)..."
+echo "[07] waiting for bad source enforcement (RATE_SOFT) to start (max 20s)..."
 ENFORCED=false
-for i in $(seq 1 20); do
+for i in $(seq 1 40); do
   if grep -qE "->RATE_SOFT|->RATE_HARD|->BLOCK" "$KLT_LOG_KLIQ" 2>/dev/null; then
     ENFORCED=true
     break

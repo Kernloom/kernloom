@@ -59,7 +59,7 @@ echo "[08] phase 1: generating bad traffic for 15s to trigger enforcement"
 sudo ip netns exec "$KLT_NS_BAD" bash -c "
   while true; do
     curl -s --max-time 1 http://$KLT_IP_API:$KLT_API_PORT/ >/dev/null 2>&1 || true
-    sleep 0.05
+    sleep 0.5
   done
 " &
 BAD_PID=$!
