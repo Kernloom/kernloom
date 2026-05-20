@@ -56,10 +56,15 @@ echo "$!" > "$KLT_ARTIFACT_DIR/kliq.pid"
 sleep 2
 
 echo "[08] phase 1: generating bad traffic for 15s to trigger enforcement"
+# Use a stop-file so the loop exits cleanly without pkill.
+# pkill -9 bash is dangerous: it kills ALL visible bash processes (shared PID
+# namespace), including the test runner itself, crashing the shell.
+BAD_STOP="/tmp/klt-bad-stop-08-$$"
+rm -f "$BAD_STOP"
 sudo ip netns exec "$KLT_NS_BAD" bash -c "
-  while true; do
+  while [[ ! -f '$BAD_STOP' ]]; do
     curl -s --max-time 1 http://$KLT_IP_API:$KLT_API_PORT/ >/dev/null 2>&1 || true
-    sleep 0.5
+    sleep 0.3
   done
 " &
 BAD_PID=$!
@@ -72,14 +77,10 @@ assert_contains "$STEPDOWN_LOG" "${KLT_IP_BAD}"
 assert_contains "$STEPDOWN_LOG" "ACTION ip=${KLT_IP_BAD}"
 
 echo "[08] phase 2: stopping bad traffic — waiting for recovery (TTL=5s + 2 clean ticks)"
-sudo kill "$BAD_PID" 2>/dev/null || true
+# Signal the loop to exit via stop file, then wait for the process to finish.
+touch "$BAD_STOP"
 wait "$BAD_PID" 2>/dev/null || true
-# The curl/bash loop runs inside a network namespace via 'sudo ip netns exec'.
-# Killing the parent sudo process does NOT kill the inner bash+curl processes.
-# Explicitly kill all remaining curl and bash processes in the bad namespace.
-sudo ip netns exec "$KLT_NS_BAD" pkill -9 curl 2>/dev/null || true
-sudo ip netns exec "$KLT_NS_BAD" pkill -9 bash 2>/dev/null || true
-sleep 0.5  # brief wait for processes to exit
+rm -f "$BAD_STOP"
 # TTL=5s + down-need=2 ticks + margin = ~10s
 # Full stepdown chain: BLOCK(up to 9s) → RATE_HARD(5s) → RATE_SOFT(5s) → OBSERVE.
 # Observed total: ~22s. Sleep 25s to have margin.
