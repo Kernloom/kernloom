@@ -509,6 +509,7 @@ func main() {
 		// Heartbeat goroutine.
 		hbCtx, hbCancel := context.WithCancel(context.Background())
 		defer hbCancel()
+		lastNodeStatus := "pending" // tracks the last known Forge node status
 		go func() {
 			ticker := time.NewTicker(c.ForgeHeartbeat)
 			defer ticker.Stop()
@@ -529,11 +530,16 @@ func main() {
 					drift = false // TODO: implement full hash-based drift after pack path is persisted
 					_ = drift
 
-					packUpdated, err := forgeC.Heartbeat(context.Background(), enrolledPackName, false)
+					packUpdated, nodeStatus, err := forgeC.Heartbeat(context.Background(), enrolledPackName, false)
 					if err != nil {
 						kliqLog.Printf("FORGE heartbeat failed: %v", err)
 						continue
 					}
+					if nodeStatus != "" && nodeStatus != lastNodeStatus {
+						kliqLog.Printf("FORGE node status: %s → %s", lastNodeStatus, nodeStatus)
+						lastNodeStatus = nodeStatus
+					}
+					kliqLog.Printf("FORGE heartbeat ok: pack=%s pack_updated=%v status=%s", enrolledPackName, packUpdated, nodeStatus)
 					// Pull and deliver RuntimeBundle when available (non-blocking send).
 					if bundleBytes, _, bundleErr := forgeC.PullBundle(context.Background()); bundleErr == nil && bundleBytes != nil {
 						select {

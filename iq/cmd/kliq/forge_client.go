@@ -130,8 +130,12 @@ func (c *forgeClient) Enroll(
 	}
 	defer resp.Body.Close()
 
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK {
+		return enrollResponse{}, fmt.Errorf("enroll: server returned %d: %s", resp.StatusCode, string(body))
+	}
 	var er enrollResponse
-	if err := json.NewDecoder(resp.Body).Decode(&er); err != nil {
+	if err := json.Unmarshal(body, &er); err != nil {
 		return enrollResponse{}, fmt.Errorf("enroll: decode response: %w", err)
 	}
 	// Store the session token — all subsequent requests use it instead of the one-time token.
@@ -153,12 +157,13 @@ type heartbeatRequest struct {
 
 type heartbeatResponse struct {
 	PackUpdated bool   `json:"pack_updated"`
+	NodeStatus  string `json:"node_status,omitempty"`
 	Message     string `json:"message,omitempty"`
 }
 
 // Heartbeat sends POST /api/v1/nodes/{id}/heartbeat.
-// Returns true if Forge signals a new pack is available.
-func (c *forgeClient) Heartbeat(ctx context.Context, packName string, drift bool) (bool, error) {
+// Returns pack_updated and the node status from Forge.
+func (c *forgeClient) Heartbeat(ctx context.Context, packName string, drift bool) (packUpdated bool, nodeStatus string, err error) {
 	resp, err := c.do(ctx, http.MethodPost,
 		"/api/v1/nodes/"+c.nodeID+"/heartbeat",
 		heartbeatRequest{
@@ -169,15 +174,19 @@ func (c *forgeClient) Heartbeat(ctx context.Context, packName string, drift bool
 		},
 	)
 	if err != nil {
-		return false, fmt.Errorf("heartbeat: %w", err)
+		return false, "", fmt.Errorf("heartbeat: %w", err)
 	}
 	defer resp.Body.Close()
 
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return false, "", fmt.Errorf("heartbeat: server returned %d: %s", resp.StatusCode, string(body))
+	}
 	var hr heartbeatResponse
 	if err := json.NewDecoder(resp.Body).Decode(&hr); err != nil {
-		return false, nil // non-fatal
+		return false, "", nil // non-fatal
 	}
-	return hr.PackUpdated, nil
+	return hr.PackUpdated, hr.NodeStatus, nil
 }
 
 // ── Pull pack ─────────────────────────────────────────────────────────────────
@@ -365,6 +374,22 @@ func applyForgePack(packBytes []byte, packName, verifyKeyPath string, c *cfg, ac
 
 	applyPolicyPackToCfg(pp, c)
 	rulesFromPolicyPack(pp, c)
+
+	// Log a human-readable summary of what the pack contains.
+	caps := pp.Spec.ActionAuthorization.AllowedCapabilities
+	if len(caps) == 0 {
+		caps = pp.Spec.CapabilitiesRequired
+	}
+	kliqLog.Printf("PACK loaded: name=%s rules=%d capabilities=%v default_effect=%s issued=%s",
+		packName, len(pp.Spec.Rules), caps,
+		pp.Spec.ActionAuthorization.DefaultEffect,
+		func() string {
+			if t, ok := pp.Metadata.ParseIssuedAt(); ok {
+				return t.Format("2006-01-02T15:04Z")
+			}
+			return "unknown"
+		}(),
+	)
 
 	// Update the caller's issued_at tracking on success.
 	if activeIssuedAt != nil {
