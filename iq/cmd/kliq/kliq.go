@@ -54,6 +54,7 @@ import (
 	"github.com/kernloom/kernloom/pkg/adapters/shieldpep"
 	"github.com/kernloom/kernloom/pkg/adapters/shieldtelemetry"
 	"github.com/kernloom/kernloom/pkg/adapters/sourcebaseline"
+	"github.com/kernloom/kernloom/pkg/core/bundle"
 	celeval "github.com/kernloom/kernloom/pkg/core/cel"
 	"github.com/kernloom/kernloom/pkg/core/decision"
 	"github.com/kernloom/kernloom/pkg/core/featureset"
@@ -192,7 +193,18 @@ func main() {
 	c.Cooldown = c.adapterParams.Cooldown
 
 	// Resolve runtime feature profile.
-	// --feature-profile takes precedence; otherwise derive from --graph flag.
+	// Priority: --feature-profile flag > LKG bundle > --graph flag > dos-light default.
+	// The LKG bundle is read here (before adapters start) so its feature_profile takes
+	// effect on startup rather than being applied too late after adapters are already
+	// initialized with the wrong profile.
+	if c.FeatureProfile == "" {
+		if lkgBytes := loadLastKnownGoodBundle(c.StatePath); lkgBytes != nil {
+			if b, err := bundle.Parse(lkgBytes); err == nil && b.Spec.FeatureProfile != "" {
+				c.FeatureProfile = b.Spec.FeatureProfile
+				kliqLog.Printf("Feature profile from bundle: %s", c.FeatureProfile)
+			}
+		}
+	}
 	if c.FeatureProfile == "" {
 		if c.GraphEnabled {
 			c.FeatureProfile = string(featureset.ProfileGraphLearning)
