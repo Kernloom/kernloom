@@ -147,8 +147,8 @@ func runStatus(statePath, dbPath string) {
 		}
 	}
 
-	// ── Policy / Inventory (from runtime sidecar) ────────────────────────────
-	printRuntimeReport(statePath)
+	// ── Policy / Inventory (from runtime sidecar + state fallback) ──────────
+	printRuntimeReport(statePath, st)
 
 	// ── Graph DB ─────────────────────────────────────────────────────────────
 	s, err := gstore.Open(dbPath)
@@ -199,7 +199,8 @@ func runStatus(statePath, dbPath string) {
 
 // printRuntimeReport reads the kliq-report.json sidecar (written at startup)
 // and prints a formatted policy + inventory summary.
-func printRuntimeReport(statePath string) {
+// st is the loaded state file for forge_pack_name fallback (may be nil).
+func printRuntimeReport(statePath string, st *stateFile) {
 	sidecar := reportSidecarPath(statePath)
 	if sidecar == "" {
 		return
@@ -225,11 +226,17 @@ func printRuntimeReport(statePath string) {
 		}
 		fmt.Fprintf(w, "Policy pack:\tloaded  max_action=%s  allow_block=%v\n", maxA, cr.AllowLocalBlock)
 	} else {
-		fmt.Fprintf(w, "Policy pack:\tnone")
-		if cr.Mode == "managed" {
-			fmt.Fprint(w, "  ← observe-only until pack loaded")
+		// Fallback: sidecar may be stale if pack was applied after startup.
+		// Read forge_pack_name from the already-loaded state file.
+		if st != nil && st.Active.ForgePackName != "" {
+			fmt.Fprintf(w, "Policy pack:\t%s  (from forge)\n", st.Active.ForgePackName)
+		} else {
+			fmt.Fprintf(w, "Policy pack:\tnone")
+			if cr.Mode == "managed" {
+				fmt.Fprint(w, "  ← observe-only until pack loaded")
+			}
+			fmt.Fprintln(w)
 		}
-		fmt.Fprintln(w)
 	}
 	if cr.DryRun {
 		fmt.Fprintf(w, "Dry-run:\tenabled — no BPF map writes\n")
