@@ -48,8 +48,10 @@ type AdapterConfig struct {
 
 // AnalyzerConfigs groups all local analyzer settings.
 type AnalyzerConfigs struct {
-	Baseline BaselineAnalyzerConfig `yaml:"baseline,omitempty"`
-	Graph    GraphAnalyzerConfig    `yaml:"graph,omitempty"`
+	Baseline       BaselineAnalyzerConfig       `yaml:"baseline,omitempty"`
+	Graph          GraphAnalyzerConfig          `yaml:"graph,omitempty"`
+	MetricPipeline MetricPipelineConfig         `yaml:"metric_pipeline,omitempty"`
+	MetricBaseline MetricBaselineAnalyzerConfig `yaml:"metric_baseline,omitempty"`
 }
 
 type BaselineAnalyzerConfig struct {
@@ -62,6 +64,58 @@ type GraphAnalyzerConfig struct {
 	Enabled *bool  `yaml:"enabled,omitempty"`
 	Mode    string `yaml:"mode,omitempty"`
 	Store   string `yaml:"store,omitempty"`
+}
+
+// MetricPipelineConfig is the top-level gate for the generic adapter metric
+// pipeline (Track A/B). Disabled by default — enabling it has no effect until
+// Track B is implemented and at least one adapter registers a FeatureExtractor.
+type MetricPipelineConfig struct {
+	// Enabled controls whether the generic metric pipeline runs alongside the
+	// existing KLShield path. Default: false (no behavior change).
+	Enabled *bool `yaml:"enabled,omitempty"`
+}
+
+// MetricBaselineAnalyzerConfig tunes the in-memory generic EWMA baseline engine
+// (pkg/metricbaseline). All fields are optional; defaults mirror DefaultConfig().
+type MetricBaselineAnalyzerConfig struct {
+	// Enabled enables the generic baseline engine when the metric pipeline is
+	// active. Default: false.
+	Enabled *bool `yaml:"enabled,omitempty"`
+
+	// Alpha is the EWMA learning rate for new (unpromoted) profiles.
+	// Default: 0.10 (~7 obs half-life).
+	Alpha float64 `yaml:"alpha,omitempty"`
+
+	// AlphaPromoted is the slower EWMA learning rate after promotion.
+	// Default: 0.02 (~35 obs half-life).
+	AlphaPromoted float64 `yaml:"alpha_promoted,omitempty"`
+
+	// MinCount is the number of non-suspicious learned values required before
+	// a profile is promoted. Default: 30.
+	MinCount uint64 `yaml:"min_count,omitempty"`
+
+	// MaxProfiles is the maximum number of in-memory baseline profiles.
+	// When reached, the engine evicts the lowest-confidence profiles first.
+	// Default: 10000.
+	MaxProfiles int `yaml:"max_profiles,omitempty"`
+
+	// ProfileTTL is how long a profile may go without an update before eviction.
+	// Use Go duration syntax, e.g. "24h". Default: 24h.
+	ProfileTTL string `yaml:"profile_ttl,omitempty"`
+
+	// SelectedLabels is the list of metric label keys used for baseline keying.
+	// IMPORTANT: default is empty — all label variants share one profile.
+	// Only add labels with bounded cardinality (e.g. "host", "route_group").
+	// Never add: path, full_url, user_agent, session_id, request_id.
+	SelectedLabels []string `yaml:"selected_labels,omitempty"`
+
+	// DeviationThreshold is the number of sigma units that produces score=100.
+	// Default: 4.0 (4-sigma event maps to score 100).
+	DeviationThreshold float64 `yaml:"deviation_threshold,omitempty"`
+
+	// SigmaFloor is the minimum sigma to prevent division-by-zero for
+	// very stable metrics. Default: 0.01.
+	SigmaFloor float64 `yaml:"sigma_floor,omitempty"`
 }
 
 // LoadComponentConfig reads and unmarshals a KliqComponentConfig YAML file.
