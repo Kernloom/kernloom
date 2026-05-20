@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Process lifecycle helpers (start / stop klshield, kliq, HTTP server).
+# Process lifecycle helpers (start / stop klshield, kliq, forge, HTTP server).
 
 set -euo pipefail
 
@@ -178,4 +178,99 @@ start_kliq_frozen() {
   record_pid kliq "$!"
   sleep 2
   echo "[proc] kliq running (frozen-observe) pid=$(cat "$KLT_ARTIFACT_DIR/kliq.pid")"
+}
+
+
+# ── Forge ─────────────────────────────────────────────────────────────────────
+
+start_forge() {
+  echo "[proc] starting forge serve on $KLT_FORGE_ADDR"
+  mkdir -p "$(dirname "$KLT_FORGE_DB")"
+  "$KLT_FORGE" serve \
+    --addr    "$KLT_FORGE_ADDR" \
+    --db      "$KLT_FORGE_DB" \
+    --admin-key "$KLT_FORGE_ADMIN_KEY" \
+    --adapters "${KLT_FORGE_ADAPTERS:-}" \
+    > "$KLT_FORGE_LOG" 2>&1 &
+  record_pid forge "$!"
+  # Wait for forge to be ready.
+  local i=0
+  while ! curl -sf "$KLT_FORGE_URL/api/v1/nodes" \
+      -H "Authorization: Bearer $KLT_FORGE_ADMIN_KEY" >/dev/null 2>&1; do
+    sleep 0.3
+    i=$((i + 1))
+    [[ $i -lt 20 ]] || { echo "[ERROR] forge did not start"; cat "$KLT_FORGE_LOG" >&2; exit 1; }
+  done
+  echo "[proc] forge running pid=$(cat "$KLT_ARTIFACT_DIR/forge.pid")"
+}
+
+stop_forge() {
+  stop_by_pidfile "$KLT_ARTIFACT_DIR/forge.pid"
+}
+
+forge_admin() {
+  curl -sf \
+    -H "Authorization: Bearer $KLT_FORGE_ADMIN_KEY" \
+    -H "Content-Type: application/json" \
+    "$@"
+}
+
+forge_create_token() {
+  local node_id="${1:-}"
+  local args=()
+  [[ -n "$node_id" ]] && args+=(--node "$node_id")
+  "$KLT_FORGE" token create \
+    --db "$KLT_FORGE_DB" \
+    "${args[@]}" \
+    --expires 1h \
+    2>/dev/null | grep '^TOKEN=' | cut -d= -f2-
+}
+
+# Simulate KLIQ enrollment via curl (no BPF required).
+# $1 = node_id, $2 = token, $3 = plugin_adapter (default: builtin-klshield)
+forge_simulate_enroll() {
+  local node_id="$1"
+  local token="$2"
+  local plugin="${3:-builtin-klshield}"
+
+  curl -sf -X POST "$KLT_FORGE_URL/api/v1/nodes/enroll" \
+    -H "Authorization: Bearer $token" \
+    -H "Content-Type: application/json" \
+    -d "{
+      \"node_id\": \"$node_id\",
+      \"mode\": \"managed\",
+      \"kliq_version\": \"it-test\",
+      \"inventory\": {
+        \"apiVersion\": \"kernloom.io/v1alpha1\",
+        \"kind\": \"ComponentRuntimeInventory\",
+        \"metadata\": {\"id\": \"$plugin-$node_id\"},
+        \"controlled_by\": {
+          \"node_id\": \"$node_id\",
+          \"plugin_adapter\": \"$plugin\"
+        },
+        \"component\": {\"product\": \"kernloom-shield\"},
+        \"roles\": [\"pep\", \"sensor\"],
+        \"profiles\": [\"network.l3_l4_filter\"]
+      }
+    }"
+}
+
+# Simulate a KLIQ heartbeat via curl.
+# $1 = node_id, $2 = session_token
+forge_simulate_heartbeat() {
+  local node_id="$1"
+  local session_token="$2"
+  curl -sf -X POST "$KLT_FORGE_URL/api/v1/nodes/$node_id/heartbeat" \
+    -H "Authorization: Bearer $session_token" \
+    -H "Content-Type: application/json" \
+    -d "{\"node_id\": \"$node_id\", \"timestamp\": \"$(date -u +%Y-%m-%dT%H:%M:%SZ)\"}"
+}
+
+# Pull the runtime bundle via curl.
+# $1 = node_id, $2 = session_token
+forge_pull_bundle() {
+  local node_id="$1"
+  local session_token="$2"
+  curl -sf "$KLT_FORGE_URL/api/v1/nodes/$node_id/runtime-bundle" \
+    -H "Authorization: Bearer $session_token"
 }
