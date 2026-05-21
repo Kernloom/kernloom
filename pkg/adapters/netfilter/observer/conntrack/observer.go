@@ -67,6 +67,20 @@ var procPaths = []string{
 	"/proc/net/ip_conntrack", // older kernels
 }
 
+// connKey is the identity of a conntrack flow used for delta tracking.
+type connKey struct {
+	SrcIP   string
+	DstIP   string
+	DstPort uint16
+	Proto   string
+}
+
+// connPrev holds the previous snapshot values for one flow.
+type connPrev struct {
+	Packets uint64
+	Bytes   uint64
+}
+
 // Observer polls conntrack and publishes flow observations on the event bus.
 // It prefers the conntrack(8) binary but falls back to reading the kernel
 // proc file (/proc/net/nf_conntrack) directly when the binary is absent.
@@ -75,6 +89,10 @@ type Observer struct {
 	cfg      Config
 	path     string // conntrack binary path (empty when using proc)
 	procPath string // /proc/net/nf_conntrack path (empty when using binary)
+
+	// prev tracks per-flow packet/byte counts from the previous snapshot so
+	// we can compute per-interval deltas and derive meaningful PPS/BPS values.
+	prev map[connKey]connPrev
 }
 
 // New creates a new Observer.
@@ -96,7 +114,7 @@ func New(cfg Config) (*Observer, error) {
 		binPath = ""
 	}
 	if binPath != "" {
-		return &Observer{cfg: cfg, path: binPath}, nil
+		return &Observer{cfg: cfg, path: binPath, prev: make(map[connKey]connPrev)}, nil
 	}
 
 	// Fall back to proc file — either explicitly configured or auto-detected.
@@ -107,7 +125,7 @@ func New(cfg Config) (*Observer, error) {
 	for _, p := range candidates {
 		if _, err := os.Stat(p); err == nil {
 			logger.Printf("conntrack binary not found — reading %s directly", p)
-			return &Observer{cfg: cfg, procPath: p}, nil
+			return &Observer{cfg: cfg, procPath: p, prev: make(map[connKey]connPrev)}, nil
 		}
 	}
 
@@ -138,23 +156,54 @@ func (o *Observer) Start(ctx context.Context, bus adapterruntime.EventBus) {
 }
 
 func (o *Observer) poll(ctx context.Context, bus adapterruntime.EventBus) {
+	start := time.Now()
 	flows, err := o.snapshot(ctx)
 	if err != nil {
 		logger.Printf("snapshot error: %v", err)
 		return
 	}
 
+	intervalSec := o.cfg.PollInterval.Seconds()
+	if intervalSec <= 0 {
+		intervalSec = 5
+	}
+
+	// Build a new prev map for this cycle; keep only connections still active.
+	newPrev := make(map[connKey]connPrev, len(flows))
+
 	emitted := 0
 	for _, f := range flows {
 		if emitted >= o.cfg.MaxFlows {
 			break
 		}
-		obs := flowToObservation(f, o.cfg.NodeID)
+
+		key := connKey{SrcIP: f.SrcIP, DstIP: f.DstIP, DstPort: f.DstPort, Proto: f.Proto}
+		newPrev[key] = connPrev{Packets: f.Packets, Bytes: f.Bytes}
+
+		// Compute per-interval deltas for PPS/BPS.
+		// On the first poll (no previous data) pps/bps are 0 — that's fine,
+		// the graphlearner EWMA will converge from the second poll onwards.
+		var deltaPkts, deltaBytes uint64
+		if prev, ok := o.prev[key]; ok {
+			if f.Packets >= prev.Packets {
+				deltaPkts = f.Packets - prev.Packets
+			}
+			if f.Bytes >= prev.Bytes {
+				deltaBytes = f.Bytes - prev.Bytes
+			}
+		}
+		pps := float64(deltaPkts) / intervalSec
+		bps := float64(deltaBytes) / intervalSec
+
+		obs := flowToObservationWithRates(f, o.cfg.NodeID, pps, bps)
 		if err := bus.PublishObservation(ctx, obs); err != nil {
 			return // bus full or shutting down
 		}
 		emitted++
 	}
+
+	o.prev = newPrev
+	_ = start
 }
 
 // snapshot returns all current flows from the best available source.
@@ -219,9 +268,9 @@ type Flow struct {
 	Bytes   uint64
 }
 
-// flowToObservation converts a conntrack Flow into an observation.Observation
-// that the GraphLearner can process.
-func flowToObservation(f Flow, nodeID string) observation.Observation {
+// flowToObservationWithRates converts a Flow into an observation with
+// pre-computed per-interval PPS/BPS rates for the GraphLearner EWMA baseline.
+func flowToObservationWithRates(f Flow, nodeID string, pps, bps float64) observation.Observation {
 	src := observation.EntityRef{Kind: observation.KindIP, ID: f.SrcIP}
 	obs := *observation.NewObservation(
 		"netfilter-conntrack",
@@ -244,14 +293,26 @@ func flowToObservation(f Flow, nodeID string) observation.Observation {
 	obs.SetAttribute("destination_port", strconv.Itoa(int(f.DstPort)))
 	obs.SetAttribute("source_port", strconv.Itoa(int(f.SrcPort)))
 	obs.SetAttribute("state", f.State)
-	// packets and bytes go into Metrics (float64) not Attributes.
+
+	// Raw counts — used for min_packets_per_tick / min_bytes_per_tick filtering.
 	if f.Packets > 0 {
 		obs.SetMetric("packets", float64(f.Packets))
 	}
 	if f.Bytes > 0 {
 		obs.SetMetric("bytes", float64(f.Bytes))
 	}
+
+	// Per-interval rates — used by the graphlearner EWMA baseline.
+	// pps/bps are 0 on the first poll (no previous snapshot yet).
+	obs.SetMetric("pps", pps)
+	obs.SetMetric("bps", bps)
+
 	return obs
+}
+
+// flowToObservation is kept for backward compatibility with tests.
+func flowToObservation(f Flow, nodeID string) observation.Observation {
+	return flowToObservationWithRates(f, nodeID, 0, 0)
 }
 
 // parseNFConntrackLine parses one line from /proc/net/nf_conntrack.
