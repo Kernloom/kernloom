@@ -1,0 +1,17 @@
+table inet kernloom {
+	set deny4 {
+		type ipv4_addr
+		flags timeout
+		counter
+		elements = {
+			192.0.2.10 timeout 600s,
+			192.0.2.11,
+		}
+	}
+
+	chain input {
+		type filter hook input priority filter - 10; policy accept;
+		ip saddr @deny4 counter comment "kernloom action=deny id=abc12300" drop
+	}
+
+}
