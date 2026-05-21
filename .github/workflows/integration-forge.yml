@@ -1,0 +1,71 @@
+name: Integration (Forge — no XDP)
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - "iq/**"
+      - "pkg/**"
+      - "tests/integration/scenarios/09_*"
+      - "tests/integration/scenarios/10_*"
+      - "tests/integration/lib/**"
+      - "tests/integration/env.sh"
+      - "tests/integration/run-forge.sh"
+      - ".github/workflows/integration-forge.yml"
+      - "../kernloom-forge/**"
+
+permissions:
+  contents: read
+
+jobs:
+  integration-forge:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout kernloom
+        uses: actions/checkout@v5
+        with:
+          path: kernloom
+
+      - name: Checkout kernloom-forge
+        uses: actions/checkout@v5
+        with:
+          repository: Kernloom/kernloom-forge
+          path: kernloom-forge
+
+      - name: Setup Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: kernloom/go.mod
+
+      - name: Install dependencies
+        run: sudo apt-get install -y -q curl jq
+
+      - name: Build forge binary
+        run: |
+          cd kernloom-forge
+          mkdir -p ../kernloom/bin
+          go build -o ../kernloom/bin/forge ./cmd/forge/
+
+      - name: Build kliq binary (needed for env.sh)
+        run: |
+          cd kernloom
+          mkdir -p bin
+          go build -o bin/kliq ./iq/cmd/kliq || true  # may fail without BPF headers — that's ok
+
+      - name: Run Forge integration tests
+        env:
+          KLT_FORGE_ROOT: ${{ github.workspace }}/kernloom-forge
+          KLT_FORGE: ${{ github.workspace }}/kernloom/bin/forge
+        run: |
+          cd kernloom
+          bash tests/integration/run-forge.sh
+
+      - name: Upload artifacts on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: forge-it-artifacts
+          path: kernloom/tests/integration/artifacts/
+          retention-days: 3

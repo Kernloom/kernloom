@@ -1,9 +1,10 @@
 // SPDX-License-Identifier: MPL-2.0
 // Copyright (c) 2026 Adrian Enderlin
 
-// Package decisionengine bridges signals and FSM state to Decisions and PEP receipts.
-// It is additive: it wraps existing FSM/PEP plumbing with an audit trail and
-// enables signal-driven enforcement independently of the heuristic FSM.
+// Package decisionengine bridges signals and FSM state to auditable Decisions.
+// The engine is audit-only: it produces Decision records and logs them, but
+// performs no PEP enforcement. All enforcement is handled by the ActionResolver
+// → ShieldActionExecutor pipeline in iq/internal/actions.
 package decisionengine
 
 import (
@@ -55,26 +56,18 @@ type LocalPolicy struct {
 	MinSeverityForBlock int
 }
 
-// PEPAdapter is the interface the engine uses to enforce a decision.
-// shieldbridge.ShieldBridge implements this; future adapters (nginx, ziti) may too.
-type PEPAdapter interface {
-	// EnforceDecision applies a decision and returns its receipt.
-	// Must be safe for concurrent use.
-	EnforceDecision(ctx context.Context, dec *decision.Decision) (*decision.EnforcementReceipt, error)
-}
-
 // Engine is KLIQ's local decision engine.
-// It translates Signals and FSM transitions into auditable Decisions and drives
-// the PEP adapter for enforcement.
+// It translates Signals and FSM transitions into auditable Decisions.
+// Enforcement is not performed here — the ActionResolver → ShieldActionExecutor
+// pipeline in iq/internal/actions is the single enforcement authority.
 type Engine struct {
 	mu     sync.RWMutex
 	policy LocalPolicy
-	pep    PEPAdapter
 }
 
-// New creates a new Engine with the provided policy and PEP adapter.
-func New(policy LocalPolicy, pep PEPAdapter) *Engine {
-	e := &Engine{pep: pep}
+// New creates a new Engine with the provided policy.
+func New(policy LocalPolicy) *Engine {
+	e := &Engine{}
 	e.policy = applyDefaults(policy)
 	return e
 }

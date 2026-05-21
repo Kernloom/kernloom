@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/kernloom/kernloom/pkg/adapters/shieldpep"
+	celeval "github.com/kernloom/kernloom/pkg/core/cel"
 	"github.com/kernloom/kernloom/pkg/core/fsm"
 )
 
@@ -22,6 +23,26 @@ type cfg struct {
 	TopN     int
 	MinPPS   float64
 	MinSev   float64
+
+	// Deployment config (KliqDeploymentConfig + KliqComponentConfig files)
+	DeploymentConfigPath string
+	ComponentConfigPath  string
+
+	// PolicyVerifyKeyPath is the path to the Ed25519 public key used to verify
+	// the signature on LocalPolicyPack files. Required in managed mode when a
+	// policy file is loaded — unsigned packs are rejected (CLAUDE.md rule #8).
+	PolicyVerifyKeyPath string
+
+	// CELRules holds compiled v1.2 CEL rules from the active policy pack.
+	// Populated by rulesFromPolicyPack; evaluated per-source-IP on every tick.
+	CELRules []*celeval.CompiledRule
+
+	// Forge control-plane coordinates.
+	ForgeURL         string
+	ForgeEnrollToken string // one-time enrollment token (consumed at enrollment, replaced by session token)
+	ForgeCAPath      string // path to CA certificate for TLS verification (PEM); empty = system roots
+	ForgeHeartbeat   time.Duration
+	FailMode         string // fail_static | fail_open
 
 	// Mode + policy + pdp config
 	Mode       string // "standalone" or "managed"
@@ -153,6 +174,42 @@ type cfg struct {
 	// Cooldown: min time between FSM level changes. Set from adapter manifest.
 	Cooldown time.Duration
 
+	// PolicyMaxAction is the ceiling on enforcement actions set by the Forge
+	// PolicyPack (autonomy.max_action). Applied to ALL enforcement transitions.
+	//   ""            = no cap, full enforcement allowed (default)
+	//   "rate_limit"  = cap at LevelSoft; no hard or block transitions
+	//   "observe"     = no enforcement (equivalent to dry_run for FSM)
+	PolicyMaxAction string
+
+	// HasPolicyPack is true when a valid LocalPolicyPack was loaded at startup.
+	// In managed mode, enforcement is capped to observe if no valid pack is present.
+	HasPolicyPack bool
+
+	// CapabilitiesRequired is the set of Forge capability IDs explicitly listed
+	// in the PolicyPack's capabilities_required field. In managed mode the
+	// ActionResolver will deny any capability not in this set.
+	// Nil means "all capabilities allowed" (standalone and packs without the field).
+	CapabilitiesRequired map[string]bool
+
+	// Per-level Forge capability IDs read from PolicyPack rules (then.capability).
+	// Used for logging and future capability-based adapter dispatch.
+	// Values are normalised to KLIQ internal IDs via normalizeCapabilityID.
+	SoftCapability  string
+	HardCapability  string
+	BlockCapability string
+
+	// Adaptive rate factors (Phase 6a): when > 0, rates = trig_pps × factor.
+	// 0 means static mode — adapterParams rates are used as-is.
+	SoftRateFactor float64
+	HardRateFactor float64
+
+	// Directive rates (Phase 6b): explicit req/s from the PolicyPack's then.params.
+	// Priority: Directive > Adaptive > Static.
+	// When set, the pack is in access-control mode — FSM still runs but the rate
+	// limit strength is fixed by policy, not derived locally.
+	SoftDirectiveRatePPS uint64
+	HardDirectiveRatePPS uint64
+
 	// adapterParams holds the Shield PEP adapter capability parameters,
 	// loaded from PDPConfig.Adapters.ShieldPEP or DefaultCapabilityParams().
 	adapterParams shieldpep.CapabilityParams
@@ -249,16 +306,52 @@ func (c cfg) toFSMConfig() fsm.Config {
 	}
 }
 
-// toPEPParams assembles EnforcementParams from the adapter manifest (rate/burst/cooldown)
-// and the policy/profile (TTLs). Rate and burst values are PEP-specific and live in
-// the adapter manifest; TTLs are PDP scheduling parameters.
+// toPEPParams assembles EnforcementParams from adapter config and TTLs.
+//
+// Three-tier priority for rate/burst (highest wins):
+//
+//  1. Directive  — SoftDirectiveRatePPS/HardDirectiveRatePPS from PolicyPack
+//     then.params.rate_pps. Fixed by Forge; used for access-control policies.
+//  2. Adaptive   — TrigPPS × factor (Phase 6a). Tracks autotune baseline.
+//  3. Static     — adapterParams from PDPConfig or DefaultCapabilityParams().
+//
+// Called every tick so adaptive rates follow autotune changes automatically.
 func (c cfg) toPEPParams() shieldpep.EnforcementParams {
+	softRate := c.adapterParams.SoftRatePPS
+	softBurst := c.adapterParams.SoftBurst
+	hardRate := c.adapterParams.HardRatePPS
+	hardBurst := c.adapterParams.HardBurst
+
+	// Priority 2: adaptive — rates derived from autotune-learned TrigPPS.
+	if c.SoftRateFactor > 0 && c.TrigPPS > 0 {
+		r := uint64(c.TrigPPS * c.SoftRateFactor)
+		if r < 1 {
+			r = 1
+		}
+		softRate, softBurst = r, r*2
+	}
+	if c.HardRateFactor > 0 && c.TrigPPS > 0 {
+		r := uint64(c.TrigPPS * c.HardRateFactor)
+		if r < 1 {
+			r = 1
+		}
+		hardRate, hardBurst = r, r*2
+	}
+
+	// Priority 1: directive — explicit rate from PolicyPack, overrides everything.
+	if c.SoftDirectiveRatePPS > 0 {
+		softRate, softBurst = c.SoftDirectiveRatePPS, c.SoftDirectiveRatePPS*2
+	}
+	if c.HardDirectiveRatePPS > 0 {
+		hardRate, hardBurst = c.HardDirectiveRatePPS, c.HardDirectiveRatePPS*2
+	}
+
 	return shieldpep.EnforcementParams{
-		SoftRate:  c.adapterParams.SoftRatePPS,
-		SoftBurst: c.adapterParams.SoftBurst,
+		SoftRate:  softRate,
+		SoftBurst: softBurst,
 		SoftTTL:   c.SoftTTL,
-		HardRate:  c.adapterParams.HardRatePPS,
-		HardBurst: c.adapterParams.HardBurst,
+		HardRate:  hardRate,
+		HardBurst: hardBurst,
 		HardTTL:   c.HardTTL,
 		BlockTTL:  c.BlockTTL,
 		Cooldown:  c.adapterParams.Cooldown,
@@ -320,10 +413,18 @@ AGENT FLAGS
 	flag.Float64Var(&c.MinPPS, "min-pps", 3, "ignore sources below this PPS for FSM; autotune also samples below this floor")
 	flag.Float64Var(&c.MinSev, "min-sev", 0.0, "include candidates with severity >= min-sev")
 
+	flag.StringVar(&c.DeploymentConfigPath, "deployment-config", "", "path to a KliqDeploymentConfig YAML (node identity, mode, runtime paths, Forge URL); overrides flag defaults when set")
+	flag.StringVar(&c.ComponentConfigPath, "component-config", "", "path to a KliqComponentConfig YAML (enabled adapters and analyzers); reserved for future use")
+	flag.StringVar(&c.PolicyVerifyKeyPath, "policy-verify-key", "", "path to Ed25519 public key for verifying LocalPolicyPack signatures; required in managed mode")
+	flag.StringVar(&c.ForgeURL, "forge-url", "", "forge serve base URL (e.g. https://forge.example.com:8443); enables enrollment and heartbeat when set")
+	flag.StringVar(&c.ForgeEnrollToken, "forge-enroll-token", "", "one-time enrollment token issued by 'forge token create' (consumed on first enrollment)")
+	flag.StringVar(&c.ForgeCAPath, "forge-ca", "", "path to PEM CA certificate for TLS verification of forge serve; empty = system roots")
+	flag.DurationVar(&c.ForgeHeartbeat, "forge-heartbeat", 5*time.Minute, "heartbeat interval to forge serve")
+
 	flag.StringVar(&c.Mode, "mode", "standalone", `agent mode: standalone (local policy) or managed (Forge-managed; currently logs a warning and runs as standalone)`)
 	flag.StringVar(&c.PolicyFile, "policy-file", "", "path to a LocalPolicyPack YAML (abstract enforcement rules: autonomy, rules, graph, exports)")
 	flag.StringVar(&c.PDPConfig, "pdp-config", "", "path to a PDPConfig YAML (kliq signal engine + FSM behavior); overrides --profile when set")
-	flag.StringVar(&c.ProfileName, "profile", "controller", "built-in PDP behavior profile (ignored when --pdp-config is set)")
+	flag.StringVar(&c.ProfileName, "profile", "generic", "built-in PDP behavior profile (ignored when --pdp-config is set)")
 	// Runtime state — mutable, not under IMA measurement.
 	flag.StringVar(&c.StatePath, "state-file", "/var/lib/kernloom/iq/state.json", "autotune state file (runtime, not IMA-attested)")
 	flag.DurationVar(&c.MaxStateAge, "max-state-age", 14*24*time.Hour, "ignore persisted state older than this (0 disables)")
@@ -448,6 +549,12 @@ AGENT FLAGS
 	flag.DurationVar(&c.StateTTL, "state-ttl", 60*time.Minute, "forget OBSERVE-only state if not seen for this long")
 	flag.BoolVar(&c.DryRun, "dry-run", true, "if true: no enforcement, only logs")
 	flag.StringVar(&c.BPFfsRoot, "bpffs-root", "/sys/fs/bpf", "bpffs mount root")
+	flag.Float64Var(&c.SoftRateFactor, "soft-rate-factor", 0,
+		"adaptive soft rate limit: effective rate = trig_pps × factor (e.g. 0.5). "+
+			"0 disables adaptive mode and uses --pdp-config soft_rate_pps instead")
+	flag.Float64Var(&c.HardRateFactor, "hard-rate-factor", 0,
+		"adaptive hard rate limit: effective rate = trig_pps × factor (e.g. 0.1). "+
+			"0 disables adaptive mode and uses --pdp-config hard_rate_pps instead")
 
 	flag.BoolVar(&c.GraphEnabled, "graph", false, "enable graph learning")
 	// Runtime state — combined SQLite DB for graph edges and source baselines.

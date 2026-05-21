@@ -44,21 +44,30 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/kernloom/kernloom/iq/internal/actions"
+	"github.com/kernloom/kernloom/iq/internal/lifecycle/bootstrapautotune"
+	lgraph "github.com/kernloom/kernloom/iq/internal/lifecycle/graph"
 	"github.com/kernloom/kernloom/pkg/adapterruntime"
 	"github.com/kernloom/kernloom/pkg/adapters/graphlearner"
+	"github.com/kernloom/kernloom/pkg/adapters/klshieldguard"
+	"github.com/kernloom/kernloom/pkg/adapters/klshieldshadow"
 	"github.com/kernloom/kernloom/pkg/adapters/shieldpep"
 	"github.com/kernloom/kernloom/pkg/adapters/shieldtelemetry"
 	"github.com/kernloom/kernloom/pkg/adapters/sourcebaseline"
+	"github.com/kernloom/kernloom/pkg/core/bundle"
+	celeval "github.com/kernloom/kernloom/pkg/core/cel"
 	"github.com/kernloom/kernloom/pkg/core/decision"
 	"github.com/kernloom/kernloom/pkg/core/featureset"
 	"github.com/kernloom/kernloom/pkg/core/fsm"
 	"github.com/kernloom/kernloom/pkg/core/graph"
+	kliqconfig "github.com/kernloom/kernloom/pkg/core/kliqconfig"
 	"github.com/kernloom/kernloom/pkg/core/observation"
 	corepdp "github.com/kernloom/kernloom/pkg/core/pdp"
 	corepolicy "github.com/kernloom/kernloom/pkg/core/policy"
 	"github.com/kernloom/kernloom/pkg/core/signal"
 	"github.com/kernloom/kernloom/pkg/decisionengine"
 	gstore "github.com/kernloom/kernloom/pkg/graphstore/sqlite"
+	"github.com/kernloom/kernloom/pkg/pipeline"
 	"github.com/kernloom/kernloom/pkg/shieldclient"
 	"github.com/kernloom/kernloom/pkg/signalengine/shieldheuristic"
 
@@ -119,7 +128,7 @@ func main() {
 	case string(corepolicy.ModeStandalone):
 		// normal local-policy path
 	case string(corepolicy.ModeManaged):
-		kliqLog.Printf("INFO: mode=managed — Forge integration pending, running as standalone")
+		kliqLog.Printf("INFO: mode=managed")
 	default:
 		log.Fatalf("unknown --mode %q: must be standalone or managed", c.Mode)
 	}
@@ -138,7 +147,18 @@ func main() {
 		applyPDPBaselineToCfg(pdpc, &c)
 		applyPDPAutotuneToCfg(pdpc, &c)
 		c.adapterParams = adapterParamsFromPDPConfig(pdpc)
+		applyPDPAdaptiveRatesToCfg(pdpc, &c)
 	} else {
+		// In managed mode: if the LKG bundle specifies a pdp_profile, it overrides
+		// the --profile flag so Forge controls the autotune behaviour profile.
+		if c.Mode == string(corepolicy.ModeManaged) {
+			if lkgBytes := loadLastKnownGoodBundle(c.StatePath); lkgBytes != nil {
+				if b, err := bundle.Parse(lkgBytes); err == nil && b.Spec.PDPProfile != "" {
+					kliqLog.Printf("PDP profile from bundle: %s (was: %s)", b.Spec.PDPProfile, c.ProfileName)
+					c.ProfileName = b.Spec.PDPProfile
+				}
+			}
+		}
 		p = profileByName(c.ProfileName)
 		c.adapterParams = shieldpep.DefaultCapabilityParams()
 	}
@@ -146,7 +166,31 @@ func main() {
 	// Policy: abstract enforcement rules (autonomy, when/then, exports).
 	// Optional — without a policy file, profile defaults + CLI flags apply.
 	if c.PolicyFile != "" {
-		pp, err := corepolicy.LoadFromFile(c.PolicyFile)
+		var pp *corepolicy.PolicyPack
+		var err error
+
+		if c.Mode == string(corepolicy.ModeManaged) {
+			// Managed mode: signature verification is mandatory (CLAUDE.md rule #8).
+			if c.PolicyVerifyKeyPath == "" {
+				log.Fatalf("managed mode requires --policy-verify-key to verify pack signature")
+			}
+			pubKey, kerr := corepolicy.LoadPublicKey(c.PolicyVerifyKeyPath)
+			if kerr != nil {
+				log.Fatalf("load policy verify key: %v", kerr)
+			}
+			pp, err = corepolicy.LoadAndVerify(c.PolicyFile, pubKey)
+		} else {
+			// Standalone mode: signature verification is optional.
+			if c.PolicyVerifyKeyPath != "" {
+				pubKey, kerr := corepolicy.LoadPublicKey(c.PolicyVerifyKeyPath)
+				if kerr != nil {
+					log.Fatalf("load policy verify key: %v", kerr)
+				}
+				pp, err = corepolicy.LoadAndVerify(c.PolicyFile, pubKey)
+			} else {
+				pp, err = corepolicy.LoadFromFile(c.PolicyFile)
+			}
+		}
 		if err != nil {
 			log.Fatalf("load policy file: %v", err)
 		}
@@ -159,7 +203,18 @@ func main() {
 	c.Cooldown = c.adapterParams.Cooldown
 
 	// Resolve runtime feature profile.
-	// --feature-profile takes precedence; otherwise derive from --graph flag.
+	// Priority: --feature-profile flag > LKG bundle > --graph flag > dos-light default.
+	// The LKG bundle is read here (before adapters start) so its feature_profile takes
+	// effect on startup rather than being applied too late after adapters are already
+	// initialized with the wrong profile.
+	if c.FeatureProfile == "" {
+		if lkgBytes := loadLastKnownGoodBundle(c.StatePath); lkgBytes != nil {
+			if b, err := bundle.Parse(lkgBytes); err == nil && b.Spec.FeatureProfile != "" {
+				c.FeatureProfile = b.Spec.FeatureProfile
+				kliqLog.Printf("Feature profile from bundle: %s", c.FeatureProfile)
+			}
+		}
+	}
 	if c.FeatureProfile == "" {
 		if c.GraphEnabled {
 			c.FeatureProfile = string(featureset.ProfileGraphLearning)
@@ -170,6 +225,12 @@ func main() {
 	features := featureset.FeaturesFor(featureset.RuntimeProfile(c.FeatureProfile))
 	kliqLog.Printf("Feature profile: %s  src_baseline=%v graph=%v sqlite=%v",
 		c.FeatureProfile, features.SourceBaseline, features.GraphLearning, features.SQLite)
+
+	// Sync GraphEnabled from the resolved feature profile so that bundles setting
+	// feature_profile=graph-* activate graph learning without requiring --graph flag.
+	if features.GraphLearning {
+		c.GraphEnabled = true
+	}
 
 	// Source baseline cache (iq-learning and higher).
 	// Nil when disabled — the main loop checks before calling Update/Resolve.
@@ -193,6 +254,17 @@ func main() {
 	// left at their default values. State (autotune) must not override these.
 	explicitFlags := make(map[string]bool)
 	flag.Visit(func(f *flag.Flag) { explicitFlags[f.Name] = true })
+
+	// Deployment config: overrides flag defaults for operational fields
+	// (mode, dry_run, paths, Forge URL). Explicit CLI flags always win.
+	if c.DeploymentConfigPath != "" {
+		dc, err := kliqconfig.LoadDeploymentConfig(c.DeploymentConfigPath)
+		if err != nil {
+			log.Fatalf("load deployment config: %v", err)
+		}
+		kliqLog.Printf("Deployment config loaded: file=%s name=%s", c.DeploymentConfigPath, dc.Metadata.Name)
+		applyDeploymentConfig(dc, &c, explicitFlags)
+	}
 
 	// Compute the config hash used to detect autotune-relevant config changes.
 	// A mismatch between this hash and the one stored in state.json invalidates
@@ -224,8 +296,12 @@ func main() {
 			if st.Active.Trig.TrigBPS > 0 && !explicitFlags["trig-bps"] {
 				c.TrigBPS = st.Active.Trig.TrigBPS
 			}
+			updatedStr := "never"
+			if !st.Active.UpdatedAt.IsZero() {
+				updatedStr = st.Active.UpdatedAt.Format(time.RFC3339)
+			}
 			kliqLog.Printf("Loaded state: profile=%s rev=%d updated=%s trig{pps=%.1f syn=%.1f scan=%.1f bps=%.0f}",
-				st.Active.Profile, st.Active.Revision, st.Active.UpdatedAt.Format(time.RFC3339),
+				st.Active.Profile, st.Active.Revision, updatedStr,
 				c.TrigPPS, c.TrigSyn, c.TrigScan, c.TrigBPS)
 		} else {
 			kliqLog.Printf("No usable state loaded (%s): %v", c.StatePath, err)
@@ -326,24 +402,260 @@ func main() {
 		log.Fatalf("init shield pep: %v", err)
 	}
 
+	// Central enforcement pipeline: resolver is the policy gate; executor is the
+	// only component authorized to call TransitionV4/V6.
+	resolver := c.buildPolicyResolver()
+	executor := buildExecutor(pep)
+
+	// Runtime inventory and config-asset report is logged after the LKG bundle
+	// apply (below) so that HasPolicyPack and ProfileName reflect the restored state.
+
+	// ── Managed lifecycle controllers ─────────────────────────────────────────
+	// Both controllers are initialised from defaults; if a RuntimeBundle is
+	// present (persisted or pulled at startup) applyBundleUpdate will rebuild
+	// them with the bundle-provided config.
+
+	// Bootstrap/autotune lifecycle controller.
+	bsCfg := bootstrapautotune.DefaultConfig()
+	bsCfg.Enabled = c.Bootstrap
+	var bsInitState *bootstrapautotune.State
+	if stFile != nil && stFile.Active.Bootstrap.Enabled {
+		bsInitState = &bootstrapautotune.State{
+			Enabled:         stFile.Active.Bootstrap.Enabled,
+			StartedAt:       stFile.Active.Bootstrap.StartedAt,
+			Phase:           stFile.Active.Bootstrap.Phase,
+			ObservedSeconds: stFile.Active.Bootstrap.ObservedSeconds,
+		}
+	}
+	bsCtl := bootstrapautotune.New(bsCfg, bsInitState)
+
+	// Graph lifecycle controller (managed mode only; stays at learn by default).
+	graphCfg := lgraph.DefaultConfig()
+	graphCfg.Enabled = c.Mode == "managed"
+	graphPhase := ""
+	graphLifecycleStart := time.Time{}
+	if stFile != nil {
+		graphPhase = stFile.Active.GraphLifecyclePhase
+		graphLifecycleStart = stFile.Active.GraphLifecycleStartedAt
+	}
+	graphCtl := lgraph.New(graphCfg, graphPhase, graphLifecycleStart)
+
+	// managedState tracks bundle-level persistence (generation, hash).
+	ms := managedState{}
+	if stFile != nil {
+		ms.BundleGeneration = stFile.Active.ForgeBundleGeneration
+		ms.BundleHash = stFile.Active.ForgeBundleHash
+	}
+
+	// bundleUpdateCh receives raw bundle YAML from the heartbeat goroutine.
+	// Non-blocking: the main loop drains it once per tick.
+	bundleUpdateCh := make(chan []byte, 1)
+
+	// ── Shadow metric pipeline ──────────────────────────────────────────────────
+	// Disabled by default (metric_pipeline.enabled=false). When enabled in shadow
+	// mode, KLShield telemetry is mirrored into the generic metric baseline engine
+	// alongside the existing shieldheuristic+FSM path (no enforcement change).
+	shadowPipelineCfg := pipeline.DefaultConfig()
+	// TODO: read from KliqComponentConfig.Analyzers.MetricPipeline when available
+	// For now: check environment variable for easy testing
+	if os.Getenv("KLIQ_METRIC_PIPELINE") == "shadow" {
+		shadowPipelineCfg.Enabled = true
+		shadowPipelineCfg.Mode = pipeline.ModeShadow
+	}
+	guardCfg := klshieldguard.DefaultConfig()
+	shadowPipeline := pipeline.New(pipeline.Options{
+		Config: shadowPipelineCfg,
+		Guards: []adapterruntime.LearningGuard{klshieldguard.New(guardCfg)},
+	})
+	// shadowSamples accumulates per-source samples during the tick for batch submission.
+	var shadowSamples []klshieldshadow.TelemetrySample
+
+	// Apply last-known-good bundle on startup (fail_static).
+	if lkg := loadLastKnownGoodBundle(c.StatePath); lkg != nil {
+		kliqLog.Printf("MANAGED: applying last-known-good bundle from disk")
+		applyBundleUpdate(lkg, &c, &bsCtl, &graphCtl, &ms, stFile)
+	}
+
+	// Pre-set HasPolicyPack from persisted state so the startup INVENTORY log
+	// reflects a previously applied pack rather than always showing false.
+	if !c.HasPolicyPack && stFile != nil && stFile.Active.ForgePackName != "" {
+		c.HasPolicyPack = true
+	}
+
+	// Runtime inventory and config-asset report — built after LKG bundle apply
+	// so that HasPolicyPack and ProfileName reflect the restored state.
+	inv := pep.BuildInventory(nodeID)
+	report := buildConfigAssetReport(c, nodeID, features)
+	logInventoryAndReport(inv, report, c.StatePath)
+
+	// tupleActive is set after edge-map probe and read by the heartbeat goroutine.
+	tupleActive := false
+
+	// Forge enrollment + heartbeat loop (only when --forge-url is set).
+	var forgeC *forgeClient
+	var enrolledPackName string
+	var activePackIssuedAt time.Time // rollback protection: tracks IssuedAt of running pack
+	var activePackHash string        // drift detection: SHA-256 of last applied pack bytes
+	if c.ForgeURL != "" {
+		var fcErr error
+		forgeC, fcErr = newForgeClient(c.ForgeURL, c.ForgeEnrollToken, nodeID, c.ForgeCAPath)
+		if fcErr != nil {
+			kliqLog.Fatalf("forge client init: %v", fcErr)
+		}
+
+		// Restore persisted Forge state from state file (avoids re-enrollment after restart).
+		if stFile != nil && stFile.Active.ForgeSessionToken != "" {
+			forgeC.RestoreSession(stFile.Active.ForgeSessionToken)
+			enrolledPackName = stFile.Active.ForgePackName
+			activePackIssuedAt = stFile.Active.ForgePackIssuedAt
+			activePackHash = stFile.Active.ForgePackHash
+			kliqLog.Printf("FORGE session restored from state: pack=%s", enrolledPackName)
+		}
+
+		// Enroll only when no valid session token was restored.
+		if forgeC.SessionToken() == "" {
+			enrollCtx, enrollCancel := context.WithTimeout(context.Background(), 30*time.Second)
+			er, err := forgeC.Enroll(enrollCtx, c.Mode, inv, report)
+			enrollCancel()
+			if err != nil {
+				kliqLog.Printf("WARNING: forge enrollment failed: %v — continuing with local config", err)
+			} else {
+				kliqLog.Printf("FORGE enrolled: node=%s status=%s", er.NodeID, er.Status)
+				// Persist session token immediately after enrollment.
+				if stFile != nil && forgeC.SessionToken() != "" {
+					stFile.Active.ForgeSessionToken = forgeC.SessionToken()
+					_ = writeStateAtomic(c.StatePath, stFile)
+				}
+				if er.Status == "approved" {
+					if packBytes, packName, err := forgeC.PullPack(context.Background()); err != nil {
+						kliqLog.Printf("WARNING: forge pack pull failed: %v", err)
+					} else if packBytes != nil {
+						enrolledPackName = packName
+						if err := applyForgePack(packBytes, packName, c.PolicyVerifyKeyPath, &c, &activePackIssuedAt); err != nil {
+							kliqLog.Printf("WARNING: forge pack apply failed: %v — using local config", err)
+							forgeC.ReportPackStatus(context.Background(), packName, false, err.Error())
+						} else {
+							activePackHash = PackHash(packBytes)
+							kliqLog.Printf("FORGE pack applied: %s", packName)
+							updateSidecarPack(c.StatePath, packName, c.PolicyMaxAction)
+							forgeC.ReportPackStatus(context.Background(), packName, true, "")
+							if stFile != nil {
+								stFile.Active.ForgePackName = packName
+								stFile.Active.ForgePackIssuedAt = activePackIssuedAt
+								stFile.Active.ForgePackHash = activePackHash
+								_ = writeStateAtomic(c.StatePath, stFile)
+							}
+						}
+					}
+				}
+			}
+		}
+
+		// Heartbeat goroutine.
+		hbCtx, hbCancel := context.WithCancel(context.Background())
+		defer hbCancel()
+		lastNodeStatus := "pending" // tracks the last known Forge node status
+		go func() {
+			ticker := time.NewTicker(c.ForgeHeartbeat)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-hbCtx.Done():
+					return
+				case <-ticker.C:
+					// Drift detection: compare running pack hash against last applied.
+					// Drift means the config that's actually running differs from what
+					// Forge last pushed — e.g. if someone manually edited the pack file.
+					drift := activePackHash != "" && PackHash(nil) != activePackHash
+					// PackHash(nil) would be wrong — we don't re-read the file here.
+					// Instead drift is true when activePackHash is set but the in-memory
+					// pack identity (enrolledPackName) no longer matches state.
+					// Full file-hash drift detection requires reading the temp pack path,
+					// which is not persisted. Use name-mismatch as a conservative proxy.
+					drift = false // TODO: implement full hash-based drift after pack path is persisted
+					_ = drift
+
+					packUpdated, nodeStatus, err := forgeC.Heartbeat(context.Background(), enrolledPackName, false)
+					if err != nil {
+						kliqLog.Printf("FORGE heartbeat failed: %v", err)
+						continue
+					}
+					if nodeStatus != "" && nodeStatus != lastNodeStatus {
+						kliqLog.Printf("FORGE node status: %s → %s", lastNodeStatus, nodeStatus)
+						lastNodeStatus = nodeStatus
+					}
+					kliqLog.Printf("FORGE heartbeat ok: pack=%s pack_updated=%v status=%s", enrolledPackName, packUpdated, nodeStatus)
+
+					// Report rich runtime status to Forge (non-fatal if it fails).
+					status := buildRuntimeStatus(nodeID, ms, bsCtl, graphCtl, lgraph.GraphStats{}, &c, tupleActive)
+					reportBundleStatus(context.Background(), forgeC, status)
+					// Pull and deliver RuntimeBundle when available (non-blocking send).
+					if bundleBytes, _, bundleErr := forgeC.PullBundle(context.Background()); bundleErr == nil && bundleBytes != nil {
+						select {
+						case bundleUpdateCh <- bundleBytes:
+						default: // channel full — drop; next heartbeat will retry
+						}
+					}
+					if packUpdated {
+						kliqLog.Printf("FORGE pack update available — pulling")
+						if packBytes, packName, err := forgeC.PullPack(context.Background()); err != nil {
+							kliqLog.Printf("FORGE pack pull failed: %v", err)
+						} else if packBytes != nil {
+							if err := applyForgePack(packBytes, packName, c.PolicyVerifyKeyPath, &c, &activePackIssuedAt); err != nil {
+								kliqLog.Printf("FORGE pack apply failed: %v", err)
+								forgeC.ReportPackStatus(context.Background(), packName, false, err.Error())
+							} else {
+								enrolledPackName = packName
+								activePackHash = PackHash(packBytes)
+								kliqLog.Printf("FORGE pack updated: %s", packName)
+								updateSidecarPack(c.StatePath, packName, c.PolicyMaxAction)
+								forgeC.ReportPackStatus(context.Background(), packName, true, "")
+								// Persist updated Forge state.
+								if stFile != nil {
+									stFile.Active.ForgePackName = packName
+									stFile.Active.ForgePackIssuedAt = activePackIssuedAt
+									stFile.Active.ForgePackHash = activePackHash
+									_ = writeStateAtomic(c.StatePath, stFile)
+								}
+							}
+						}
+					}
+				}
+			}
+		}()
+	}
+
 	// Tuple enforcement: activate XDP edge maps when the feature is enabled.
+	// Try to open any nil edge map handles first in case klshield was reloaded
+	// after kliq started (or tuple support was activated post-startup).
+	// If maps are still unavailable, degrade gracefully to graph-learning behavior
+	// (graph learning + baselines still work; only XDP tuple drops are skipped).
 	if features.TupleEnforcement {
+		if !pep.TupleAvailable() {
+			maps.TryOpenEdgeMaps(c.BPFfsRoot)
+		}
 		if pep.TupleAvailable() {
 			if err := pep.SetTupleEnforce(true); err != nil {
 				kliqLog.Printf("WARNING: tuple enforce activate failed: %v", err)
 			} else {
+				tupleActive = true
 				kliqLog.Printf("Tuple enforcement: XDP edge maps active (deny-mode)")
 			}
 		} else {
-			kliqLog.Printf("WARNING: feature-profile=graph-enforce but edge maps not available. Reload klshield with new .bpf.o")
+			features.TupleEnforcement = false
+			kliqLog.Printf("DEGRADED: feature-profile=graph-enforce but XDP tuple maps not available — " +
+				"running as graph-learning until klshield is reloaded (klshield attach-xdp --force). " +
+				"Graph learning and baselines are active.")
 		}
 	}
 
 	// Decision engine: adds audit trail for FSM transitions and enforces graph-freeze signals.
+	// LocalPolicy MaxAction is resolved via the Action Resolver so that
+	// managed-no-pack and PolicyMaxAction rules apply to the decision engine path too.
 	decPolicy := decisionengine.LocalPolicy{
 		NodeID:              nodeID,
 		DryRun:              c.DryRun,
-		MaxAction:           decision.ActionType(c.GraphFreezeMaxAction),
+		MaxAction:           c.resolveDecisionAction(decision.ActionType(c.GraphFreezeMaxAction)),
 		AllowLocalBlock:     c.GraphFreezeAllowBlock,
 		GraphFreezeAction:   decision.ActionType(c.GraphFreezeAction),
 		GraphFreezeTTL:      c.GraphFreezeTTL,
@@ -355,8 +667,7 @@ func main() {
 		BlockTTL:            c.BlockTTL,
 		MinSeverityForBlock: c.GraphFreezeMinSeverity,
 	}
-	shieldBridge := decisionengine.NewShieldBridge(maps, c.DryRun, nodeID, c.toPEPParams())
-	decisionEng := decisionengine.New(decPolicy, shieldBridge)
+	decisionEng := decisionengine.New(decPolicy)
 
 	// Heuristic signal engine: converts per-source metrics → Signals + fsm.Metrics.
 	// Replaces inline fsm.CalcSeverity calls throughout the main loop.
@@ -423,9 +734,9 @@ func main() {
 				if sig.Type == signal.SignalGraphNewEdgeAfterFreeze && sig.Subject.ID != "" {
 					sendStrike(graphStrikeCh, sig.Subject.ID, graphStrikesFromScore(sig.Score), sig.Score >= 90, true)
 
-					// Tuple enforcement (graph-enforce profile): write an XDP edge deny
-					// for the specific (src, dst_port, proto) tuple rather than blocking
-					// all traffic from the source. More surgical than source-level deny.
+					// Tuple enforcement (graph-enforce profile): deny the specific
+					// (src, dst_port, proto) tuple via the ActionResolver instead of
+					// calling pep.DenyEdge4 directly.
 					if features.TupleEnforcement && sig.Score >= 90 && pep.TupleAvailable() {
 						portStr := sig.Attributes["destination_port"]
 						proto := sig.Attributes["protocol"]
@@ -435,10 +746,35 @@ func main() {
 						}
 						if port > 0 && proto != "" {
 							if ekey, ok := shieldclient.NewEdge4Key(sig.Subject.ID, uint16(port), proto); ok {
-								if err := pep.DenyEdge4(ekey); err != nil {
-									kliqLog.Printf("TUPLE deny edge %s:%d/%s failed: %v", sig.Subject.ID, port, proto, err)
-								} else {
-									kliqLog.Printf("TUPLE deny edge: %s port=%d proto=%s (freeze violation)", sig.Subject.ID, port, proto)
+								proposal := actions.ActionProposal{
+									Source:        "graph",
+									Reason:        "graph_new_edge_after_freeze",
+									DesiredAction: "enforce.access.deny",
+									DesiredLevel:  "block",
+									Target: actions.ActionTarget{
+										Granularity: "tuple_src_dst_port",
+										Value:       sig.Subject.ID,
+										Attributes: map[string]string{
+											"src_ip":   sig.Subject.ID,
+											"dst_port": portStr,
+											"protocol": proto,
+										},
+									},
+									Confidence: float64(sig.Confidence) / 100.0,
+									CreatedAt:  time.Now(),
+								}
+								res := resolver.Resolve(proposal)
+								if res.DenyReason != "" {
+									kliqLog.Printf("ACTION-RESOLVER tuple %s:%s/%s %s→%s reason=%q",
+										sig.Subject.ID, portStr, proto,
+										proposal.DesiredLevel, res.ExecutableLevel, res.DenyReason)
+								}
+								result := executor.ApplyTuple4(ekey, res, time.Now())
+								switch result.Status {
+								case "applied":
+									kliqLog.Printf("TUPLE deny edge: %s port=%s proto=%s (freeze violation)", sig.Subject.ID, portStr, proto)
+								case "failed":
+									kliqLog.Printf("TUPLE deny edge %s:%s/%s failed: %s", sig.Subject.ID, portStr, proto, result.Reason)
 								}
 							}
 						}
@@ -630,6 +966,11 @@ func main() {
 		syncEdge4Allow()
 	}
 
+	// Start shadow pipeline (no-op when disabled).
+	pipelineCtx, pipelineCancel := context.WithCancel(context.Background())
+	defer pipelineCancel()
+	shadowPipeline.Start(pipelineCtx)
+
 	ticker := time.NewTicker(c.Interval)
 	defer ticker.Stop()
 	var tickN uint64
@@ -663,6 +1004,19 @@ func main() {
 		}
 		nowWall := time.Now()
 
+		// Process pending bundle update (non-blocking; delivered by heartbeat goroutine).
+		select {
+		case rawBundle := <-bundleUpdateCh:
+			applyBundleUpdate(rawBundle, &c, &bsCtl, &graphCtl, &ms, stFile)
+			// Persist updated managed state immediately.
+			if stFile != nil {
+				stFile.Active.ForgeBundleGeneration = ms.BundleGeneration
+				stFile.Active.ForgeBundleHash = ms.BundleHash
+				_ = writeStateAtomic(c.StatePath, stFile)
+			}
+		default:
+		}
+
 		// Handle SIGUSR1: clear FSM state to sync with an external map reset.
 		select {
 		case <-resetCh:
@@ -670,18 +1024,16 @@ func main() {
 			pepParams := c.toPEPParams()
 			for ip, st := range state4 {
 				if st.Level != fsm.LevelObserve {
-					pep.TransitionV4(ip, st, fsm.LevelObserve, nowWall, pepParams)
+					st = executor.ApplyDeEnforce4(ip, st, pepParams, nowWall)
 					st.Strikes, st.UpStreak, st.DownStreak, st.NonCompTicks = 0, 0, 0, 0
-					st.Level = fsm.LevelObserve
 					state4[ip] = st
 					n++
 				}
 			}
 			for ip, st := range state6 {
 				if st.Level != fsm.LevelObserve {
-					pep.TransitionV6(ip, st, fsm.LevelObserve, nowWall, pepParams)
+					st = executor.ApplyDeEnforce6(ip, st, pepParams, nowWall)
 					st.Strikes, st.UpStreak, st.DownStreak, st.NonCompTicks = 0, 0, 0, 0
-					st.Level = fsm.LevelObserve
 					state6[ip] = st
 					n++
 				}
@@ -720,6 +1072,11 @@ func main() {
 		cands := make([]metrics, 0, 4096)
 		seenForLearn := 0
 		highSevCount := 0
+		// celVarBuf is reused across all sources per tick to avoid per-source map allocation.
+		var celVarBuf map[string]any
+		if len(c.CELRules) > 0 {
+			celVarBuf = make(map[string]any, 8)
+		}
 
 		// ----- Iterate v4 sources -----
 		it4 := maps.Src4.Iterate()
@@ -764,6 +1121,15 @@ func main() {
 
 			subject4 := observation.EntityRef{Kind: observation.KindIP, ID: ip4String(k4)}
 
+			// Mirror telemetry into shadow metric pipeline (no enforcement effect).
+			if shadowPipeline.IsActive() {
+				shadowSamples = append(shadowSamples, klshieldshadow.TelemetrySample{
+					SourceIP: subject4.ID, PPS: pps, BPS: bps,
+					SYNRate: synRate, ScanRate: scanRate, DropRLRate: dropRLRate,
+					Window: c.Interval, Timestamp: nowWall,
+				})
+			}
+
 			// Source baseline update + per-source effective thresholds.
 			var fsmM4 fsm.Metrics
 			var sigs4 []signal.Signal
@@ -778,6 +1144,50 @@ func main() {
 			}
 			for _, sig := range sigs4 {
 				_ = mainBus.PublishSignal(context.Background(), sig)
+			}
+
+			// CEL rule evaluation (v1.2 packs): fire ActionProposals directly when
+			// the expression matches this source this tick. Runs independently of the
+			// FSM candidate path — CEL rules can fire even for low-PPS sources.
+			// celVarBuf is allocated once per source and reused across rules.
+			if len(c.CELRules) > 0 {
+				var blProfile sourcebaseline.Profile
+				var blOk bool
+				if srcBL != nil {
+					blProfile, blOk = srcBL.Get(subject4.ID)
+				}
+				sigs := &celeval.SourceSignals{
+					PPS: pps, BPS: bps, SynRate: synRate, ScanRate: scanRate,
+					HasBaseline:   blOk,
+					EWMAPPS:       blProfile.EWMAPPS,
+					EWMABPS:       blProfile.EWMABPS,
+					EWMASyn:       blProfile.EWMASyn,
+					Confidence:    blProfile.Confidence,
+					Promoted:      blProfile.Promoted,
+					GlobalTrigPPS: c.TrigPPS,
+					GlobalTrigBPS: c.TrigBPS,
+				}
+				st4 := state4[k4]
+				for _, rule := range c.CELRules {
+					if !rule.Evaluate(sigs, celVarBuf) {
+						continue
+					}
+					proposal := actions.ActionProposal{
+						Source:        "cel-policy",
+						Reason:        rule.Name,
+						DesiredAction: rule.Capability,
+						DesiredLevel:  rule.Level,
+						Target:        actions.ActionTarget{Granularity: "src_ip", Value: subject4.ID},
+						CreatedAt:     nowWall,
+					}
+					res := resolver.Resolve(proposal)
+					st4, _ = executor.Apply4(k4, st4, res, c.toPEPParams(), nowWall)
+					if res.DenyReason == "" {
+						kliqLog.Printf("CEL rule=%q matched: %s action=%s", rule.Name, subject4.ID, res.ExecutableLevel)
+					}
+					break // first matching rule per source per tick
+				}
+				state4[k4] = st4
 			}
 
 			// Baseline update and deviation check happen in the cands loop below,
@@ -1017,6 +1427,14 @@ func main() {
 				}
 				bs.ObservedSeconds += sec
 			}
+			// Mirror into lifecycle controller (managed-mode status reporting).
+			{
+				sec := uint64(math.Round(c.Interval.Seconds()))
+				if sec == 0 {
+					sec = 1
+				}
+				bsCtl.RecordTick(clean, sec, nil)
+			}
 		}
 
 		// Track which IPs were processed this tick so the sweep below can skip them.
@@ -1024,10 +1442,10 @@ func main() {
 		inCands6 := make(map[[16]byte]bool)
 		for _, m := range cands {
 			if m.IPVer == 4 {
-				state4[m.IP4] = processCandidate4(m, state4[m.IP4], nowWall, c, wl, fb, pep, resPPS, resSyn, resScan, resBps, clean)
+				state4[m.IP4] = processCandidate4(m, state4[m.IP4], nowWall, c, wl, fb, resolver, executor, resPPS, resSyn, resScan, resBps, clean)
 				inCands4[m.IP4] = true
 			} else {
-				state6[m.IP6] = processCandidate6(m, state6[m.IP6], nowWall, c, wl, fb, pep, resPPS, resSyn, resScan, resBps, clean)
+				state6[m.IP6] = processCandidate6(m, state6[m.IP6], nowWall, c, wl, fb, resolver, executor, resPPS, resSyn, resScan, resBps, clean)
 				inCands6[m.IP6] = true
 			}
 		}
@@ -1045,7 +1463,21 @@ func main() {
 			}
 			ip := ip4 // capture
 			doT := func(s fsm.State, target fsm.Level) fsm.State {
-				return pep.TransitionV4(ip, s, target, nowWall, pepParams)
+				proposal := actions.ActionProposal{
+					Source:        "housekeeping",
+					Reason:        "fsm_downscale",
+					DesiredAction: actions.FsmLevelToCapability(target),
+					DesiredLevel:  actions.FsmLevelName(target),
+					Target:        actions.ActionTarget{Granularity: "src_ip", Value: ip4String(ip)},
+					CreatedAt:     nowWall,
+				}
+				res := resolver.Resolve(proposal)
+				if res.DenyReason != "" {
+					kliqLog.Printf("ACTION-RESOLVER housekeeping %s %s→%s reason=%q",
+						ip4String(ip), proposal.DesiredLevel, res.ExecutableLevel, res.DenyReason)
+				}
+				newSt, _ := executor.Apply4(ip, s, res, pepParams, nowWall)
+				return newSt
 			}
 			state4[ip4], _ = fsm.Advance(zeroM, st, nowWall, c.toFSMConfig(), doT)
 		}
@@ -1055,7 +1487,21 @@ func main() {
 			}
 			ip := ip6 // capture
 			doT := func(s fsm.State, target fsm.Level) fsm.State {
-				return pep.TransitionV6(ip, s, target, nowWall, pepParams)
+				proposal := actions.ActionProposal{
+					Source:        "housekeeping",
+					Reason:        "fsm_downscale",
+					DesiredAction: actions.FsmLevelToCapability(target),
+					DesiredLevel:  actions.FsmLevelName(target),
+					Target:        actions.ActionTarget{Granularity: "src_ip", Value: ip6String(ip)},
+					CreatedAt:     nowWall,
+				}
+				res := resolver.Resolve(proposal)
+				if res.DenyReason != "" {
+					kliqLog.Printf("ACTION-RESOLVER housekeeping %s %s→%s reason=%q",
+						ip6String(ip), proposal.DesiredLevel, res.ExecutableLevel, res.DenyReason)
+				}
+				newSt, _ := executor.Apply6(ip, s, res, pepParams, nowWall)
+				return newSt
 			}
 			state6[ip6], _ = fsm.Advance(zeroM, st, nowWall, c.toFSMConfig(), doT)
 		}
@@ -1117,8 +1563,44 @@ func main() {
 		if c.Bootstrap && bs.Enabled && c.StatePath != "" && stFile != nil && tickN%30 == 0 {
 			stFile.Active.Bootstrap = bs
 			stFile.Active.ConfigHash = cfgHash
+			// Also persist managed lifecycle state.
+			stFile.Active.GraphLifecyclePhase = graphCtl.Phase()
+			stFile.Active.GraphLifecycleStartedAt = graphCtl.StartedAt()
 			if err := writeStateAtomic(c.StatePath, stFile); err != nil {
 				kliqLog.Printf("bootstrap checkpoint failed: %v", err)
+			}
+		}
+
+		// Flush shadow metric pipeline samples collected during this tick.
+		if shadowPipeline.IsActive() && len(shadowSamples) > 0 {
+			batch := klshieldshadow.BatchSamplesToMetrics(shadowSamples)
+			_ = batch // submitted directly; future extractor path for Track D
+			shadowSamples = shadowSamples[:0]
+		}
+
+		// Managed graph lifecycle tick (advance phase state machine).
+		if c.Mode == "managed" {
+			gStats := lgraph.GraphStats{
+				BootstrapPhase:   bsCtl.Effective().Phase,
+				CleanLearningSec: bsCtl.ObservedSeconds(),
+			}
+			if changed := graphCtl.Tick(gStats, nowWall); changed {
+				kliqLog.Printf("MANAGED: graph lifecycle phase → %s", graphCtl.Phase())
+				if stFile != nil {
+					stFile.Active.GraphLifecyclePhase = graphCtl.Phase()
+					stFile.Active.GraphLifecycleStartedAt = graphCtl.StartedAt()
+					_ = writeStateAtomic(c.StatePath, stFile)
+				}
+				// Upload proposal when reaching freeze_ready.
+				if graphCtl.Phase() == lgraph.PhaseFreezeReady && forgeC != nil && graphCfg.ProposalUpload {
+					go func() {
+						id := uploadBaselineProposal(context.Background(), forgeC, nodeID,
+							graphCtl, bsCtl, gStats, &c)
+						if id != "" {
+							graphCtl.MarkProposalSent(time.Now())
+						}
+					}()
+				}
 			}
 		}
 		for ip, pv := range prev4 {

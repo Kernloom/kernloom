@@ -25,7 +25,7 @@ func writeYAML(t *testing.T, content string) string {
 }
 
 const validPolicyYAML = `
-apiVersion: kernloom.io/v1alpha1
+apiVersion: kernloom.io/kliq/v1alpha1
 kind: LocalPolicyPack
 metadata:
   name: test-policy
@@ -77,7 +77,7 @@ func TestLoadFromFile_NotFound(t *testing.T) {
 
 func TestValidate_MissingName(t *testing.T) {
 	yaml := `
-apiVersion: kernloom.io/v1alpha1
+apiVersion: kernloom.io/kliq/v1alpha1
 kind: LocalPolicyPack
 metadata:
   name: ""
@@ -95,7 +95,7 @@ spec:
 
 func TestValidate_NoRules(t *testing.T) {
 	yaml := `
-apiVersion: kernloom.io/v1alpha1
+apiVersion: kernloom.io/kliq/v1alpha1
 kind: LocalPolicyPack
 metadata:
   name: empty
@@ -110,7 +110,7 @@ spec:
 
 func TestValidate_InvalidMaxAction(t *testing.T) {
 	yaml := `
-apiVersion: kernloom.io/v1alpha1
+apiVersion: kernloom.io/kliq/v1alpha1
 kind: LocalPolicyPack
 metadata:
   name: bad-action
@@ -130,7 +130,7 @@ spec:
 
 func TestValidate_WrongKind(t *testing.T) {
 	yaml := `
-apiVersion: kernloom.io/v1alpha1
+apiVersion: kernloom.io/kliq/v1alpha1
 kind: WrongKind
 metadata:
   name: x

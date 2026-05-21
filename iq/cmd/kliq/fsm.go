@@ -6,7 +6,7 @@ package main
 import (
 	"time"
 
-	"github.com/kernloom/kernloom/pkg/adapters/shieldpep"
+	"github.com/kernloom/kernloom/iq/internal/actions"
 	"github.com/kernloom/kernloom/pkg/core/fsm"
 )
 
@@ -17,7 +17,7 @@ import (
 // callback (which drives the shieldpep adapter), calls fsm.Advance and adds
 // learning samples when appropriate.
 func processCandidate4(m metrics, st fsm.State, nowWall time.Time, c cfg,
-	wl *whitelist, fb *feedbackManager, pep *shieldpep.Adapter,
+	wl *whitelist, fb *feedbackManager, resolver *actions.PolicyResolver, executor *actions.ShieldActionExecutor,
 	resPPS, resSyn, resScan, resBps *reservoir, clean bool,
 ) fsm.State {
 	st.LastSeenWallTime = nowWall
@@ -28,7 +28,7 @@ func processCandidate4(m metrics, st fsm.State, nowWall time.Time, c cfg,
 	fbHit := fb.matchV4(m.IP4)
 	if wlHit || fbHit {
 		if st.Level != fsm.LevelObserve {
-			st = pep.TransitionV4(m.IP4, st, fsm.LevelObserve, nowWall, pepParams)
+			st = executor.ApplyDeEnforce4(m.IP4, st, pepParams, nowWall)
 		}
 		st.Strikes, st.NonCompTicks, st.UpStreak, st.DownStreak = 0, 0, 0, 0
 		st.HighSevSince = time.Time{}
@@ -44,11 +44,24 @@ func processCandidate4(m metrics, st fsm.State, nowWall time.Time, c cfg,
 	}
 
 	doTransition := func(st fsm.State, target fsm.Level) fsm.State {
-		// Bootstrap safety: cap enforcement at RATE_HARD unless explicitly allowed.
 		if c.BootstrapActive && !c.BootstrapAllowBlock && target == fsm.LevelBlock {
 			target = fsm.LevelHard
 		}
-		return pep.TransitionV4(m.IP4, st, target, nowWall, pepParams)
+		proposal := actions.ActionProposal{
+			Source:        "fsm",
+			Reason:        "fsm_escalation",
+			DesiredAction: actions.FsmLevelToCapability(target),
+			DesiredLevel:  actions.FsmLevelName(target),
+			Target:        actions.ActionTarget{Granularity: "src_ip", Value: m.ipString()},
+			CreatedAt:     nowWall,
+		}
+		res := resolver.Resolve(proposal)
+		if res.DenyReason != "" {
+			kliqLog.Printf("ACTION-RESOLVER %s %s→%s reason=%q",
+				m.ipString(), proposal.DesiredLevel, res.ExecutableLevel, res.DenyReason)
+		}
+		newSt, _ := executor.Apply4(m.IP4, st, res, pepParams, nowWall)
+		return newSt
 	}
 
 	prevLevel := st.Level
@@ -73,7 +86,7 @@ func processCandidate4(m metrics, st fsm.State, nowWall time.Time, c cfg,
 
 // processCandidate6 runs the FSM for a single IPv6 source.
 func processCandidate6(m metrics, st fsm.State, nowWall time.Time, c cfg,
-	wl *whitelist, fb *feedbackManager, pep *shieldpep.Adapter,
+	wl *whitelist, fb *feedbackManager, resolver *actions.PolicyResolver, executor *actions.ShieldActionExecutor,
 	resPPS, resSyn, resScan, resBps *reservoir, clean bool,
 ) fsm.State {
 	st.LastSeenWallTime = nowWall
@@ -84,7 +97,7 @@ func processCandidate6(m metrics, st fsm.State, nowWall time.Time, c cfg,
 	fbHit := fb.matchV6(m.IP6)
 	if wlHit || fbHit {
 		if st.Level != fsm.LevelObserve {
-			st = pep.TransitionV6(m.IP6, st, fsm.LevelObserve, nowWall, pepParams)
+			st = executor.ApplyDeEnforce6(m.IP6, st, pepParams, nowWall)
 		}
 		st.Strikes, st.NonCompTicks, st.UpStreak, st.DownStreak = 0, 0, 0, 0
 		st.HighSevSince = time.Time{}
@@ -103,7 +116,21 @@ func processCandidate6(m metrics, st fsm.State, nowWall time.Time, c cfg,
 		if c.BootstrapActive && !c.BootstrapAllowBlock && target == fsm.LevelBlock {
 			target = fsm.LevelHard
 		}
-		return pep.TransitionV6(m.IP6, st, target, nowWall, pepParams)
+		proposal := actions.ActionProposal{
+			Source:        "fsm",
+			Reason:        "fsm_escalation",
+			DesiredAction: actions.FsmLevelToCapability(target),
+			DesiredLevel:  actions.FsmLevelName(target),
+			Target:        actions.ActionTarget{Granularity: "src_ip", Value: m.ipString()},
+			CreatedAt:     nowWall,
+		}
+		res := resolver.Resolve(proposal)
+		if res.DenyReason != "" {
+			kliqLog.Printf("ACTION-RESOLVER %s %s→%s reason=%q",
+				m.ipString(), proposal.DesiredLevel, res.ExecutableLevel, res.DenyReason)
+		}
+		newSt, _ := executor.Apply6(m.IP6, st, res, pepParams, nowWall)
+		return newSt
 	}
 
 	prevLevel := st.Level

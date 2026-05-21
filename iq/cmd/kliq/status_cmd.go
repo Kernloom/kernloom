@@ -4,9 +4,11 @@
 package main
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
+	"strings"
 	"text/tabwriter"
 	"time"
 
@@ -145,6 +147,9 @@ func runStatus(statePath, dbPath string) {
 		}
 	}
 
+	// ── Policy / Inventory (from runtime sidecar + state fallback) ──────────
+	printRuntimeReport(statePath, st)
+
 	// ── Graph DB ─────────────────────────────────────────────────────────────
 	s, err := gstore.Open(dbPath)
 	if err != nil {
@@ -189,6 +194,100 @@ func runStatus(statePath, dbPath string) {
 			}
 		}
 		fmt.Printf("\nBaselines: %d learned  %d candidate\n", learned, candidate)
+	}
+}
+
+// printRuntimeReport reads the kliq-report.json sidecar (written at startup)
+// and prints a formatted policy + inventory summary.
+// st is the loaded state file for forge_pack_name fallback (may be nil).
+func printRuntimeReport(statePath string, st *stateFile) {
+	sidecar := reportSidecarPath(statePath)
+	if sidecar == "" {
+		return
+	}
+	data, err := os.ReadFile(sidecar)
+	if err != nil {
+		return // not yet written (kliq not started), silently skip
+	}
+	var rep runtimeReport
+	if err := json.Unmarshal(data, &rep); err != nil {
+		return
+	}
+	cr := rep.ConfigReport
+	fmt.Println()
+
+	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
+	fmt.Fprintf(w, "Mode:\t%s\n", cr.Mode)
+	fmt.Fprintf(w, "Policy authority:\t%s\n", cr.PolicyAuthority)
+	if cr.HasPolicyPack {
+		maxA := cr.PolicyMaxAction
+		if maxA == "" {
+			maxA = "block (no cap)"
+		}
+		fmt.Fprintf(w, "Policy pack:\tloaded  max_action=%s  allow_block=%v\n", maxA, cr.AllowLocalBlock)
+	} else {
+		// Fallback: sidecar may be stale if pack was applied after startup.
+		// Read forge_pack_name from the already-loaded state file.
+		if st != nil && st.Active.ForgePackName != "" {
+			fmt.Fprintf(w, "Policy pack:\t%s  (from forge)\n", st.Active.ForgePackName)
+		} else {
+			fmt.Fprintf(w, "Policy pack:\tnone")
+			if cr.Mode == "managed" {
+				fmt.Fprint(w, "  ← observe-only until pack loaded")
+			}
+			fmt.Fprintln(w)
+		}
+	}
+	if cr.DryRun {
+		fmt.Fprintf(w, "Dry-run:\tenabled — no BPF map writes\n")
+	}
+	fmt.Fprintf(w, "Rate mode:\t%s\n", cr.EnforcementMode)
+	w.Flush()
+
+	// Rate details block — different presentation per mode.
+	fmt.Printf("\nEnforcement rates:\n")
+	w = tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
+	switch cr.EnforcementMode {
+	case "directive":
+		if cr.SoftDirectiveRatePPS > 0 {
+			fmt.Fprintf(w, "  soft:\t%d pps  (policy: fixed)\n", cr.SoftDirectiveRatePPS)
+		}
+		if cr.HardDirectiveRatePPS > 0 {
+			fmt.Fprintf(w, "  hard:\t%d pps  (policy: fixed)\n", cr.HardDirectiveRatePPS)
+		}
+	case "autonomy":
+		if cr.SoftRateFactor > 0 {
+			fmt.Fprintf(w, "  soft:\t%d pps  (adaptive: trig=%.0f × %.2f)\n",
+				cr.EffectiveSoftRatePPS, cr.InitialTrigPPS, cr.SoftRateFactor)
+		} else if cr.EffectiveSoftRatePPS > 0 {
+			fmt.Fprintf(w, "  soft:\t%d pps  (static)\n", cr.EffectiveSoftRatePPS)
+		}
+		if cr.HardRateFactor > 0 {
+			fmt.Fprintf(w, "  hard:\t%d pps  (adaptive: trig=%.0f × %.2f)\n",
+				cr.EffectiveHardRatePPS, cr.InitialTrigPPS, cr.HardRateFactor)
+		} else if cr.EffectiveHardRatePPS > 0 {
+			fmt.Fprintf(w, "  hard:\t%d pps  (static)\n", cr.EffectiveHardRatePPS)
+		}
+	}
+	w.Flush()
+
+	inv := rep.Inventory
+	if len(inv.EffectiveCapabilities) > 0 {
+		fmt.Println()
+		fmt.Printf("Capabilities (%s):\n", inv.Metadata.ID)
+		w = tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
+		for _, cap := range inv.EffectiveCapabilities {
+			g := strings.Join(cap.Granularity, ", ")
+			extra := ""
+			if cap.Reason != "" {
+				extra = "  [" + cap.Reason + "]"
+			}
+			fmt.Fprintf(w, "  %s\t%s\t%s%s\n", cap.ID, cap.Status, g, extra)
+		}
+		for _, cap := range inv.UnavailableCapabilities {
+			fmt.Fprintf(w, "  %s\t%s\t%s\n", cap.ID, cap.Status, cap.Reason)
+		}
+		w.Flush()
 	}
 }
 

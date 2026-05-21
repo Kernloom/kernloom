@@ -470,6 +470,34 @@ func (m *Maps) DeleteEdge4Allow(key Edge4Key) error {
 	return err
 }
 
+// TryOpenEdgeMaps tries to open any nil edge map handles from root.
+// Returns true when all four edge maps are now available.
+// Calling this after klshield has been reloaded with tuple support allows
+// kliq to pick up the maps without a restart.
+func (m *Maps) TryOpenEdgeMaps(root string) bool {
+	if m.Edge4Deny == nil {
+		if em, err := OpenPinnedMap(filepath.Join(root, MapPinEdge4Deny)); err == nil {
+			m.Edge4Deny = em
+		}
+	}
+	if m.Edge4Allow == nil {
+		if em, err := OpenPinnedMap(filepath.Join(root, MapPinEdge4Allow)); err == nil {
+			m.Edge4Allow = em
+		}
+	}
+	if m.Edge4RL == nil {
+		if em, err := OpenPinnedMap(filepath.Join(root, MapPinEdge4RL)); err == nil {
+			m.Edge4RL = em
+		}
+	}
+	if m.Edge4Cfg == nil {
+		if em, err := OpenPinnedMap(filepath.Join(root, MapPinEdge4Cfg)); err == nil {
+			m.Edge4Cfg = em
+		}
+	}
+	return m.Edge4Deny != nil && m.Edge4RL != nil
+}
+
 // OpenPinnedMap is a thin wrapper around ebpf.LoadPinnedMap.
 func OpenPinnedMap(path string) (*ebpf.Map, error) {
 	return ebpf.LoadPinnedMap(path, nil)

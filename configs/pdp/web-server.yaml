@@ -1,51 +1,43 @@
 # PDPConfig — Web Server (Production)
-# Feature profile:  minimum dos-light
-#                   recommended iq-learning
-#
-# Start command:
-#   sudo kliq --pdp-config=<this-file> --dry-run=false
-#
-#
-# Use after web-server-bootstrap completes. Expects learned state.json.
 
 apiVersion: kernloom.io/v1alpha1
 kind: PDPConfig
 metadata:
   name: web-server
-  description: "Web server production — SYN-sensitive, expects learned state"
+  description: "Public web server — balanced PPS+SYN, moderate thresholds"
 
 spec:
 
   signal_engine:
-    pps_trigger:  0.0        # defer to state.json
-    syn_trigger:  0.0
-    scan_trigger: 0.0
+    pps_trigger:  1200.0
+    syn_trigger:   250.0
+    scan_trigger:   20.0
     weights:
-      pps:  0.30
-      syn:  0.45
-      scan: 0.25
+      pps:  0.55
+      syn:  0.30
+      scan: 0.15
       cap:  3.0
 
   progressive_enforcement:
-    soft_at:       1
-    hard_at:       4
-    block_at:      10
+    soft_at:       2
+    hard_at:       5
+    block_at:      12
     up_need:       2
-    down_need:     6
-    block_min_sev: 2.2
-    block_min_dur: "20s"
+    down_need:     8
+    block_min_sev: 2.8
+    block_min_dur: "30s"
     min_hold_soft: "20s"
-    min_hold_hard: "1m"
+    min_hold_hard: "45s"
 
   non_compliance:
-    at:    10
-    drop:  3.0
-    sev:   1.8
-    reset: 0.25
+    at:    15
+    drop:  10.0
+    sev:   2.0
+    reset: 0.30
 
   graph:
     enabled: true
-    mode:    frozen-observe
+    mode:    learn
     store:   /var/lib/kernloom/iq/kliq.db
     promotion:
       min_seen_count: 5
@@ -73,10 +65,30 @@ spec:
     enabled: true
     min_samples: 500
     floors:
-      pps:  500.0
-      syn:  100.0
-      scan: 15.0
+      pps:  300.0
+      syn:   60.0
+      scan:  10.0
     bootstrap:
+      window:     "336h"
+      k_start:    4.0
+      k_final:    3.5
+      phase1_end: "48h"
+      phase2_end: "120h"
+      phase1:
+        interval: "1h"
+        max_up:   0.10
+        max_down: 0.02
+        alpha:    0.10
+      phase2:
+        interval: "6h"
+        max_up:   0.07
+        max_down: 0.03
+        alpha:    0.15
+      phase3:
+        interval: "24h"
+        max_up:   0.05
+        max_down: 0.05
+        alpha:    0.20
       steady:
         interval: "84h"
         max_up:   0.05
@@ -85,8 +97,10 @@ spec:
 
   adapters:
     shield_pep:
-      soft_rate_pps: 200
-      soft_burst:    500
-      hard_rate_pps: 50
-      hard_burst:    100
+      soft_rate_factor: 0.50
+      hard_rate_factor: 0.15
+      soft_rate_pps: 400
+      soft_burst:    1000
+      hard_rate_pps: 100
+      hard_burst:    250
       cooldown:      "5s"

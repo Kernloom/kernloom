@@ -1,46 +1,41 @@
 # PDPConfig — Database Server (Production)
-# Feature profile:  minimum graph-learning
-#                   recommended graph-learning
 #
-# Start command:
-#   sudo kliq --pdp-config=<this-file> --graph --graph-mode=frozen-observe --dry-run=false
-#
+# Low external traffic, scan-dominant scoring.
+# Only known app servers should connect.
 
 apiVersion: kernloom.io/v1alpha1
 kind: PDPConfig
 metadata:
   name: database
-  description: "Database production — low PPS, BPS-aware, expects learned state"
+  description: "Database server — scan-dominant, lateral-movement sensitive"
 
 spec:
 
   signal_engine:
-    pps_trigger:  0.0
-    syn_trigger:  0.0
-    scan_trigger: 0.0
-    bps_trigger:  0.0
+    pps_trigger:  300.0
+    syn_trigger:   50.0
+    scan_trigger:   8.0
     weights:
-      pps:  0.20
-      syn:  0.30
-      scan: 0.30
-      bps:  0.20
+      pps:  0.25
+      syn:  0.25
+      scan: 0.50
       cap:  3.0
 
   progressive_enforcement:
-    soft_at:       1
-    hard_at:       3
+    soft_at:       2
+    hard_at:       4
     block_at:      10
     up_need:       2
-    down_need:     8
-    block_min_sev: 2.8
-    block_min_dur: "60s"
-    min_hold_soft: "30s"
-    min_hold_hard: "3m"
+    down_need:     6
+    block_min_sev: 2.5
+    block_min_dur: "20s"
+    min_hold_soft: "1m"
+    min_hold_hard: "10m"
 
   non_compliance:
     at:    8
     drop:  1.0
-    sev:   1.5
+    sev:   1.8
     reset: 0.30
 
   graph:
@@ -54,8 +49,8 @@ spec:
       expire_ttl:     "720h"
     freeze:
       max_action:             rate_limit
-      allow_block:            false
-      min_severity_for_block: 70
+      allow_block:            true
+      min_severity_for_block: 60
     exclude:
       broadcast: true
       loopback:  true
@@ -65,19 +60,40 @@ spec:
     alpha:               0.02
     alpha_bootstrap:     0.10
     deviation_threshold: 4.0
-    min_update_pps:      2.0
+    min_update_pps:      1.0
     peak_tolerance:      1.5
     peak_decay_half_life: "336h"
+    min_obs_time_based:  5
+    min_age_time_based:  "168h"
 
   autotune:
     enabled: true
-    min_samples: 500
+    min_samples: 300
     floors:
-      pps:  100.0
+      pps:  50.0
       syn:  20.0
-      scan: 3.0
-      bps:  10000000
+      scan:  5.0
     bootstrap:
+      window:     "336h"
+      k_start:    4.0
+      k_final:    3.5
+      phase1_end: "48h"
+      phase2_end: "120h"
+      phase1:
+        interval: "1h"
+        max_up:   0.10
+        max_down: 0.02
+        alpha:    0.10
+      phase2:
+        interval: "6h"
+        max_up:   0.07
+        max_down: 0.03
+        alpha:    0.15
+      phase3:
+        interval: "24h"
+        max_up:   0.05
+        max_down: 0.05
+        alpha:    0.20
       steady:
         interval: "84h"
         max_up:   0.05
@@ -86,8 +102,10 @@ spec:
 
   adapters:
     shield_pep:
+      soft_rate_factor: 0.50
+      hard_rate_factor: 0.10
       soft_rate_pps: 100
       soft_burst:    200
-      hard_rate_pps: 30
-      hard_burst:    60
-      cooldown:      "15s"
+      hard_rate_pps:  20
+      hard_burst:     40
+      cooldown:      "10s"

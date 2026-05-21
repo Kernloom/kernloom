@@ -1,57 +1,45 @@
-# PDPConfig — Identity Provider (Production)
-# Feature profile:  minimum graph-enforce
-#                   recommended graph-enforce (activates XDP tuple enforcement via edge4_allow)
+# PDPConfig — Identity Provider / Auth Endpoint (Production)
 #
-# Start command:
-#   sudo kliq --pdp-config=<this-file> --feature-profile=graph-enforce --graph --graph-mode=frozen-enforce --dry-run=false
-#
-#
-# Use after IDP bootstrap completes and graph is frozen.
-# The frozen graph is the primary defence: only known services can authenticate.
-# Expects learned trigger values in state.json.
-#
-# Strongly recommended: kliq graph freeze after bootstrap, then:
-#   --graph --graph-mode=frozen-enforce (with feature-profile=graph-enforce)
-# so that unknown clients are blocked at the XDP tuple level immediately.
+# SYN-dominant. Auth endpoints are prime targets for credential stuffing.
 
 apiVersion: kernloom.io/v1alpha1
 kind: PDPConfig
 metadata:
   name: idp
-  description: "Identity Provider production — conservative blocking, expects learned state + frozen graph"
+  description: "Identity provider — SYN-dominant, protect against auth abuse"
 
 spec:
 
   signal_engine:
-    pps_trigger:  0.0        # defer to state.json
-    syn_trigger:  0.0
-    scan_trigger: 0.0
+    pps_trigger:  350.0
+    syn_trigger:  180.0
+    scan_trigger:  10.0
     weights:
-      pps:  0.25
-      syn:  0.40
-      scan: 0.35
+      pps:  0.30
+      syn:  0.55
+      scan: 0.15
       cap:  3.0
 
   progressive_enforcement:
     soft_at:       1
-    hard_at:       4
-    block_at:      12
+    hard_at:       3
+    block_at:      8
     up_need:       2
     down_need:     8
-    block_min_sev: 3.0
-    block_min_dur: "90s"
+    block_min_sev: 2.5
+    block_min_dur: "30s"
     min_hold_soft: "30s"
-    min_hold_hard: "3m"
+    min_hold_hard: "1m"
 
   non_compliance:
     at:    10
     drop:  1.0
-    sev:   2.0
+    sev:   1.8
     reset: 0.30
 
   graph:
     enabled: true
-    mode:    frozen-enforce   # IDP: unknown clients should not authenticate
+    mode:    learn
     store:   /var/lib/kernloom/iq/kliq.db
     promotion:
       min_seen_count: 5
@@ -59,9 +47,9 @@ spec:
       min_age:        "10m"
       expire_ttl:     "720h"
     freeze:
-      max_action:             block
-      allow_block:            true    # production IDP: unknown source = block
-      min_severity_for_block: 75
+      max_action:             rate_limit
+      allow_block:            false
+      min_severity_for_block: 70
     exclude:
       broadcast: true
       loopback:  true
@@ -71,18 +59,38 @@ spec:
     alpha:               0.02
     alpha_bootstrap:     0.10
     deviation_threshold: 4.0
-    min_update_pps:      3.0
+    min_update_pps:      2.0
     peak_tolerance:      1.5
     peak_decay_half_life: "336h"
 
   autotune:
     enabled: true
-    min_samples: 500
+    min_samples: 300
     floors:
-      pps:  200.0
-      syn:  50.0
-      scan: 3.0
+      pps:  100.0
+      syn:   50.0
+      scan:   8.0
     bootstrap:
+      window:     "336h"
+      k_start:    4.0
+      k_final:    3.5
+      phase1_end: "48h"
+      phase2_end: "120h"
+      phase1:
+        interval: "1h"
+        max_up:   0.10
+        max_down: 0.02
+        alpha:    0.10
+      phase2:
+        interval: "6h"
+        max_up:   0.07
+        max_down: 0.03
+        alpha:    0.15
+      phase3:
+        interval: "24h"
+        max_up:   0.05
+        max_down: 0.05
+        alpha:    0.20
       steady:
         interval: "84h"
         max_up:   0.05
@@ -91,8 +99,10 @@ spec:
 
   adapters:
     shield_pep:
-      soft_rate_pps: 200
-      soft_burst:    500
-      hard_rate_pps: 30
-      hard_burst:    60
-      cooldown:      "10s"
+      soft_rate_factor: 0.50
+      hard_rate_factor: 0.10
+      soft_rate_pps: 80
+      soft_burst:    160
+      hard_rate_pps: 15
+      hard_burst:    30
+      cooldown:      "5s"

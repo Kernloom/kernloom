@@ -292,13 +292,23 @@ type AdaptersSpec struct {
 // ShieldPEPAdapterSpec is the Shield-specific implementation of the abstract
 // network.rate_limit_source and network.block_source capabilities.
 type ShieldPEPAdapterSpec struct {
-	// Soft level: applied when the FSM first triggers enforcement.
+	// Static rate/burst: used when adaptive mode is disabled (factors = 0).
 	SoftRatePPS uint64 `yaml:"soft_rate_pps"`
 	SoftBurst   uint64 `yaml:"soft_burst"`
-
-	// Hard level: applied when soft enforcement is insufficient.
 	HardRatePPS uint64 `yaml:"hard_rate_pps"`
 	HardBurst   uint64 `yaml:"hard_burst"`
+
+	// Adaptive rate factors: when > 0, the effective rate is computed as
+	// trig_pps × factor, updated every autotune cycle. This keeps enforcement
+	// proportional to the learned traffic baseline instead of using fixed values.
+	//
+	//   soft_rate = trig_pps × SoftRateFactor  (e.g. 0.5 = 50% of normal)
+	//   hard_rate = trig_pps × HardRateFactor  (e.g. 0.1 = 10% of normal)
+	//
+	// Burst is derived as rate × 2 (two seconds of headroom).
+	// Static rate/burst fields are ignored when the corresponding factor is set.
+	SoftRateFactor float64 `yaml:"soft_rate_factor,omitempty"`
+	HardRateFactor float64 `yaml:"hard_rate_factor,omitempty"`
 
 	// Cooldown is the minimum time between FSM level transitions.
 	Cooldown Duration `yaml:"cooldown"`

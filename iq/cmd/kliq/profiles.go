@@ -75,6 +75,24 @@ func profileByName(name string) profile {
 	switch n {
 
 	// =========================
+	// Generic / Unknown
+	// =========================
+
+	case "generic":
+		// Safe starting point for any unknown workload. High triggers, no blocking.
+		// Autotune adapts the actual thresholds within hours of first traffic.
+		return profile{
+			Name:    "generic",
+			TrigPPS: 5000, TrigSyn: 500, TrigScan: 50,
+			WPPS: 0.50, WSyn: 0.30, WScan: 0.20, SevCap: 3.0,
+			SoftAt: 3, HardAt: 7, BlockAt: 999,
+			SoftTTL: 60 * time.Second, HardTTL: 5 * time.Minute, BlockTTL: 30 * time.Minute,
+			BlockMinSev: 0, BlockMinDur: 0,
+			UpNeed: 3, DownNeed: 10, MinHoldSoft: 30 * time.Second, MinHoldHard: 2 * time.Minute,
+			NonCompAt: 999, NonCompDrop: 999, NonCompSev: 999, NonCompReset: 0.30,
+		}
+
+	// =========================
 	// OpenZiti Profiles
 	// =========================
 
@@ -241,6 +259,6 @@ func profileByName(name string) profile {
 		}
 
 	default:
-		return profileByName("ziti-controller")
+		return profileByName("generic")
 	}
 }

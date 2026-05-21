@@ -1,49 +1,43 @@
 # PDPConfig — API Server (Production)
-# Feature profile:  minimum graph-learning
-#                   recommended graph-learning
-#
-# Start command:
-#   sudo kliq --pdp-config=<this-file> --graph --graph-mode=frozen-observe --dry-run=false
-#
 
 apiVersion: kernloom.io/v1alpha1
 kind: PDPConfig
 metadata:
   name: api-server
-  description: "API server production — high SYN tolerance, expects learned state"
+  description: "Public JSON/API endpoint — bursty, higher PPS tolerance"
 
 spec:
 
   signal_engine:
-    pps_trigger:  0.0
-    syn_trigger:  0.0
-    scan_trigger: 0.0
+    pps_trigger:  2500.0
+    syn_trigger:   500.0
+    scan_trigger:   30.0
     weights:
-      pps:  0.30
-      syn:  0.35
-      scan: 0.35
+      pps:  0.55
+      syn:  0.30
+      scan: 0.15
       cap:  3.0
 
   progressive_enforcement:
-    soft_at:       1
+    soft_at:       2
     hard_at:       4
     block_at:      10
     up_need:       2
-    down_need:     6
-    block_min_sev: 2.3
+    down_need:     8
+    block_min_sev: 2.8
     block_min_dur: "25s"
     min_hold_soft: "20s"
-    min_hold_hard: "1m"
+    min_hold_hard: "45s"
 
   non_compliance:
-    at:    10
-    drop:  2.0
-    sev:   1.8
-    reset: 0.25
+    at:    12
+    drop:  15.0
+    sev:   2.0
+    reset: 0.30
 
   graph:
     enabled: true
-    mode:    frozen-observe
+    mode:    learn
     store:   /var/lib/kernloom/iq/kliq.db
     promotion:
       min_seen_count: 5
@@ -62,7 +56,7 @@ spec:
     min_observations:    30
     alpha:               0.02
     alpha_bootstrap:     0.10
-    deviation_threshold: 4.5
+    deviation_threshold: 5.0
     min_update_pps:      5.0
     peak_tolerance:      1.5
     peak_decay_half_life: "336h"
@@ -71,10 +65,30 @@ spec:
     enabled: true
     min_samples: 500
     floors:
-      pps:  1000.0
-      syn:  200.0
-      scan: 10.0
+      pps:  500.0
+      syn:  100.0
+      scan:  20.0
     bootstrap:
+      window:     "336h"
+      k_start:    4.0
+      k_final:    3.5
+      phase1_end: "48h"
+      phase2_end: "120h"
+      phase1:
+        interval: "1h"
+        max_up:   0.10
+        max_down: 0.02
+        alpha:    0.10
+      phase2:
+        interval: "6h"
+        max_up:   0.07
+        max_down: 0.03
+        alpha:    0.15
+      phase3:
+        interval: "24h"
+        max_up:   0.05
+        max_down: 0.05
+        alpha:    0.20
       steady:
         interval: "84h"
         max_up:   0.05
@@ -83,8 +97,10 @@ spec:
 
   adapters:
     shield_pep:
-      soft_rate_pps: 500
-      soft_burst:    1000
-      hard_rate_pps: 100
-      hard_burst:    200
+      soft_rate_factor: 0.50
+      hard_rate_factor: 0.15
+      soft_rate_pps: 800
+      soft_burst:    2000
+      hard_rate_pps: 200
+      hard_burst:    500
       cooldown:      "5s"
