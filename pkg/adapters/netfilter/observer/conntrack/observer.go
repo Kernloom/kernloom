@@ -239,15 +239,17 @@ func flowToObservation(f Flow, nodeID string) observation.Observation {
 		ID:   dstID,
 	})
 
-	obs.SetAttribute("proto", f.Proto)
-	obs.SetAttribute("dst_port", strconv.Itoa(int(f.DstPort)))
-	obs.SetAttribute("src_port", strconv.Itoa(int(f.SrcPort)))
+	// Attribute names match what graphlearner.handleObservation expects.
+	obs.SetAttribute("protocol", f.Proto)
+	obs.SetAttribute("destination_port", strconv.Itoa(int(f.DstPort)))
+	obs.SetAttribute("source_port", strconv.Itoa(int(f.SrcPort)))
 	obs.SetAttribute("state", f.State)
+	// packets and bytes go into Metrics (float64) not Attributes.
 	if f.Packets > 0 {
-		obs.SetAttribute("packets", strconv.FormatUint(f.Packets, 10))
+		obs.SetMetric("packets", float64(f.Packets))
 	}
 	if f.Bytes > 0 {
-		obs.SetAttribute("bytes", strconv.FormatUint(f.Bytes, 10))
+		obs.SetMetric("bytes", float64(f.Bytes))
 	}
 	return obs
 }

@@ -133,8 +133,14 @@ func TestFlowToObservation(t *testing.T) {
 	if obs.Object.ID != "10.0.0.1:8080" {
 		t.Errorf("object: want 10.0.0.1:8080, got %q", obs.Object.ID)
 	}
-	if obs.Attributes["proto"] != "tcp" {
-		t.Errorf("attr proto: want tcp, got %q", obs.Attributes["proto"])
+	if obs.Attributes["protocol"] != "tcp" {
+		t.Errorf("attr protocol: want tcp, got %q", obs.Attributes["protocol"])
+	}
+	if obs.Attributes["destination_port"] != "8080" {
+		t.Errorf("attr destination_port: want 8080, got %q", obs.Attributes["destination_port"])
+	}
+	if obs.Metrics["packets"] != 10 {
+		t.Errorf("metric packets: want 10, got %v", obs.Metrics["packets"])
 	}
 	if obs.NodeID != "test-node" {
 		t.Errorf("nodeID: want test-node, got %q", obs.NodeID)
