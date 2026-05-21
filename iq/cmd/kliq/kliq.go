@@ -977,7 +977,7 @@ func main() {
 	// Baseline totals for drop-ratio gating.
 	var prevTotals shieldclient.Totals
 	var prevTotalsWall time.Time
-	if maps.Totals != nil {
+	if maps != nil && maps.Totals != nil {
 		if t, err := shieldclient.ReadTotalsSum(maps.Totals); err == nil {
 			prevTotals = t
 			prevTotalsWall = time.Now()
