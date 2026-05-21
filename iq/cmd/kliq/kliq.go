@@ -729,16 +729,10 @@ func main() {
 	if nfAdapter != nil {
 		nfCtx, nfCancel := context.WithCancel(context.Background())
 		defer nfCancel()
-		// Conntrack observation only when klshield is absent — mixing two
-		// telemetry sources with different time granularities distorts baselines.
-		nfObservation := maps == nil
-		if err := nfAdapter.StartWithObservation(nfCtx, mainBus, nfObservation); err != nil {
+		// Netfilter is enforcement-only — no telemetry, no graph learning.
+		// Telemetry requires klshield (XDP) for accurate per-packet rates.
+		if err := nfAdapter.Start(nfCtx, mainBus); err != nil {
 			kliqLog.Printf("WARNING: netfilter adapter Start failed: %v", err)
-		}
-		if nfObservation {
-			kliqLog.Printf("Netfilter: conntrack observation active (klshield absent)")
-		} else {
-			kliqLog.Printf("Netfilter: enforcement-only mode (klshield provides telemetry)")
 		}
 	}
 

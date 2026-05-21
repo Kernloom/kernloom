@@ -14,7 +14,6 @@ import (
 	"time"
 
 	"github.com/kernloom/kernloom/pkg/adapterruntime"
-	"github.com/kernloom/kernloom/pkg/adapters/netfilter/observer/conntrack"
 	"github.com/kernloom/kernloom/pkg/core/capability"
 	"github.com/kernloom/kernloom/pkg/core/fsm"
 )
@@ -42,17 +41,17 @@ type activeRule struct {
 
 // Adapter is the Kernloom Netfilter PEP adapter.
 //
-// It implements adapterruntime.Adapter so it can be registered in KLIQ's
-// adapter registry, and implements the actions.PEPSidecar interface so it
-// receives FSM transition notifications from the ShieldActionExecutor.
+// Responsibilities:
+//   - Translate FSM transitions (observe/soft/hard/block) into iptables/nftables rules
+//   - Maintain rule state and TTL expiry
+//   - Operate as a PEP sidecar alongside or instead of klshield
 //
-// Usage:
-//
-//	probe := netfilter.Probe(ctx)
-//	backend := iptables.New(probe.IPTables, cfg)   // or nftables.New(...)
-//	adapter := netfilter.New(cfg)
-//	adapter.SetBackend(probe, backend)
-//	adapter.Init(ctx, nil)
+// NOT a telemetry source. The netfilter adapter does not observe traffic or
+// feed the graph learner. Graph learning requires klshield (XDP) or an
+// external telemetry source. This is an intentional design decision:
+// conntrack-based telemetry has different time granularity than XDP telemetry,
+// mixing them distorts EWMA baselines. If klshield is unavailable, the graph
+// learner simply has no telemetry input.
 type Adapter struct {
 	cfg     Config
 	probe   ProbeResult
@@ -72,9 +71,6 @@ func New(cfg Config) *Adapter {
 func NewDefault() *Adapter { return New(DefaultConfig()) }
 
 // SetBackend injects the backend and probe result. Must be called before Init.
-// This is kept separate from Init so that kliq.go (which imports both the
-// netfilter parent and the backend sub-packages) can wire them together
-// without creating an import cycle inside this package.
 func (a *Adapter) SetBackend(probe ProbeResult, b BackendIface) {
 	a.probe = probe
 	a.backend = b
@@ -88,6 +84,8 @@ func (a *Adapter) Kind() adapterruntime.AdapterKind { return adapterruntime.Adap
 // SelectedBackend returns the backend type string selected during probe.
 func (a *Adapter) SelectedBackend() string { return string(a.probe.Selected) }
 
+// Capabilities returns the enforcement capabilities of this adapter.
+// No observation capabilities — netfilter is enforcement-only.
 func (a *Adapter) Capabilities() []*capability.Capability {
 	if atomic.LoadUint32(&a.healthy) == 0 {
 		return nil
@@ -106,39 +104,7 @@ func (a *Adapter) Init(_ context.Context, _ adapterruntime.AdapterConfig) error 
 	return nil
 }
 
-// Start connects to the event bus, launches the TTL GC goroutine, and starts
-// the conntrack observer when conntrack is available AND observation is enabled.
-//
-// Pass observationEnabled=false when a higher-fidelity telemetry source (e.g.
-// klshield) is already feeding the bus — mixing two sources with different
-// time granularities distorts EWMA baselines and graph edge metrics.
-func (a *Adapter) StartWithObservation(ctx context.Context, bus adapterruntime.EventBus, observationEnabled bool) error {
-	go a.gcLoop(ctx)
-
-	if !observationEnabled {
-		return nil
-	}
-
-	if a.probe.Conntrack.Available && a.cfg.Observation.ConntrackSnapshot {
-		cfg := conntrack.Config{
-			ConntrackPath: a.probe.Conntrack.Path,
-			ProcPath:      a.probe.Conntrack.ProcPath,
-			PollInterval:  a.cfg.Observation.ConntrackPollInterval,
-			MaxFlows:      a.cfg.Observation.MaxObservationsPerTick,
-		}
-		obs, err := conntrack.New(cfg)
-		if err == nil {
-			go obs.Start(ctx, bus)
-			logger.Printf("conntrack observer started: source=%s poll=%s", obs.Source(), cfg.PollInterval)
-		} else {
-			logger.Printf("conntrack observer unavailable: %v", err)
-		}
-	}
-	return nil
-}
-
-// Start satisfies adapterruntime.Adapter — runs GC only, no conntrack observation.
-// Use StartWithObservation(ctx, bus, true) explicitly when klshield is absent.
+// Start launches the TTL GC goroutine. No telemetry is started.
 func (a *Adapter) Start(ctx context.Context, _ adapterruntime.EventBus) error {
 	go a.gcLoop(ctx)
 	return nil
@@ -165,7 +131,6 @@ func (a *Adapter) Stop(ctx context.Context) error {
 /* ── actions.PEPSidecar ─────────────────────────────────────────────────── */
 
 // NotifyTransition4 mirrors an IPv4 FSM transition into Netfilter rules.
-// Called synchronously by ShieldActionExecutor after every authorized action.
 func (a *Adapter) NotifyTransition4(ip [4]byte, prev, next fsm.Level, ttl time.Duration) {
 	if atomic.LoadUint32(&a.healthy) == 0 {
 		return
@@ -187,7 +152,6 @@ func (a *Adapter) applyLevel(ctx context.Context, ipStr string, prev, next fsm.L
 	a.mu.Lock()
 	defer a.mu.Unlock()
 
-	// Snapshot state before mutation for rollback on backend failure.
 	snapshot := make(map[string]activeRule, len(a.rules))
 	for k, v := range a.rules {
 		snapshot[k] = v
@@ -206,7 +170,6 @@ func (a *Adapter) applyLevel(ctx context.Context, ipStr string, prev, next fsm.L
 
 	plan := a.buildPlan()
 	if err := a.backend.Apply(ctx, plan); err != nil {
-		// Rollback in-memory state to keep it consistent with firewall state.
 		a.rules = snapshot
 		logger.Printf("ERROR apply %s→%s for %s: %v — state rolled back", prev, next, ipStr, err)
 		return
@@ -239,7 +202,6 @@ func (a *Adapter) buildPlan() NetfilterPlan {
 
 	chain := prefix + "_INPUT"
 
-	// Management allowlist: RETURN rules at priority -100 (always evaluated first).
 	for _, cidr := range a.cfg.Safety.ManagementAllowlist {
 		plan.Rules = append(plan.Rules, RulePlan{
 			ID:       RuleID(a.ID(), "management", Selector{SrcCIDR: cidr}, VerdictReturn, nil),
@@ -255,10 +217,10 @@ func (a *Adapter) buildPlan() NetfilterPlan {
 		cap := levelToCapability(rule.level)
 		ruleID := RuleID(a.ID(), cap, Selector{SrcIP: rule.srcIP}, verdict, nil)
 		rp := RulePlan{
-			ID:       ruleID,
-			Chain:    chain,
+			ID:      ruleID,
+			Chain:   chain,
 			Selector: Selector{SrcIP: rule.srcIP},
-			Verdict:  verdict,
+			Verdict: verdict,
 		}
 		if verdict == VerdictRateLimit {
 			rate := ratePPSForLevel(rule.level)
@@ -312,7 +274,6 @@ func (a *Adapter) gcExpired(ctx context.Context) {
 
 	logger.Printf("GC: expiring %d rules", removed)
 	if err := a.backend.Apply(ctx, plan); err != nil {
-		// Rollback: restore expired entries so they're retried next GC cycle.
 		a.mu.Lock()
 		for k, v := range snapshot {
 			if _, exists := a.rules[k]; !exists {
@@ -331,7 +292,6 @@ func levelToVerdict(level fsm.Level, probe ProbeResult) Verdict {
 	case fsm.LevelBlock:
 		return VerdictDrop
 	case fsm.LevelSoft, fsm.LevelHard:
-		// Use native rate-limit when the backend supports it.
 		hasRL := (probe.Selected == BackendNFTables && probe.NFTables.Meters) ||
 			(probe.Selected != BackendNFTables && probe.IPTables.HasLimit)
 		if hasRL {
@@ -343,14 +303,11 @@ func levelToVerdict(level fsm.Level, probe ProbeResult) Verdict {
 	}
 }
 
-// ratePPSForLevel returns a conservative default rate for SOFT/HARD levels.
-// These are fallback values; in managed mode the bundle's enforcement_bounds
-// or PDPConfig adapter rates take precedence.
 func ratePPSForLevel(level fsm.Level) uint64 {
 	switch level {
 	case fsm.LevelHard:
 		return 20
-	default: // LevelSoft
+	default:
 		return 100
 	}
 }
@@ -366,6 +323,8 @@ func levelToCapability(level fsm.Level) string {
 	}
 }
 
+// buildCapabilities returns enforcement-only capabilities.
+// No observation capabilities — telemetry requires klshield.
 func buildCapabilities(p ProbeResult, cfg Config) []*capability.Capability {
 	var caps []*capability.Capability
 
@@ -393,29 +352,6 @@ func buildCapabilities(p ProbeResult, cfg Config) []*capability.Capability {
 		}
 	}
 
-	caps = append(caps, capability.NewCapability(
-		"observe.network.rule_counters", "v1",
-		capability.TypeTelemetry, capability.LayerL3L4, capability.DirectionOutput,
-		"Read packet/byte counters from Netfilter rules and sets",
-	).AddTag("network").AddTag("telemetry").AddTag("netfilter"))
-
-	if p.Conntrack.Available {
-		if p.Conntrack.Accounting {
-			// Full telemetry: topology + PPS/BPS rates (nf_conntrack_acct=1).
-			caps = append(caps, capability.NewCapability(
-				"observe.network.flow_edges", "v1",
-				capability.TypeTelemetry, capability.LayerL3L4, capability.DirectionOutput,
-				"Observe L3/L4 flow edges with packet/byte rates via conntrack",
-			).AddTag("network").AddTag("telemetry").AddTag("netfilter").AddTag("conntrack"))
-		} else {
-			// Topology-only: edges detected but PPS/BPS unreliable without accounting.
-			caps = append(caps, capability.NewCapability(
-				"observe.network.flow_topology", "v1",
-				capability.TypeTelemetry, capability.LayerL3L4, capability.DirectionOutput,
-				"Observe L3/L4 communication topology (edges only, no packet rates — enable nf_conntrack_acct for full telemetry)",
-			).AddTag("network").AddTag("telemetry").AddTag("netfilter").AddTag("conntrack").AddTag("topology-only"))
-		}
-	}
 	return caps
 }
 
