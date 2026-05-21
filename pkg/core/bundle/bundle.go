@@ -51,6 +51,7 @@ type BundleMetadata struct {
 
 type BundleSpec struct {
 	FeatureProfile    string                `yaml:"feature_profile,omitempty"     json:"feature_profile,omitempty"`
+	PDPProfile        string                `yaml:"pdp_profile,omitempty"         json:"pdp_profile,omitempty"`
 	PolicyPack        EmbeddedPackRef       `yaml:"policy_pack,omitempty"         json:"policy_pack,omitempty"`
 	PDPConfig         EmbeddedConfigRef     `yaml:"pdp_config,omitempty"          json:"pdp_config,omitempty"`
 	BootstrapAutotune BootstrapAutotunePlan `yaml:"bootstrap_autotune,omitempty"  json:"bootstrap_autotune,omitempty"`

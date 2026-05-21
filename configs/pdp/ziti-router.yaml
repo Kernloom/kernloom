@@ -1,52 +1,46 @@
 # PDPConfig — OpenZiti Router / Edge Router (Production)
-# Feature profile:  minimum dos-light
-#                   recommended iq-learning
 #
-# Start command:
-#   sudo kliq --pdp-config=<this-file> --dry-run=false
-#
-#
-# Use after completing the router bootstrap. Expects learned trigger values
-# in state.json. Graph should be in frozen-observe or frozen-enforce mode.
+# High throughput data plane. PPS-dominant; long hold times to avoid
+# disrupting active tunnels.
 
 apiVersion: kernloom.io/v1alpha1
 kind: PDPConfig
 metadata:
   name: ziti-router
-  description: "OpenZiti router — production, high-throughput, expects learned state"
+  description: "OpenZiti router — high throughput, NAT-friendly, block only if sustained"
 
 spec:
 
   signal_engine:
-    pps_trigger:  0.0       # defer to state.json (learned during bootstrap)
-    syn_trigger:  0.0
-    scan_trigger: 0.0
+    pps_trigger:  8000.0
+    syn_trigger:   200.0
+    scan_trigger:   30.0
     weights:
-      pps:  0.40
-      syn:  0.35
-      scan: 0.25
+      pps:  0.60
+      syn:  0.25
+      scan: 0.15
       cap:  3.0
 
   progressive_enforcement:
     soft_at:       2
     hard_at:       5
-    block_at:      14
+    block_at:      12
     up_need:       2
     down_need:     8
-    block_min_sev: 2.5
-    block_min_dur: "30s"
-    min_hold_soft: "30s"
-    min_hold_hard: "3m"
+    block_min_sev: 3.0
+    block_min_dur: "60s"
+    min_hold_soft: "20s"
+    min_hold_hard: "45s"
 
   non_compliance:
-    at:    12
-    drop:  5.0
-    sev:   2.0
-    reset: 0.20
+    at:    20
+    drop:  20.0
+    sev:   2.5
+    reset: 0.30
 
   graph:
     enabled: true
-    mode:    frozen-observe
+    mode:    learn
     store:   /var/lib/kernloom/iq/kliq.db
     promotion:
       min_seen_count: 5
@@ -56,7 +50,7 @@ spec:
     freeze:
       max_action:             rate_limit
       allow_block:            false
-      min_severity_for_block: 75
+      min_severity_for_block: 80
     exclude:
       broadcast: true
       loopback:  true
@@ -67,17 +61,37 @@ spec:
     alpha_bootstrap:     0.10
     deviation_threshold: 6.0
     min_update_pps:      10.0
-    peak_tolerance:      2.0
+    peak_tolerance:      1.5
     peak_decay_half_life: "336h"
 
   autotune:
     enabled: true
-    min_samples: 500
+    min_samples: 1000
     floors:
-      pps:  1000.0
-      syn:  200.0
-      scan: 20.0
+      pps:  2000.0
+      syn:   100.0
+      scan:   20.0
     bootstrap:
+      window:     "336h"
+      k_start:    4.0
+      k_final:    3.5
+      phase1_end: "48h"
+      phase2_end: "120h"
+      phase1:
+        interval: "1h"
+        max_up:   0.10
+        max_down: 0.02
+        alpha:    0.10
+      phase2:
+        interval: "6h"
+        max_up:   0.07
+        max_down: 0.03
+        alpha:    0.15
+      phase3:
+        interval: "24h"
+        max_up:   0.05
+        max_down: 0.05
+        alpha:    0.20
       steady:
         interval: "84h"
         max_up:   0.05
@@ -86,8 +100,10 @@ spec:
 
   adapters:
     shield_pep:
-      soft_rate_pps: 2000
-      soft_burst:    4000
-      hard_rate_pps: 500
-      hard_burst:    1000
-      cooldown:      "10s"
+      soft_rate_factor: 0.50
+      hard_rate_factor: 0.15
+      soft_rate_pps: 3000
+      soft_burst:    8000
+      hard_rate_pps: 800
+      hard_burst:    2000
+      cooldown:      "5s"

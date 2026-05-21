@@ -1,49 +1,43 @@
 # PDPConfig — Reverse Proxy / Load Balancer (Production)
-# Feature profile:  minimum dos-light
-#                   recommended iq-learning
-#
-# Start command:
-#   sudo kliq --pdp-config=<this-file> --dry-run=false
-#
 
 apiVersion: kernloom.io/v1alpha1
 kind: PDPConfig
 metadata:
   name: reverse-proxy
-  description: "Reverse proxy production — expects learned state, high-throughput"
+  description: "Reverse proxy / load balancer — high fan-in, PPS+SYN balanced"
 
 spec:
 
   signal_engine:
-    pps_trigger:  0.0
-    syn_trigger:  0.0
-    scan_trigger: 0.0
+    pps_trigger:  3000.0
+    syn_trigger:   600.0
+    scan_trigger:   25.0
     weights:
-      pps:  0.35
-      syn:  0.40
-      scan: 0.25
+      pps:  0.50
+      syn:  0.35
+      scan: 0.15
       cap:  3.0
 
   progressive_enforcement:
     soft_at:       2
-    hard_at:       6
-    block_at:      16
+    hard_at:       5
+    block_at:      12
     up_need:       2
     down_need:     8
-    block_min_sev: 2.5
+    block_min_sev: 2.8
     block_min_dur: "30s"
-    min_hold_soft: "30s"
-    min_hold_hard: "3m"
+    min_hold_soft: "20s"
+    min_hold_hard: "1m"
 
   non_compliance:
-    at:    12
-    drop:  5.0
+    at:    15
+    drop:  10.0
     sev:   2.0
-    reset: 0.20
+    reset: 0.30
 
   graph:
     enabled: true
-    mode:    frozen-observe
+    mode:    learn
     store:   /var/lib/kernloom/iq/kliq.db
     promotion:
       min_seen_count: 5
@@ -53,7 +47,7 @@ spec:
     freeze:
       max_action:             rate_limit
       allow_block:            false
-      min_severity_for_block: 75
+      min_severity_for_block: 70
     exclude:
       broadcast: true
       loopback:  true
@@ -62,19 +56,39 @@ spec:
     min_observations:    30
     alpha:               0.02
     alpha_bootstrap:     0.10
-    deviation_threshold: 6.0
-    min_update_pps:      20.0
-    peak_tolerance:      2.0
+    deviation_threshold: 5.0
+    min_update_pps:      5.0
+    peak_tolerance:      1.5
     peak_decay_half_life: "336h"
 
   autotune:
     enabled: true
     min_samples: 500
     floors:
-      pps:  2000.0
-      syn:  500.0
-      scan: 20.0
+      pps:  800.0
+      syn:  150.0
+      scan:  15.0
     bootstrap:
+      window:     "336h"
+      k_start:    4.0
+      k_final:    3.5
+      phase1_end: "48h"
+      phase2_end: "120h"
+      phase1:
+        interval: "1h"
+        max_up:   0.10
+        max_down: 0.02
+        alpha:    0.10
+      phase2:
+        interval: "6h"
+        max_up:   0.07
+        max_down: 0.03
+        alpha:    0.15
+      phase3:
+        interval: "24h"
+        max_up:   0.05
+        max_down: 0.05
+        alpha:    0.20
       steady:
         interval: "84h"
         max_up:   0.05
@@ -83,8 +97,10 @@ spec:
 
   adapters:
     shield_pep:
-      soft_rate_pps: 3000
-      soft_burst:    6000
-      hard_rate_pps: 800
-      hard_burst:    1600
-      cooldown:      "10s"
+      soft_rate_factor: 0.50
+      hard_rate_factor: 0.15
+      soft_rate_pps: 1000
+      soft_burst:    2500
+      hard_rate_pps: 250
+      hard_burst:    600
+      cooldown:      "5s"

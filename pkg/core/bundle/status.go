@@ -10,19 +10,20 @@ import "time"
 // RuntimeStatus is the rich heartbeat payload KLIQ sends to Forge.
 // It replaces the minimal pack-name heartbeat with full lifecycle telemetry.
 type RuntimeStatus struct {
-	NodeID            string                  `json:"node_id"`
-	BundleGeneration  int                     `json:"bundle_generation"`
-	BundleHash        string                  `json:"bundle_hash,omitempty"`
-	Applied           bool                    `json:"applied"`
-	DriftDetected     bool                    `json:"drift_detected"`
-	ErrorDetail       string                  `json:"error_detail,omitempty"`
-	ReportedAt        time.Time               `json:"reported_at"`
-	FeatureProfile    string                  `json:"feature_profile,omitempty"`
-	ActiveComponents  map[string]bool         `json:"active_components,omitempty"`
-	BootstrapAutotune BootstrapAutotuneStatus `json:"bootstrap_autotune_status,omitempty"`
-	GraphLifecycle    GraphLifecycleStatus    `json:"graph_lifecycle_status,omitempty"`
-	SourceBaseline    SourceBaselineStatus    `json:"source_baseline_status,omitempty"`
-	ExemptionStatus   ExemptionStatus         `json:"exemption_status,omitempty"`
+	NodeID                 string                  `json:"node_id"`
+	BundleGeneration       int                     `json:"bundle_generation"`
+	BundleHash             string                  `json:"bundle_hash,omitempty"`
+	Applied                bool                    `json:"applied"`
+	DriftDetected          bool                    `json:"drift_detected"`
+	ErrorDetail            string                  `json:"error_detail,omitempty"`
+	ReportedAt             time.Time               `json:"reported_at"`
+	FeatureProfile         string                  `json:"feature_profile,omitempty"`
+	TupleEnforcementActive bool                    `json:"tuple_enforcement_active"`
+	ActiveComponents       map[string]bool         `json:"active_components,omitempty"`
+	BootstrapAutotune      BootstrapAutotuneStatus `json:"bootstrap_autotune_status,omitempty"`
+	GraphLifecycle         GraphLifecycleStatus    `json:"graph_lifecycle_status,omitempty"`
+	SourceBaseline         SourceBaselineStatus    `json:"source_baseline_status,omitempty"`
+	ExemptionStatus        ExemptionStatus         `json:"exemption_status,omitempty"`
 }
 
 // TriggerSet holds the four primary trigger thresholds.

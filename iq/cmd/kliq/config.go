@@ -424,7 +424,7 @@ AGENT FLAGS
 	flag.StringVar(&c.Mode, "mode", "standalone", `agent mode: standalone (local policy) or managed (Forge-managed; currently logs a warning and runs as standalone)`)
 	flag.StringVar(&c.PolicyFile, "policy-file", "", "path to a LocalPolicyPack YAML (abstract enforcement rules: autonomy, rules, graph, exports)")
 	flag.StringVar(&c.PDPConfig, "pdp-config", "", "path to a PDPConfig YAML (kliq signal engine + FSM behavior); overrides --profile when set")
-	flag.StringVar(&c.ProfileName, "profile", "controller", "built-in PDP behavior profile (ignored when --pdp-config is set)")
+	flag.StringVar(&c.ProfileName, "profile", "generic", "built-in PDP behavior profile (ignored when --pdp-config is set)")
 	// Runtime state — mutable, not under IMA measurement.
 	flag.StringVar(&c.StatePath, "state-file", "/var/lib/kernloom/iq/state.json", "autotune state file (runtime, not IMA-attested)")
 	flag.DurationVar(&c.MaxStateAge, "max-state-age", 14*24*time.Hour, "ignore persisted state older than this (0 disables)")

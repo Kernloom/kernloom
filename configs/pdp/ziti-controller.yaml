@@ -1,38 +1,25 @@
 # PDPConfig — OpenZiti Controller (Production)
-# Feature profile:  minimum dos-light
-#                   recommended iq-learning
 #
-# Start command:
-#   sudo kliq --pdp-config=<this-file> --dry-run=false
+# Use after bootstrap completes (autotune state.json contains learned triggers).
+# Cold-start trigger values below are overridden by autotune state on startup.
 #
+# Usage (standalone):
+#   sudo kliq --pdp-config=configs/pdp/ziti-controller.yaml
 #
-# Use AFTER completing the bootstrap phase:
-#   1. kliq status shows "steady" or bootstrap-3 with stable triggers
-#   2. kliq graph freeze has been run
-#   3. state.json contains learned trigger values
-#
-# The trigger values here are cold-start fallbacks only.
-# kliq prioritises: explicit CLI flags > state.json > this file.
-#
-# Usage:
-#   sudo kliq \
-#     --pdp-config=configs/pdp/ziti-controller.yaml \
-#     --graph --graph-mode=frozen-observe
+# In managed mode this file is for reference only — parameters come from the bundle.
 
 apiVersion: kernloom.io/v1alpha1
 kind: PDPConfig
 metadata:
   name: ziti-controller
-  description: "OpenZiti controller — production, expects learned state from bootstrap"
+  description: "OpenZiti controller — public enrolment/API surface, SYN-sensitive"
 
 spec:
 
   signal_engine:
-    # Set to 0 to defer entirely to the autotune state file (recommended after bootstrap).
-    # These values are used only if state.json is absent or expired.
-    pps_trigger:  80.0
-    syn_trigger:  20.0
-    scan_trigger: 5.0
+    pps_trigger:  80.0          # cold-start; autotune learns real value
+    syn_trigger:  20.0          # SYN-sensitive: enrolment endpoint is a target
+    scan_trigger:  5.0
     weights:
       pps:  0.35
       syn:  0.40
@@ -58,7 +45,7 @@ spec:
 
   graph:
     enabled: true
-    mode:    frozen-observe   # switch to frozen-enforce when confident
+    mode:    learn              # change to frozen-observe after kliq graph freeze
     store:   /var/lib/kernloom/iq/kliq.db
     promotion:
       min_seen_count: 5
@@ -78,9 +65,11 @@ spec:
     alpha:               0.02
     alpha_bootstrap:     0.10
     deviation_threshold: 5.0
-    min_update_pps:      3.0
+    min_update_pps:      1.0
     peak_tolerance:      1.5
-    peak_decay_half_life: "336h"
+    peak_decay_half_life: "336h"  # 14 days
+    min_obs_time_based:  5
+    min_age_time_based:  "168h"
 
   autotune:
     enabled: true
@@ -88,8 +77,28 @@ spec:
     floors:
       pps:  80.0
       syn:  20.0
-      scan: 5.0
+      scan:  5.0
     bootstrap:
+      window:     "336h"        # 14 days
+      k_start:    4.0
+      k_final:    3.5
+      phase1_end: "48h"
+      phase2_end: "120h"
+      phase1:
+        interval: "1h"
+        max_up:   0.10
+        max_down: 0.02
+        alpha:    0.10
+      phase2:
+        interval: "6h"
+        max_up:   0.07
+        max_down: 0.03
+        alpha:    0.15
+      phase3:
+        interval: "24h"
+        max_up:   0.05
+        max_down: 0.05
+        alpha:    0.20
       steady:
         interval: "84h"
         max_up:   0.05
@@ -98,8 +107,12 @@ spec:
 
   adapters:
     shield_pep:
+      # Adaptive: effective rate = trig_pps × factor (tracks autotune automatically).
+      soft_rate_factor: 0.50    # 50% of learned trig_pps
+      hard_rate_factor: 0.10    # 10% of learned trig_pps
+      # Fallback static values used when factor is 0:
       soft_rate_pps: 20
       soft_burst:    40
-      hard_rate_pps: 5
+      hard_rate_pps:  5
       hard_burst:    10
       cooldown:      "5s"

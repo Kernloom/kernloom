@@ -1,28 +1,22 @@
 # PDPConfig — NAS / Storage Node (Production)
-# Feature profile:  minimum graph-learning
-#                   recommended graph-learning
 #
-# Start command:
-#   sudo kliq --pdp-config=<this-file> --graph --graph-mode=frozen-observe --dry-run=false
-#
-#
-# Use after NAS bootstrap completes. Expects learned state.json.
-# BPS autotune is enabled — ensure backup schedules ran during bootstrap
+# BPS autotune active — ensure backup schedules ran during bootstrap
 # so the BPS floor reflects real backup throughput.
+# Use after bootstrap completes.
 
 apiVersion: kernloom.io/v1alpha1
 kind: PDPConfig
 metadata:
   name: nas
-  description: "NAS production — BPS-aware, burst-tolerant, expects learned state"
+  description: "NAS production — BPS-aware, burst-tolerant, long block TTL"
 
 spec:
 
   signal_engine:
-    pps_trigger:  0.0        # defer to state.json
-    syn_trigger:  0.0
-    scan_trigger: 0.0
-    bps_trigger:  0.0        # defer to state.json (learned from backup traffic)
+    pps_trigger:  1500.0
+    syn_trigger:   30.0
+    scan_trigger:   8.0
+    bps_trigger:   80000000.0   # 80 MB/s; autotune learns real backup throughput
     weights:
       pps:  0.25
       syn:  0.30
@@ -71,25 +65,49 @@ spec:
     deviation_threshold: 7.0
     min_update_pps:      5.0
     peak_tolerance:      2.0
-    peak_decay_half_life: "672h"
+    peak_decay_half_life: "672h"  # 28 days — backup traffic is weekly
+    min_obs_time_based:  3
+    min_age_time_based:  "168h"   # 7 days for weekly-job edges
 
   autotune:
     enabled: true
     min_samples: 500
     floors:
       pps:  200.0
-      syn:  30.0
-      scan: 8.0
-      bps:  10000000
+      syn:   30.0
+      scan:   8.0
+      bps:   10000000.0           # 10 MB/s floor
     bootstrap:
+      window:     "336h"
+      k_start:    4.5
+      k_final:    3.5
+      phase1_end: "48h"
+      phase2_end: "120h"
+      phase1:
+        interval: "1h"
+        max_up:   0.12
+        max_down: 0.02
+        alpha:    0.10
+      phase2:
+        interval: "6h"
+        max_up:   0.08
+        max_down: 0.03
+        alpha:    0.15
+      phase3:
+        interval: "24h"
+        max_up:   0.05
+        max_down: 0.05
+        alpha:    0.20
       steady:
-        interval: "168h"
+        interval: "168h"          # weekly — matches backup schedule
         max_up:   0.05
         max_down: 0.05
         alpha:    0.20
 
   adapters:
     shield_pep:
+      soft_rate_factor: 0.60
+      hard_rate_factor: 0.20
       soft_rate_pps: 600
       soft_burst:    1500
       hard_rate_pps: 150

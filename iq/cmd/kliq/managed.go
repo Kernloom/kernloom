@@ -133,9 +133,13 @@ func applyBundleUpdate(
 		}
 	}
 
-	kliqLog.Printf("BUNDLE applied: node=%s gen=%d feature_profile=%s max_action=%s hash=%s",
+	if b.Spec.PDPProfile != "" {
+		c.ProfileName = b.Spec.PDPProfile
+	}
+
+	kliqLog.Printf("BUNDLE applied: node=%s gen=%d feature_profile=%s pdp_profile=%s max_action=%s hash=%s",
 		b.Metadata.NodeID, b.Metadata.Generation,
-		b.Spec.FeatureProfile, c.PolicyMaxAction, bundleHash)
+		b.Spec.FeatureProfile, c.ProfileName, c.PolicyMaxAction, bundleHash)
 }
 
 // loadLastKnownGoodBundle attempts to read the persisted bundle from
@@ -160,17 +164,19 @@ func buildRuntimeStatus(
 	graphCtl *lgraph.Controller,
 	graphStats lgraph.GraphStats,
 	c *cfg,
+	tupleActive bool,
 ) bundle.RuntimeStatus {
 	triggers := bundle.TriggerSet{PPS: c.TrigPPS, SYN: c.TrigSyn, Scan: c.TrigScan, BPS: c.TrigBPS}
 	status := bundle.RuntimeStatus{
-		NodeID:            nodeID,
-		BundleGeneration:  ms.BundleGeneration,
-		BundleHash:        ms.BundleHash,
-		Applied:           ms.BundleGeneration > 0,
-		ReportedAt:        time.Now().UTC(),
-		FeatureProfile:    c.FeatureProfile,
-		BootstrapAutotune: bsCtl.StatusReport(triggers, time.Now()),
-		GraphLifecycle:    graphCtl.StatusReport(graphStats, time.Now()),
+		NodeID:                 nodeID,
+		BundleGeneration:       ms.BundleGeneration,
+		BundleHash:             ms.BundleHash,
+		Applied:                ms.BundleGeneration > 0,
+		ReportedAt:             time.Now().UTC(),
+		FeatureProfile:         c.FeatureProfile,
+		TupleEnforcementActive: tupleActive,
+		BootstrapAutotune:      bsCtl.StatusReport(triggers, time.Now()),
+		GraphLifecycle:         graphCtl.StatusReport(graphStats, time.Now()),
 	}
 	return status
 }

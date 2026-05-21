@@ -128,7 +128,7 @@ func main() {
 	case string(corepolicy.ModeStandalone):
 		// normal local-policy path
 	case string(corepolicy.ModeManaged):
-		kliqLog.Printf("INFO: mode=managed — Forge integration pending, running as standalone")
+		kliqLog.Printf("INFO: mode=managed")
 	default:
 		log.Fatalf("unknown --mode %q: must be standalone or managed", c.Mode)
 	}
@@ -149,6 +149,16 @@ func main() {
 		c.adapterParams = adapterParamsFromPDPConfig(pdpc)
 		applyPDPAdaptiveRatesToCfg(pdpc, &c)
 	} else {
+		// In managed mode: if the LKG bundle specifies a pdp_profile, it overrides
+		// the --profile flag so Forge controls the autotune behaviour profile.
+		if c.Mode == string(corepolicy.ModeManaged) {
+			if lkgBytes := loadLastKnownGoodBundle(c.StatePath); lkgBytes != nil {
+				if b, err := bundle.Parse(lkgBytes); err == nil && b.Spec.PDPProfile != "" {
+					kliqLog.Printf("PDP profile from bundle: %s (was: %s)", b.Spec.PDPProfile, c.ProfileName)
+					c.ProfileName = b.Spec.PDPProfile
+				}
+			}
+		}
 		p = profileByName(c.ProfileName)
 		c.adapterParams = shieldpep.DefaultCapabilityParams()
 	}
@@ -216,6 +226,12 @@ func main() {
 	kliqLog.Printf("Feature profile: %s  src_baseline=%v graph=%v sqlite=%v",
 		c.FeatureProfile, features.SourceBaseline, features.GraphLearning, features.SQLite)
 
+	// Sync GraphEnabled from the resolved feature profile so that bundles setting
+	// feature_profile=graph-* activate graph learning without requiring --graph flag.
+	if features.GraphLearning {
+		c.GraphEnabled = true
+	}
+
 	// Source baseline cache (iq-learning and higher).
 	// Nil when disabled — the main loop checks before calling Update/Resolve.
 	var srcBL *sourcebaseline.Cache
@@ -280,8 +296,12 @@ func main() {
 			if st.Active.Trig.TrigBPS > 0 && !explicitFlags["trig-bps"] {
 				c.TrigBPS = st.Active.Trig.TrigBPS
 			}
+			updatedStr := "never"
+			if !st.Active.UpdatedAt.IsZero() {
+				updatedStr = st.Active.UpdatedAt.Format(time.RFC3339)
+			}
 			kliqLog.Printf("Loaded state: profile=%s rev=%d updated=%s trig{pps=%.1f syn=%.1f scan=%.1f bps=%.0f}",
-				st.Active.Profile, st.Active.Revision, st.Active.UpdatedAt.Format(time.RFC3339),
+				st.Active.Profile, st.Active.Revision, updatedStr,
 				c.TrigPPS, c.TrigSyn, c.TrigScan, c.TrigBPS)
 		} else {
 			kliqLog.Printf("No usable state loaded (%s): %v", c.StatePath, err)
@@ -387,11 +407,8 @@ func main() {
 	resolver := c.buildPolicyResolver()
 	executor := buildExecutor(pep)
 
-	// Runtime inventory and config-asset report — built once after all config
-	// sources are applied and maps are open. Logged and saved alongside state.
-	inv := pep.BuildInventory(nodeID)
-	report := buildConfigAssetReport(c, nodeID, features)
-	logInventoryAndReport(inv, report, c.StatePath)
+	// Runtime inventory and config-asset report is logged after the LKG bundle
+	// apply (below) so that HasPolicyPack and ProfileName reflect the restored state.
 
 	// ── Managed lifecycle controllers ─────────────────────────────────────────
 	// Both controllers are initialised from defaults; if a RuntimeBundle is
@@ -458,6 +475,21 @@ func main() {
 		kliqLog.Printf("MANAGED: applying last-known-good bundle from disk")
 		applyBundleUpdate(lkg, &c, &bsCtl, &graphCtl, &ms, stFile)
 	}
+
+	// Pre-set HasPolicyPack from persisted state so the startup INVENTORY log
+	// reflects a previously applied pack rather than always showing false.
+	if !c.HasPolicyPack && stFile != nil && stFile.Active.ForgePackName != "" {
+		c.HasPolicyPack = true
+	}
+
+	// Runtime inventory and config-asset report — built after LKG bundle apply
+	// so that HasPolicyPack and ProfileName reflect the restored state.
+	inv := pep.BuildInventory(nodeID)
+	report := buildConfigAssetReport(c, nodeID, features)
+	logInventoryAndReport(inv, report, c.StatePath)
+
+	// tupleActive is set after edge-map probe and read by the heartbeat goroutine.
+	tupleActive := false
 
 	// Forge enrollment + heartbeat loop (only when --forge-url is set).
 	var forgeC *forgeClient
@@ -553,6 +585,10 @@ func main() {
 						lastNodeStatus = nodeStatus
 					}
 					kliqLog.Printf("FORGE heartbeat ok: pack=%s pack_updated=%v status=%s", enrolledPackName, packUpdated, nodeStatus)
+
+					// Report rich runtime status to Forge (non-fatal if it fails).
+					status := buildRuntimeStatus(nodeID, ms, bsCtl, graphCtl, lgraph.GraphStats{}, &c, tupleActive)
+					reportBundleStatus(context.Background(), forgeC, status)
 					// Pull and deliver RuntimeBundle when available (non-blocking send).
 					if bundleBytes, _, bundleErr := forgeC.PullBundle(context.Background()); bundleErr == nil && bundleBytes != nil {
 						select {
@@ -590,15 +626,26 @@ func main() {
 	}
 
 	// Tuple enforcement: activate XDP edge maps when the feature is enabled.
+	// Try to open any nil edge map handles first in case klshield was reloaded
+	// after kliq started (or tuple support was activated post-startup).
+	// If maps are still unavailable, degrade gracefully to graph-learning behavior
+	// (graph learning + baselines still work; only XDP tuple drops are skipped).
 	if features.TupleEnforcement {
+		if !pep.TupleAvailable() {
+			maps.TryOpenEdgeMaps(c.BPFfsRoot)
+		}
 		if pep.TupleAvailable() {
 			if err := pep.SetTupleEnforce(true); err != nil {
 				kliqLog.Printf("WARNING: tuple enforce activate failed: %v", err)
 			} else {
+				tupleActive = true
 				kliqLog.Printf("Tuple enforcement: XDP edge maps active (deny-mode)")
 			}
 		} else {
-			kliqLog.Printf("WARNING: feature-profile=graph-enforce but edge maps not available. Reload klshield with new .bpf.o")
+			features.TupleEnforcement = false
+			kliqLog.Printf("DEGRADED: feature-profile=graph-enforce but XDP tuple maps not available — " +
+				"running as graph-learning until klshield is reloaded (klshield attach-xdp --force). " +
+				"Graph learning and baselines are active.")
 		}
 	}
 
