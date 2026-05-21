@@ -107,9 +107,17 @@ func (a *Adapter) Init(_ context.Context, _ adapterruntime.AdapterConfig) error 
 }
 
 // Start connects to the event bus, launches the TTL GC goroutine, and starts
-// the conntrack observer when conntrack is available on the host.
-func (a *Adapter) Start(ctx context.Context, bus adapterruntime.EventBus) error {
+// the conntrack observer when conntrack is available AND observation is enabled.
+//
+// Pass observationEnabled=false when a higher-fidelity telemetry source (e.g.
+// klshield) is already feeding the bus — mixing two sources with different
+// time granularities distorts EWMA baselines and graph edge metrics.
+func (a *Adapter) StartWithObservation(ctx context.Context, bus adapterruntime.EventBus, observationEnabled bool) error {
 	go a.gcLoop(ctx)
+
+	if !observationEnabled {
+		return nil
+	}
 
 	if a.probe.Conntrack.Available && a.cfg.Observation.ConntrackSnapshot {
 		cfg := conntrack.Config{
@@ -126,6 +134,13 @@ func (a *Adapter) Start(ctx context.Context, bus adapterruntime.EventBus) error 
 			logger.Printf("conntrack observer unavailable: %v", err)
 		}
 	}
+	return nil
+}
+
+// Start satisfies adapterruntime.Adapter — runs GC only, no conntrack observation.
+// Use StartWithObservation(ctx, bus, true) explicitly when klshield is absent.
+func (a *Adapter) Start(ctx context.Context, _ adapterruntime.EventBus) error {
+	go a.gcLoop(ctx)
 	return nil
 }
 
@@ -385,11 +400,21 @@ func buildCapabilities(p ProbeResult, cfg Config) []*capability.Capability {
 	).AddTag("network").AddTag("telemetry").AddTag("netfilter"))
 
 	if p.Conntrack.Available {
-		caps = append(caps, capability.NewCapability(
-			"observe.network.flow_edges", "v1",
-			capability.TypeTelemetry, capability.LayerL3L4, capability.DirectionOutput,
-			"Observe L3/L4 flow edges for graph learning via conntrack",
-		).AddTag("network").AddTag("telemetry").AddTag("netfilter").AddTag("conntrack"))
+		if p.Conntrack.Accounting {
+			// Full telemetry: topology + PPS/BPS rates (nf_conntrack_acct=1).
+			caps = append(caps, capability.NewCapability(
+				"observe.network.flow_edges", "v1",
+				capability.TypeTelemetry, capability.LayerL3L4, capability.DirectionOutput,
+				"Observe L3/L4 flow edges with packet/byte rates via conntrack",
+			).AddTag("network").AddTag("telemetry").AddTag("netfilter").AddTag("conntrack"))
+		} else {
+			// Topology-only: edges detected but PPS/BPS unreliable without accounting.
+			caps = append(caps, capability.NewCapability(
+				"observe.network.flow_topology", "v1",
+				capability.TypeTelemetry, capability.LayerL3L4, capability.DirectionOutput,
+				"Observe L3/L4 communication topology (edges only, no packet rates — enable nf_conntrack_acct for full telemetry)",
+			).AddTag("network").AddTag("telemetry").AddTag("netfilter").AddTag("conntrack").AddTag("topology-only"))
+		}
 	}
 	return caps
 }
