@@ -50,8 +50,13 @@ type BundleMetadata struct {
 }
 
 type BundleSpec struct {
-	FeatureProfile    string                `yaml:"feature_profile,omitempty"     json:"feature_profile,omitempty"`
-	PDPProfile        string                `yaml:"pdp_profile,omitempty"         json:"pdp_profile,omitempty"`
+	FeatureProfile string `yaml:"feature_profile,omitempty"     json:"feature_profile,omitempty"`
+	PDPProfile     string `yaml:"pdp_profile,omitempty"         json:"pdp_profile,omitempty"`
+	// Adapters is the comma-separated list of PEP adapters to activate on the node.
+	// Mirrors the --adapter CLI flag; Forge-controlled.
+	// Example: "klshield,netfilter" or "netfilter" (for XDP-less systems).
+	// Default (empty): use node's CLI default.
+	Adapters          string                `yaml:"adapters,omitempty"            json:"adapters,omitempty"`
 	PolicyPack        EmbeddedPackRef       `yaml:"policy_pack,omitempty"         json:"policy_pack,omitempty"`
 	PDPConfig         EmbeddedConfigRef     `yaml:"pdp_config,omitempty"          json:"pdp_config,omitempty"`
 	BootstrapAutotune BootstrapAutotunePlan `yaml:"bootstrap_autotune,omitempty"  json:"bootstrap_autotune,omitempty"`

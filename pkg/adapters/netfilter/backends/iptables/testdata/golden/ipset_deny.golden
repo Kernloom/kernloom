@@ -1,0 +1,6 @@
+*filter
+:KERNLOOM_INPUT - [0:0]
+-F KERNLOOM_INPUT
+-I INPUT 1 -j KERNLOOM_INPUT
+-A KERNLOOM_INPUT -m set --match-set kernloom_deny4 src -m comment --comment "kernloom action=deny id=abc12300" -j DROP
+COMMIT

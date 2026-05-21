@@ -39,9 +39,10 @@ ADAPTERS_OUT="$RESULTS_DIR/adapters.txt"
 "$KLT_FORGE" adapter list --db "$KLT_FORGE_DB" > "$ADAPTERS_OUT"
 assert_contains "$ADAPTERS_OUT" "klshield"
 assert_contains "$ADAPTERS_OUT" "kliq"
+assert_contains "$ADAPTERS_OUT" "kernloom.netfilter"
 echo "[09] adapter definitions registered: $(grep -c '^\w' "$ADAPTERS_OUT") definitions"
 
-pass "09.1: adapter definitions auto-seeded on startup"
+pass "09.1: adapter definitions auto-seeded on startup (klshield, kliq, kernloom.netfilter)"
 
 # ── 3. Enrollment token — one-time use ───────────────────────────────────────
 

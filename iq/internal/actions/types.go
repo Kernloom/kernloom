@@ -13,7 +13,28 @@
 // applies it.
 package actions
 
-import "time"
+import (
+	"time"
+
+	"github.com/kernloom/kernloom/pkg/core/fsm"
+)
+
+// PEPSidecar is an additional Policy Enforcement Point that runs alongside
+// the primary Shield/XDP adapter. Every authorized FSM transition is also
+// delivered to all registered sidecars so they can mirror the enforcement.
+//
+// Sidecars must be non-blocking (they run synchronously in the tick loop).
+// Errors are logged but never propagate back to the caller — a failed sidecar
+// must not prevent the primary Shield enforcement from completing.
+type PEPSidecar interface {
+	// NotifyTransition4 is called after every authorized IPv4 FSM transition.
+	// prev is the level before the transition, next is the level after.
+	// ttl is how long the new level should be maintained (0 = adapter default).
+	NotifyTransition4(ip [4]byte, prev, next fsm.Level, ttl time.Duration)
+
+	// NotifyTransition6 is called after every authorized IPv6 FSM transition.
+	NotifyTransition6(ip [16]byte, prev, next fsm.Level, ttl time.Duration)
+}
 
 // ActionTarget describes the entity that an enforcement action targets.
 type ActionTarget struct {

@@ -109,6 +109,26 @@ func runBaselineStatus(storePath, nodeID string, showAll bool, sortBy string) {
 	if !showAll && len(edges) > defaultCap {
 		fmt.Printf("\n... and %d more (use --all to show everything)\n", len(edges)-defaultCap)
 	}
+
+	// Warn when PPS/BPS metrics are all zero — this means no telemetry adapter
+	// is active. Graph topology is learned (OBS rises) but traffic rates are not.
+	if len(edges) > 0 && allMetricsZero(edges) {
+		fmt.Println()
+		fmt.Println("NOTE: PPS/BPS values are all 0 — no telemetry adapter active.")
+		fmt.Println("      Graph topology (edges) is learned from connection tracking,")
+		fmt.Println("      but packet rates require klshield (XDP) for accurate measurement.")
+		fmt.Println("      Start kliq with --adapter=klshield to enable rate-based baselines.")
+	}
+}
+
+// allMetricsZero returns true when all edges have zero PPS and BPS medians.
+func allMetricsZero(edges []baseline.Summary) bool {
+	for _, e := range edges {
+		if e.Profile.PPSMedian > 0 || e.Profile.BytesMedian > 0 {
+			return false
+		}
+	}
+	return true
 }
 
 // runBaselineReset clears all per-edge baseline stats by zeroing the bl_*

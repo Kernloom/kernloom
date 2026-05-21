@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"math"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/kernloom/kernloom/pkg/adapters/shieldpep"
@@ -48,6 +49,11 @@ type cfg struct {
 	Mode       string // "standalone" or "managed"
 	PolicyFile string // path to LocalPolicyPack YAML (abstract enforcement rules)
 	PDPConfig  string // path to PDPConfig YAML (kliq signal engine + FSM behavior)
+
+	// Adapters is the comma-separated list of PEP adapters to activate.
+	// Valid values: klshield, netfilter. Default: "klshield".
+	// Example: --adapter=klshield,netfilter  or  --adapter=netfilter
+	Adapters string
 
 	// Profiles + persistence
 	ProfileName string
@@ -275,6 +281,22 @@ type cfg struct {
 	BaselinePeakDecayHalfLife  time.Duration
 }
 
+// hasAdapter reports whether name is in the --adapter list.
+func (c cfg) hasAdapter(name string) bool {
+	for _, a := range strings.Split(c.Adapters, ",") {
+		if strings.TrimSpace(a) == name {
+			return true
+		}
+	}
+	return false
+}
+
+// WantsKLShield returns true when klshield is in the adapter list.
+func (c cfg) WantsKLShield() bool { return c.hasAdapter("klshield") }
+
+// WantsNetfilter returns true when netfilter is in the adapter list.
+func (c cfg) WantsNetfilter() bool { return c.hasAdapter("netfilter") }
+
 // toFSMConfig converts the relevant cfg fields to an fsm.Config.
 func (c cfg) toFSMConfig() fsm.Config {
 	return fsm.Config{
@@ -421,6 +443,8 @@ AGENT FLAGS
 	flag.StringVar(&c.ForgeCAPath, "forge-ca", "", "path to PEM CA certificate for TLS verification of forge serve; empty = system roots")
 	flag.DurationVar(&c.ForgeHeartbeat, "forge-heartbeat", 5*time.Minute, "heartbeat interval to forge serve")
 
+	flag.StringVar(&c.Adapters, "adapter", "klshield",
+		`comma-separated PEP adapters to activate: klshield, netfilter (e.g. --adapter=klshield,netfilter or --adapter=netfilter)`)
 	flag.StringVar(&c.Mode, "mode", "standalone", `agent mode: standalone (local policy) or managed (Forge-managed; currently logs a warning and runs as standalone)`)
 	flag.StringVar(&c.PolicyFile, "policy-file", "", "path to a LocalPolicyPack YAML (abstract enforcement rules: autonomy, rules, graph, exports)")
 	flag.StringVar(&c.PDPConfig, "pdp-config", "", "path to a PDPConfig YAML (kliq signal engine + FSM behavior); overrides --profile when set")

@@ -1,0 +1,7 @@
+table inet kernloom {
+	chain input {
+		type filter hook input priority filter - 10; policy accept;
+		ip saddr 10.0.0.0/8 counter comment "kernloom action=deny id=abc12300" drop
+	}
+
+}

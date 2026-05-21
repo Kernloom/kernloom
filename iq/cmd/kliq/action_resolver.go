@@ -23,7 +23,8 @@ func (c cfg) buildPolicyResolver() *actions.PolicyResolver {
 }
 
 // buildExecutor creates the ShieldActionExecutor — the only component allowed
-// to call shieldpep.TransitionV4/V6.
+// to call shieldpep.TransitionV4/V6. Pass nil for adapter to run without Shield.
+// Additional PEP sidecars (e.g. netfilter) can be registered via AddSidecar.
 func buildExecutor(adapter *shieldpep.Adapter) *actions.ShieldActionExecutor {
 	return actions.NewShieldActionExecutor(adapter)
 }

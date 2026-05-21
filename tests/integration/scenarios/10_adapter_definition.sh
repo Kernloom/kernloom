@@ -35,10 +35,11 @@ ADAPTER_LIST="$RESULTS_DIR/adapters-db.txt"
 assert_contains "$ADAPTER_LIST" "klshield"
 assert_contains "$ADAPTER_LIST" "kliq"
 assert_contains "$ADAPTER_LIST" "tcp-proxy"
+assert_contains "$ADAPTER_LIST" "kernloom.netfilter"
 echo "[10] registered definitions:"
 cat "$ADAPTER_LIST"
 
-pass "10.1: adapter definitions auto-seeded (klshield, kliq, tcp-proxy)"
+pass "10.1: adapter definitions auto-seeded (klshield, kliq, tcp-proxy, kernloom.netfilter)"
 
 # ── 2. forge adapter list without --db reads from filesystem ──────────────────
 
@@ -62,6 +63,17 @@ assert_contains "$SHOW_OUT" "builtin-klshield"
 assert_contains "$SHOW_OUT" "enforce.traffic.rate_limit"
 
 pass "10.3: forge adapter show klshield contains plugin_match and capabilities"
+
+# ── 3b. forge adapter show kernloom.netfilter ─────────────────────────────────
+
+NF_SHOW_OUT="$RESULTS_DIR/netfilter-show.yaml"
+"$KLT_FORGE" adapter show kernloom.netfilter --db "$KLT_FORGE_DB" > "$NF_SHOW_OUT"
+assert_contains "$NF_SHOW_OUT" "plugin_match"
+assert_contains "$NF_SHOW_OUT" "kernloom.netfilter"
+assert_contains "$NF_SHOW_OUT" "enforce.access.deny"
+assert_contains "$NF_SHOW_OUT" "observe.network.flow_edges"
+
+pass "10.3b: forge adapter show kernloom.netfilter contains deny + flow_edges capabilities"
 
 # ── 4. Auto-assign at enrollment (auto_eligible = true) ──────────────────────
 
