@@ -28,6 +28,12 @@ cleanup_all() {
     done
   fi
 
+  # Safety net: kill any remaining kliq/forge processes by exact binary name.
+  # Uses -x (exact name match) not -f (full cmdline) to avoid pkill matching
+  # its own command line and killing itself.
+  sudo pkill -9 -x kliq  2>/dev/null || true
+  sudo pkill -9 -x forge 2>/dev/null || true
+
   echo "[cleanup] detaching XDP"
   sudo "$KLT_KLSHIELD" detach-xdp --iface "${KLT_XDP_IFACE1:-veth-good-h}" 2>/dev/null || true
   sudo "$KLT_KLSHIELD" detach-xdp --iface "${KLT_XDP_IFACE2:-veth-bad-h}"  2>/dev/null || true
@@ -47,8 +53,10 @@ cleanup_all() {
   sudo rm -f /sys/fs/bpf/kernloom_shield_xdp_link_* 2>/dev/null || true
 
   echo "[cleanup] removing test runtime dirs"
-  sudo rm -rf "${KLT_STATE_DIR:-/var/lib/kernloom/iq-it}" 2>/dev/null || true
-  sudo rm -rf "${KLT_ETC_DIR:-/etc/kernloom-it}"         2>/dev/null || true
+  # State and etc are now inside KLT_ARTIFACT_DIR — removing the artifact dir
+  # covers them. Remove explicitly in case KLT_ARTIFACT_DIR is overridden.
+  sudo rm -rf "${KLT_STATE_DIR:-}" 2>/dev/null || true
+  sudo rm -rf "${KLT_ETC_DIR:-}"   2>/dev/null || true
 
   set -e
   echo "[cleanup] done"

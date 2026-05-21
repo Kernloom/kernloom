@@ -107,4 +107,6 @@ grep -E -- "STATE|OBSERVE|stepdown|decay|fsm" "$STEPDOWN_LOG" | tail -10 || true
 # Log shows RATE_SOFT->OBSERVE or RATE_HARD->OBSERVE on stepdown.
 assert_contains "$STEPDOWN_LOG" "->OBSERVE"
 
+stop_kliq
+
 pass "08: FSM stepped down after attack stopped — source recovered in ~$(( 5 + 2 ))s"

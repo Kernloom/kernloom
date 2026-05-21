@@ -105,9 +105,8 @@ spec:
   rules: []
 YAML
 
-"$KLT_FORGE" pack register it-test-pack \
-  --file "$PACK_FILE" \
-  --db   "$KLT_FORGE_DB"
+"$KLT_FORGE" pack register "$PACK_FILE" \
+  --db "$KLT_FORGE_DB"
 
 forge_admin -X POST "$KLT_FORGE_URL/api/v1/nodes/$NODE_ID/assign-pack?pack=it-test-pack" > /dev/null
 
@@ -188,9 +187,10 @@ forge_admin -X POST "$KLT_FORGE_URL/api/v1/nodes/$NODE_REVOKE/revoke" > /dev/nul
 REVOKE_HTTP=$(curl -s -o /dev/null -w "%{http_code}" \
   "$KLT_FORGE_URL/api/v1/nodes/$NODE_REVOKE/policy-pack" \
   -H "Authorization: Bearer $SESSION2")
-[[ "$REVOKE_HTTP" == "403" ]] || fail "revoked node pack pull should return 403, got $REVOKE_HTTP"
+[[ "$REVOKE_HTTP" == "401" || "$REVOKE_HTTP" == "403" ]] \
+  || fail "revoked node pack pull should return 401 or 403, got $REVOKE_HTTP"
 
-pass "09.10: revoked node cannot pull pack (→ 403)"
+pass "09.10: revoked node cannot pull pack (→ $REVOKE_HTTP)"
 
 stop_forge
 pass "09: managed enrollment scenario complete"

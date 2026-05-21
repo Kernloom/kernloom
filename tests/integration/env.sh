@@ -53,9 +53,10 @@ export KLT_IF_API="api0"
 export KLT_XDP_IFACE1="$KLT_VETH_GOOD_HOST"
 export KLT_XDP_IFACE2="$KLT_VETH_BAD_HOST"
 
-# Runtime directories (separate from production paths)
-export KLT_STATE_DIR="${KLT_STATE_DIR:-/var/lib/kernloom/iq-it}"
-export KLT_ETC_DIR="${KLT_ETC_DIR:-/etc/kernloom-it}"
+# Runtime directories — kept inside the per-run artifact dir so every run
+# is fully self-contained and cleanup never touches global system paths.
+export KLT_STATE_DIR="${KLT_STATE_DIR:-$KLT_ARTIFACT_DIR/state}"
+export KLT_ETC_DIR="${KLT_ETC_DIR:-$KLT_ARTIFACT_DIR/etc}"
 
 # Log files (created inside artifact dir)
 export KLT_LOG_KLIQ="$KLT_ARTIFACT_DIR/kliq.log"

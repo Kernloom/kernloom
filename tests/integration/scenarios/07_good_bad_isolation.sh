@@ -20,7 +20,11 @@ stop_kliq
 # → never escalates to RATE_SOFT → test times out.
 sudo "$KLT_KLSHIELD" reset 2>/dev/null || true
 
-start_kliq_enforce
+# Use a dedicated log so concurrent writes from a dying previous kliq
+# (whose fd is still open on $KLT_LOG_KLIQ) cannot produce NUL bytes here.
+LOG07="$KLT_ARTIFACT_DIR/kliq-07.log"
+
+start_kliq_enforce "$LOG07"
 
 echo "[07] warming up — good traffic to establish clean baseline"
 good_http_many 5
@@ -44,26 +48,33 @@ BAD_PID=$!
 echo "[07] waiting for bad source enforcement (RATE_SOFT) to start (max 20s)..."
 ENFORCED=false
 for i in $(seq 1 40); do
-  if grep -qE "->RATE_SOFT|->RATE_HARD|->BLOCK" "$KLT_LOG_KLIQ" 2>/dev/null; then
+  # -- prevents grep from treating the pattern as an option (pattern starts with -).
+  if grep -q -- "->RATE_SOFT" "$LOG07" 2>/dev/null \
+     || grep -q -- "->RATE_HARD" "$LOG07" 2>/dev/null \
+     || grep -q -- "->BLOCK"     "$LOG07" 2>/dev/null; then
     ENFORCED=true
     break
   fi
-  # Diagnostic every 5s so failures are diagnosable.
+  # Diagnostic every 5s (i is iteration count; each iteration = 0.5s).
   if (( i % 10 == 0 )); then
-    echo "[07] t=${i}s — kliq.log tail:"
-    tail -3 "$KLT_LOG_KLIQ" 2>/dev/null | sed 's/^/  /' || echo "  (empty)"
+    echo "[07] i=${i} ($(( i / 2 ))s) — kliq log tail:"
+    tail -3 "$LOG07" 2>/dev/null | sed 's/^/  /' || echo "  (empty)"
   fi
   sleep 0.5
 done
 
 if [[ "$ENFORCED" != "true" ]]; then
-  echo "[07] kliq.log at timeout (last 15 lines):"
-  tail -15 "$KLT_LOG_KLIQ" 2>/dev/null | sed 's/^/  /' || echo "  (empty)"
+  echo "[07] kliq log at timeout (last 15 lines):"
+  tail -15 "$LOG07" 2>/dev/null | sed 's/^/  /' || echo "  (empty)"
   touch "$BAD_STOP"; wait "$BAD_PID" 2>/dev/null || true; rm -f "$BAD_STOP"
   fail "07: bad source was not enforced within 20s — see diagnostics above"
 fi
 
-STATE=$(grep -oE "->RATE_SOFT|->RATE_HARD|->BLOCK" "$KLT_LOG_KLIQ" | tail -1)
+# Determine which enforcement state was reached (highest wins).
+# The || true prevents set -e from aborting when grep finds no match (exit 1).
+STATE="->RATE_SOFT"
+{ grep -q -- "->RATE_HARD" "$LOG07" 2>/dev/null && STATE="->RATE_HARD"; } || true
+{ grep -q -- "->BLOCK"     "$LOG07" 2>/dev/null && STATE="->BLOCK"; } || true
 echo "[07] bad source enforcement: $STATE — measuring good source isolation (10 checks × 0.2s)"
 
 # Check good source during active enforcement.
@@ -85,8 +96,10 @@ touch "$BAD_STOP"; wait "$BAD_PID" 2>/dev/null || true; rm -f "$BAD_STOP"
 
 echo "[07] good source: $GOOD_OK ok / $GOOD_FAIL failed out of 10 checks"
 
-assert_contains "$KLT_LOG_KLIQ" "${KLT_IP_BAD}"
-assert_contains "$KLT_LOG_KLIQ" "ACTION ip=${KLT_IP_BAD}"
+assert_contains "$LOG07" "${KLT_IP_BAD}"
+assert_contains "$LOG07" "ACTION ip=${KLT_IP_BAD}"
+
+stop_kliq
 
 [[ "$GOOD_FAIL" -eq 0 ]] \
   || fail "07: good source failed $GOOD_FAIL/10 checks while bad source was under enforcement ($STATE)"
