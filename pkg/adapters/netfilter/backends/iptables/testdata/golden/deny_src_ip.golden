@@ -1,0 +1,6 @@
+*filter
+:KERNLOOM_INPUT - [0:0]
+-F KERNLOOM_INPUT
+-I INPUT 1 -j KERNLOOM_INPUT
+-A KERNLOOM_INPUT -p tcp -s 192.0.2.10 --dport 443 -m comment --comment "kernloom action=deny id=abc12300" -j DROP
+COMMIT
