@@ -150,13 +150,18 @@ func main() {
 		c.adapterParams = adapterParamsFromPDPConfig(pdpc)
 		applyPDPAdaptiveRatesToCfg(pdpc, &c)
 	} else {
-		// In managed mode: if the LKG bundle specifies a pdp_profile, it overrides
-		// the --profile flag so Forge controls the autotune behaviour profile.
+		// In managed mode: LKG bundle may override pdp_profile and adapters.
 		if c.Mode == string(corepolicy.ModeManaged) {
 			if lkgBytes := loadLastKnownGoodBundle(c.StatePath); lkgBytes != nil {
-				if b, err := bundle.Parse(lkgBytes); err == nil && b.Spec.PDPProfile != "" {
-					kliqLog.Printf("PDP profile from bundle: %s (was: %s)", b.Spec.PDPProfile, c.ProfileName)
-					c.ProfileName = b.Spec.PDPProfile
+				if b, err := bundle.Parse(lkgBytes); err == nil {
+					if b.Spec.PDPProfile != "" {
+						kliqLog.Printf("PDP profile from bundle: %s (was: %s)", b.Spec.PDPProfile, c.ProfileName)
+						c.ProfileName = b.Spec.PDPProfile
+					}
+					if b.Spec.Adapters != "" {
+						kliqLog.Printf("Adapters from bundle: %s (was: %s)", b.Spec.Adapters, c.Adapters)
+						c.Adapters = b.Spec.Adapters
+					}
 				}
 			}
 		}

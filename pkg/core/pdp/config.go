@@ -287,6 +287,10 @@ type GraphExcludeSpec struct {
 type AdaptersSpec struct {
 	// ShieldPEP configures the built-in Kernloom Shield XDP/eBPF adapter.
 	ShieldPEP ShieldPEPAdapterSpec `yaml:"shield_pep,omitempty"`
+
+	// Netfilter configures the kernloom.netfilter adapter.
+	// Active when --adapter includes "netfilter" (NAS/legacy systems without XDP).
+	Netfilter NetfilterAdapterSpec `yaml:"netfilter,omitempty"`
 }
 
 // ShieldPEPAdapterSpec is the Shield-specific implementation of the abstract
@@ -314,16 +318,57 @@ type ShieldPEPAdapterSpec struct {
 	Cooldown Duration `yaml:"cooldown"`
 }
 
+// ─── Netfilter adapter ────────────────────────────────────────────────────────
+
+// NetfilterAdapterSpec configures the kernloom.netfilter PEP adapter.
+// Used when --adapter includes "netfilter" (e.g. NAS/legacy systems without XDP).
+type NetfilterAdapterSpec struct {
+	// Backend pins the Netfilter backend. Empty = auto-select (preferred).
+	// Values: "nftables" | "iptables-nft" | "iptables-legacy"
+	// Set to "iptables-legacy" on Synology/QNAP-like systems.
+	Backend string `yaml:"backend,omitempty"`
+
+	// Directions controls which Netfilter hooks Kernloom installs rules in.
+	Directions struct {
+		Input   bool `yaml:"input"`   // default: true
+		Forward bool `yaml:"forward"` // default: false
+		Output  bool `yaml:"output"`  // default: false
+	} `yaml:"directions,omitempty"`
+
+	// RateLimit configures default enforcement rates for SOFT/HARD levels.
+	// Per-source rates: falls back to hashlimit (iptables) or meter (nftables).
+	RateLimit struct {
+		SoftRatePPS uint64 `yaml:"soft_rate_pps,omitempty"` // default: 100
+		HardRatePPS uint64 `yaml:"hard_rate_pps,omitempty"` // default: 20
+	} `yaml:"rate_limit,omitempty"`
+
+	// Observation configures conntrack-based flow telemetry for GraphLearner.
+	Observation struct {
+		// ConntrackSnapshot enables periodic conntrack -L polling.
+		ConntrackSnapshot bool `yaml:"conntrack_snapshot,omitempty"` // default: true
+		// ConntrackPollInterval is the polling frequency.
+		ConntrackPollInterval Duration `yaml:"conntrack_poll_interval,omitempty"` // default: 5s
+	} `yaml:"observation,omitempty"`
+
+	// Safety controls lockout-prevention behaviour.
+	Safety struct {
+		// ManagementAllowlist are CIDRs that must never be blocked.
+		// Applied as RETURN rules before all Kernloom deny rules.
+		// Recommended: set to management/admin subnet on production systems.
+		ManagementAllowlist []string `yaml:"management_allowlist,omitempty"`
+	} `yaml:"safety,omitempty"`
+}
+
 // ─── Duration ─────────────────────────────────────────────────────────────────
 
 // Duration is a YAML-serialisable wrapper around time.Duration.
 type Duration struct{ D time.Duration }
 
-func (d Duration) MarshalYAML() (interface{}, error) {
+func (d Duration) MarshalYAML() (any, error) {
 	return d.D.String(), nil
 }
 
-func (d *Duration) UnmarshalYAML(unmarshal func(interface{}) error) error {
+func (d *Duration) UnmarshalYAML(unmarshal func(any) error) error {
 	var s string
 	if err := unmarshal(&s); err != nil {
 		return err

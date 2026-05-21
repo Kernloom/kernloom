@@ -138,3 +138,23 @@ spec:
       hard_rate_pps: 150
       hard_burst:    300
       cooldown:      "30s"
+
+    # Netfilter adapter — used when --adapter=netfilter (NAS/older kernel without XDP).
+    # On Synology/QNAP: set backend: iptables-legacy and management_allowlist.
+    netfilter:
+      backend: ""                           # auto-select (nftables > iptables-nft > iptables-legacy)
+      # backend: iptables-legacy            # uncomment for Synology/QNAP/TrueNAS
+      directions:
+        input:   true
+        forward: false
+        output:  false
+      rate_limit:
+        soft_rate_pps: 200                  # packets/s for SOFT level (hashlimit/meter)
+        hard_rate_pps:  50                  # packets/s for HARD level
+      observation:
+        conntrack_snapshot: true            # poll conntrack -L for graph edge learning
+        conntrack_poll_interval: "10s"      # NAS: longer interval, fewer connections
+      safety:
+        management_allowlist: []
+        # management_allowlist:
+        #   - 192.168.1.0/24                # always allow admin subnet — never blocked

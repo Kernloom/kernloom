@@ -171,6 +171,12 @@ func (a *Adapter) applyLevel(ctx context.Context, ipStr string, prev, next fsm.L
 	a.mu.Lock()
 	defer a.mu.Unlock()
 
+	// Snapshot state before mutation for rollback on backend failure.
+	snapshot := make(map[string]activeRule, len(a.rules))
+	for k, v := range a.rules {
+		snapshot[k] = v
+	}
+
 	switch next {
 	case fsm.LevelObserve:
 		delete(a.rules, ipStr)
@@ -184,7 +190,9 @@ func (a *Adapter) applyLevel(ctx context.Context, ipStr string, prev, next fsm.L
 
 	plan := a.buildPlan()
 	if err := a.backend.Apply(ctx, plan); err != nil {
-		logger.Printf("ERROR apply %s→%s for %s: %v", prev, next, ipStr, err)
+		// Rollback in-memory state to keep it consistent with firewall state.
+		a.rules = snapshot
+		logger.Printf("ERROR apply %s→%s for %s: %v — state rolled back", prev, next, ipStr, err)
 		return
 	}
 	if next == fsm.LevelObserve && prev != fsm.LevelObserve {
@@ -266,6 +274,12 @@ func (a *Adapter) gcLoop(ctx context.Context) {
 func (a *Adapter) gcExpired(ctx context.Context) {
 	a.mu.Lock()
 	now := time.Now()
+
+	snapshot := make(map[string]activeRule, len(a.rules))
+	for k, v := range a.rules {
+		snapshot[k] = v
+	}
+
 	removed := 0
 	for k, r := range a.rules {
 		if !r.expires.IsZero() && now.After(r.expires) {
@@ -280,9 +294,17 @@ func (a *Adapter) gcExpired(ctx context.Context) {
 	plan := a.buildPlan()
 	a.mu.Unlock()
 
-	logger.Printf("GC: expired %d rules", removed)
+	logger.Printf("GC: expiring %d rules", removed)
 	if err := a.backend.Apply(ctx, plan); err != nil {
-		logger.Printf("GC apply error: %v", err)
+		// Rollback: restore expired entries so they're retried next GC cycle.
+		a.mu.Lock()
+		for k, v := range snapshot {
+			if _, exists := a.rules[k]; !exists {
+				a.rules[k] = v
+			}
+		}
+		a.mu.Unlock()
+		logger.Printf("GC apply error (rolled back %d entries): %v", removed, err)
 	}
 }
 

@@ -137,9 +137,13 @@ func applyBundleUpdate(
 		c.ProfileName = b.Spec.PDPProfile
 	}
 
-	kliqLog.Printf("BUNDLE applied: node=%s gen=%d feature_profile=%s pdp_profile=%s max_action=%s hash=%s",
+	if b.Spec.Adapters != "" {
+		c.Adapters = b.Spec.Adapters
+	}
+
+	kliqLog.Printf("BUNDLE applied: node=%s gen=%d feature_profile=%s pdp_profile=%s adapters=%s max_action=%s hash=%s",
 		b.Metadata.NodeID, b.Metadata.Generation,
-		b.Spec.FeatureProfile, c.ProfileName, c.PolicyMaxAction, bundleHash)
+		b.Spec.FeatureProfile, c.ProfileName, c.Adapters, c.PolicyMaxAction, bundleHash)
 }
 
 // loadLastKnownGoodBundle attempts to read the persisted bundle from
