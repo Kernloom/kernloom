@@ -729,11 +729,17 @@ func main() {
 	if nfAdapter != nil {
 		nfCtx, nfCancel := context.WithCancel(context.Background())
 		defer nfCancel()
-		// Netfilter is enforcement-only — no telemetry, no graph learning.
-		// Telemetry requires klshield (XDP) for accurate per-packet rates.
 		if err := nfAdapter.Start(nfCtx, mainBus); err != nil {
 			kliqLog.Printf("WARNING: netfilter adapter Start failed: %v", err)
 		}
+	}
+
+	// Conntrack observer — topology-only graph learning when klshield is absent.
+	// Observations have pps=0/bps=0 so the GraphLearner skips EWMA baseline
+	// updates (pps < BaselineMinUpdatePPS) but still upserts edges for topology.
+	// Only runs when: klshield maps unavailable AND graph learning is enabled.
+	if maps == nil && c.GraphEnabled {
+		startConntrackObserver(context.Background(), mainBus, nodeID)
 	}
 
 	// graphStrikeCh bridges graph.new_edge_after_freeze signals to the main tick loop.

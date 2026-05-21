@@ -3,7 +3,7 @@
 
 package main
 
-// netfilter_setup.go wires the netfilter adapter with its backend.
+// netfilter_setup.go wires the netfilter adapter and the conntrack observer.
 // It lives in the main package so it can import the parent adapter package
 // AND the backend sub-packages without creating a circular import — the
 // backend sub-packages import the parent for shared types, and the parent
@@ -11,17 +11,18 @@ package main
 
 import (
 	"context"
+	"time"
 
+	"github.com/kernloom/kernloom/pkg/adapterruntime"
 	"github.com/kernloom/kernloom/pkg/adapters/netfilter"
 	"github.com/kernloom/kernloom/pkg/adapters/netfilter/backends/iptables"
 	"github.com/kernloom/kernloom/pkg/adapters/netfilter/backends/nftables"
+	"github.com/kernloom/kernloom/pkg/adapters/netfilter/observer/conntrack"
 )
 
 // initNetfilterAdapter probes the host for Netfilter tools, selects the best
 // backend and returns a fully wired Adapter ready to be registered as a
 // PEPSidecar on the ShieldActionExecutor.
-// The conntrack observer is started later in adapter.Start() when the bus
-// is available.
 //
 // Returns nil when no supported backend is found (nft/iptables not available).
 func initNetfilterAdapter(ctx context.Context, c cfg) *netfilter.Adapter {
@@ -52,6 +53,33 @@ func initNetfilterAdapter(ctx context.Context, c cfg) *netfilter.Adapter {
 		return nil
 	}
 	return adapter
+}
+
+// startConntrackObserver starts the conntrack observer for topology-only graph
+// learning when klshield is absent. Observations have pps=0/bps=0 so the
+// GraphLearner skips EWMA baseline updates (pps < BaselineMinUpdatePPS) but
+// still upserts graph edges — recording who communicates with this machine.
+func startConntrackObserver(ctx context.Context, bus adapterruntime.EventBus, nodeID string) {
+	probe := netfilter.Probe(ctx)
+	if !probe.Conntrack.Available {
+		kliqLog.Printf("Conntrack: not available — graph topology learning disabled (install conntrack or check /proc/net/nf_conntrack)")
+		return
+	}
+
+	cfg := conntrack.Config{
+		ConntrackPath: probe.Conntrack.Path,
+		ProcPath:      probe.Conntrack.ProcPath,
+		PollInterval:  5 * time.Second,
+		MaxFlows:      10000,
+		NodeID:        nodeID,
+	}
+	obs, err := conntrack.New(cfg)
+	if err != nil {
+		kliqLog.Printf("Conntrack observer init failed: %v", err)
+		return
+	}
+	go obs.Start(ctx, bus)
+	kliqLog.Printf("Conntrack observer started: source=%s poll=5s (topology-only, no baselines)", obs.Source())
 }
 
 // modeFromDryRun maps the KLIQ dry-run flag to a netfilter mode string.
