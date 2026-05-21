@@ -51,6 +51,7 @@ import (
 	"github.com/kernloom/kernloom/pkg/adapters/graphlearner"
 	"github.com/kernloom/kernloom/pkg/adapters/klshieldguard"
 	"github.com/kernloom/kernloom/pkg/adapters/klshieldshadow"
+	netfilteradapter "github.com/kernloom/kernloom/pkg/adapters/netfilter"
 	"github.com/kernloom/kernloom/pkg/adapters/shieldpep"
 	"github.com/kernloom/kernloom/pkg/adapters/shieldtelemetry"
 	"github.com/kernloom/kernloom/pkg/adapters/sourcebaseline"
@@ -379,14 +380,19 @@ func main() {
 		}
 	}
 
-	// Open Shield eBPF maps — optional. kliq runs without klshield when the
-	// maps are unavailable (e.g. netfilter-only or observation-only deployments).
-	maps, err := shieldclient.Open(c.BPFfsRoot, c.DryRun)
-	if err != nil {
-		kliqLog.Printf("WARNING: klshield maps not available (%v) — running without XDP enforcement", err)
-		maps = nil
+	// Open Shield eBPF maps — only when klshield is in the adapter list.
+	// kliq runs without klshield when netfilter-only or observation-only.
+	var maps *shieldclient.Maps
+	if c.WantsKLShield() {
+		m, merr := shieldclient.Open(c.BPFfsRoot, c.DryRun)
+		if merr != nil {
+			kliqLog.Printf("WARNING: klshield maps not available (%v) — XDP enforcement inactive", merr)
+		} else {
+			maps = m
+			defer maps.Close()
+		}
 	} else {
-		defer maps.Close()
+		kliqLog.Printf("klshield not in --adapter list — skipping XDP maps")
 	}
 
 	// Resolve node ID (shared by heuristic engine and graph learner).
@@ -415,12 +421,18 @@ func main() {
 	resolver := c.buildPolicyResolver()
 	executor := buildExecutor(pep)
 
-	// Netfilter adapter — optional additional PEP. Active when netfilter tools
-	// are available. Registered as a sidecar so it mirrors every enforcement
-	// decision alongside (or instead of) klshield.
-	if nfAdapter := initNetfilterAdapter(context.Background(), c); nfAdapter != nil {
-		executor.AddSidecar(nfAdapter)
-		kliqLog.Printf("Netfilter adapter active: backend=%s dry_run=%v", nfAdapter.SelectedBackend(), c.DryRun)
+	// Netfilter adapter — active when "netfilter" is in --adapter list.
+	// Registered as a sidecar so every enforcement decision is also mirrored
+	// into iptables/nftables rules. Works with or without klshield.
+	var nfAdapter *netfilteradapter.Adapter
+	if c.WantsNetfilter() {
+		nfAdapter = initNetfilterAdapter(context.Background(), c)
+		if nfAdapter != nil {
+			executor.AddSidecar(nfAdapter)
+			kliqLog.Printf("Netfilter adapter active: backend=%s dry_run=%v", nfAdapter.SelectedBackend(), c.DryRun)
+		} else {
+			kliqLog.Printf("WARNING: --adapter includes netfilter but no backend found (nft/iptables missing)")
+		}
 	}
 
 	// Runtime inventory and config-asset report is logged after the LKG bundle
@@ -706,6 +718,16 @@ func main() {
 
 	// Main signal bus — shared by heuristic engine, graph learner and future adapters.
 	mainBus := adapterruntime.NewBus(512)
+
+	// Start the netfilter adapter on the bus (launches GC goroutine and
+	// conntrack observer if conntrack is available).
+	if nfAdapter != nil {
+		nfCtx, nfCancel := context.WithCancel(context.Background())
+		defer nfCancel()
+		if err := nfAdapter.Start(nfCtx, mainBus); err != nil {
+			kliqLog.Printf("WARNING: netfilter adapter Start failed: %v", err)
+		}
+	}
 
 	// graphStrikeCh bridges graph.new_edge_after_freeze signals to the main tick loop.
 	// The signal consumer goroutine writes credits; the tick loop drains and applies them

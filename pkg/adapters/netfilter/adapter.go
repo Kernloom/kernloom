@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/kernloom/kernloom/pkg/adapterruntime"
+	"github.com/kernloom/kernloom/pkg/adapters/netfilter/observer/conntrack"
 	"github.com/kernloom/kernloom/pkg/core/capability"
 	"github.com/kernloom/kernloom/pkg/core/fsm"
 )
@@ -105,9 +106,25 @@ func (a *Adapter) Init(_ context.Context, _ adapterruntime.AdapterConfig) error 
 	return nil
 }
 
-// Start connects to the event bus and launches the TTL GC goroutine.
-func (a *Adapter) Start(ctx context.Context, _ adapterruntime.EventBus) error {
+// Start connects to the event bus, launches the TTL GC goroutine, and starts
+// the conntrack observer when conntrack is available on the host.
+func (a *Adapter) Start(ctx context.Context, bus adapterruntime.EventBus) error {
 	go a.gcLoop(ctx)
+
+	if a.probe.Conntrack.Available && a.cfg.Observation.ConntrackSnapshot {
+		cfg := conntrack.Config{
+			ConntrackPath: a.probe.Conntrack.Path,
+			PollInterval:  a.cfg.Observation.ConntrackPollInterval,
+			MaxFlows:      a.cfg.Observation.MaxObservationsPerTick,
+		}
+		obs, err := conntrack.New(cfg)
+		if err == nil {
+			go obs.Start(ctx, bus)
+			logger.Printf("conntrack observer started (poll=%s)", cfg.PollInterval)
+		} else {
+			logger.Printf("conntrack observer unavailable: %v", err)
+		}
+	}
 	return nil
 }
 
@@ -210,14 +227,23 @@ func (a *Adapter) buildPlan() NetfilterPlan {
 	}
 
 	for _, rule := range a.rules {
-		verdict := levelToVerdict(rule.level)
+		verdict := levelToVerdict(rule.level, a.probe)
 		cap := levelToCapability(rule.level)
-		plan.Rules = append(plan.Rules, RulePlan{
-			ID:       RuleID(a.ID(), cap, Selector{SrcIP: rule.srcIP}, verdict, nil),
+		ruleID := RuleID(a.ID(), cap, Selector{SrcIP: rule.srcIP}, verdict, nil)
+		rp := RulePlan{
+			ID:       ruleID,
 			Chain:    chain,
 			Selector: Selector{SrcIP: rule.srcIP},
 			Verdict:  verdict,
-		})
+		}
+		if verdict == VerdictRateLimit {
+			rate := ratePPSForLevel(rule.level)
+			rp.RateLimit = &RateLimitParams{
+				RatePPS: rate,
+				Name:    "kl_" + ruleID[:8],
+			}
+		}
+		plan.Rules = append(plan.Rules, rp)
 	}
 	return plan
 }
@@ -262,15 +288,32 @@ func (a *Adapter) gcExpired(ctx context.Context) {
 
 /* ── helpers ─────────────────────────────────────────────────────────────── */
 
-func levelToVerdict(level fsm.Level) Verdict {
+func levelToVerdict(level fsm.Level, probe ProbeResult) Verdict {
 	switch level {
 	case fsm.LevelBlock:
 		return VerdictDrop
 	case fsm.LevelSoft, fsm.LevelHard:
-		// Phase 4: will use hashlimit/nft meter; for now DROP is the safe fallback.
+		// Use native rate-limit when the backend supports it.
+		hasRL := (probe.Selected == BackendNFTables && probe.NFTables.Meters) ||
+			(probe.Selected != BackendNFTables && probe.IPTables.HasLimit)
+		if hasRL {
+			return VerdictRateLimit
+		}
 		return VerdictDrop
 	default:
 		return VerdictReturn
+	}
+}
+
+// ratePPSForLevel returns a conservative default rate for SOFT/HARD levels.
+// These are fallback values; in managed mode the bundle's enforcement_bounds
+// or PDPConfig adapter rates take precedence.
+func ratePPSForLevel(level fsm.Level) uint64 {
+	switch level {
+	case fsm.LevelHard:
+		return 20
+	default: // LevelSoft
+		return 100
 	}
 }
 

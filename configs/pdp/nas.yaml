@@ -3,6 +3,31 @@
 # BPS autotune active — ensure backup schedules ran during bootstrap
 # so the BPS floor reflects real backup throughput.
 # Use after bootstrap completes.
+#
+# Adapter note (NAS / older kernel):
+#   NAS systems (Synology, QNAP, TrueNAS) often run older kernels without
+#   XDP/eBPF support. On these systems use netfilter instead of klshield:
+#
+#     sudo kliq --adapter=netfilter --pdp-config=configs/pdp/nas.yaml
+#
+#   When both klshield and netfilter are available (modern kernel + XDP):
+#
+#     sudo kliq --adapter=klshield,netfilter --pdp-config=configs/pdp/nas.yaml
+#
+#   The netfilter adapter uses iptables-legacy (Synology) or nftables
+#   (modern Linux) as backend, selected automatically at startup.
+#   Conntrack is used for graph edge learning when available.
+#
+# # Uncomment to pin to iptables-legacy on Synology-like systems:
+# # (set in RuntimeBundle pdp_config.content for managed mode)
+# # netfilter:
+# #   backend: iptables-legacy
+# #   observation:
+# #     conntrack_snapshot: true
+# #     conntrack_poll_interval: 10s
+# #   safety:
+# #     management_allowlist:
+# #       - 192.168.1.0/24   # always allow management subnet
 
 apiVersion: kernloom.io/v1alpha1
 kind: PDPConfig

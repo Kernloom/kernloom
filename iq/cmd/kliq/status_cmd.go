@@ -4,6 +4,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -12,6 +13,8 @@ import (
 	"text/tabwriter"
 	"time"
 
+	"github.com/kernloom/kernloom/pkg/adapters/netfilter"
+	"github.com/kernloom/kernloom/pkg/componentinventory"
 	"github.com/kernloom/kernloom/pkg/core/baseline"
 	"github.com/kernloom/kernloom/pkg/core/featureset"
 	"github.com/kernloom/kernloom/pkg/core/graph"
@@ -271,6 +274,13 @@ func printRuntimeReport(statePath string, st *stateFile) {
 	}
 	w.Flush()
 
+	// Adapter section — show klshield and netfilter status.
+	fmt.Println()
+	w = tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
+	fmt.Fprintf(w, "klshield (XDP):\t%s\n", adapterStatusFromReport(cr))
+	printNetfilterStatus(w)
+	w.Flush()
+
 	inv := rep.Inventory
 	if len(inv.EffectiveCapabilities) > 0 {
 		fmt.Println()
@@ -365,7 +375,7 @@ func runRuntimeStatus(profile featureset.RuntimeProfile) {
 	fmt.Fprintln(w, "  Tuple enforcement:\t"+enabled(fs.TupleEnforcement))
 	w.Flush()
 	fmt.Println()
-	fmt.Println("kliq profiles (all require kliq + klshield):")
+	fmt.Println("kliq profiles (klshield required unless --adapter=netfilter):")
 	fmt.Println("  dos-light      source heuristic + autotune, no graph, no SQLite")
 	fmt.Println("  iq-learning    dos-light + per-source EWMA baseline")
 	fmt.Println("  graph-learning iq-learning + flow telemetry + graph + edge baseline + SQLite")
@@ -373,4 +383,38 @@ func runRuntimeStatus(profile featureset.RuntimeProfile) {
 	fmt.Println()
 	fmt.Println("klshield-only profile (no kliq needed):")
 	fmt.Println("  klshield-light XDP only — static deny/allow, optional default RL")
+}
+
+// adapterStatusFromReport returns a one-line klshield status string from the
+// config report written at startup.
+func adapterStatusFromReport(cr componentinventory.KliqConfigAssetReport) string {
+	for _, a := range cr.Adapters {
+		if a.Plugin == "builtin-klshield" && a.Enabled {
+			return "active"
+		}
+	}
+	return "inactive (not in --adapter list or maps unavailable)"
+}
+
+// printNetfilterStatus probes the host live and prints netfilter adapter status.
+// This is safe to call from kliq status even when kliq is not running.
+func printNetfilterStatus(w *tabwriter.Writer) {
+	probe := netfilter.Probe(context.Background())
+	if probe.Selected == "" {
+		fmt.Fprintf(w, "netfilter:\tnot available (nft/iptables not found)\n")
+		return
+	}
+	conntrackStatus := "no"
+	if probe.Conntrack.Available {
+		conntrackStatus = "yes"
+		if probe.Conntrack.Accounting {
+			conntrackStatus = "yes (accounting enabled)"
+		}
+	}
+	fmt.Fprintf(w, "netfilter:\tbackend=%s  ipset=%v  hashlimit=%v  conntrack=%s\n",
+		probe.Selected,
+		probe.IPTables.IPSet.Available,
+		probe.IPTables.HasLimit,
+		conntrackStatus,
+	)
 }

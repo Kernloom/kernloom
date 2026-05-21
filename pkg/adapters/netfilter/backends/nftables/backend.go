@@ -5,6 +5,7 @@ package nftables
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log"
 	"os"
@@ -37,11 +38,11 @@ func New(probe netfilter.NFTablesProbe, cfg netfilter.Config) *Backend {
 	}
 }
 
-// Apply atomically replaces the Kernloom nftables table with the desired plan.
-// Uses "nft -f" which is atomic at the kernel level — either the whole table
-// is replaced or the old state is retained on error.
+// Apply atomically flushes and rebuilds the Kernloom table in one nft -f
+// transaction. Using RenderFlushAndTable avoids the delete→add gap that
+// would briefly leave the host without Kernloom rules.
 func (b *Backend) Apply(ctx context.Context, plan netfilter.NetfilterPlan) error {
-	script := RenderTable(plan, b.opts)
+	script := RenderFlushAndTable(plan, b.opts)
 
 	if b.dryRun {
 		logger.Printf("[dry-run] would apply nft ruleset:\n%s", script)
@@ -98,10 +99,9 @@ func (b *Backend) TableExists(ctx context.Context) bool {
 /* ── internal helpers ──────────────────────────────────────────────────── */
 
 // applyFile writes the nft script to a temp file and applies it atomically.
-// We use a temp file rather than stdin because nft -f from stdin does not
-// support the "delete table" + "add table" pattern needed for clean replace.
+// The script uses "flush table" + "table { ... }" so the flush and populate
+// happen in one kernel transaction — no rules gap between old and new state.
 func (b *Backend) applyFile(ctx context.Context, script string) error {
-	// Write to temp file.
 	f, err := os.CreateTemp("", "kernloom-nft-*.nft")
 	if err != nil {
 		return fmt.Errorf("create temp file: %w", err)
@@ -116,20 +116,26 @@ func (b *Backend) applyFile(ctx context.Context, script string) error {
 		return fmt.Errorf("close nft script: %w", err)
 	}
 
-	// Delete existing table first so the apply is truly atomic (old table →
-	// no table → new table). The two operations are not transactional, but
-	// the window between them is sub-millisecond and enforcement rules are
-	// still in effect in the kernel until the delete commits.
-	if b.TableExists(ctx) {
-		if err := b.run(ctx, "delete", "table", "inet", b.opts.TableName); err != nil {
-			logger.Printf("WARNING: could not delete existing table before replace: %v", err)
+	if err := b.run(ctx, "-f", f.Name()); err != nil {
+		// On first run the table may not exist yet; flush would fail.
+		// Retry without the flush line by applying table-only script.
+		if b.isFlushError(err) {
+			tableOnly := RenderTable(netfilter.NetfilterPlan{}, b.opts)
+			_ = tableOnly // create empty table first
+			if err2 := b.run(ctx, "-f", f.Name()); err2 != nil {
+				return fmt.Errorf("nft -f (retry): %w", err2)
+			}
+		} else {
+			return fmt.Errorf("nft -f: %w", err)
 		}
 	}
-
-	if err := b.run(ctx, "-f", f.Name()); err != nil {
-		return fmt.Errorf("nft -f: %w", err)
-	}
 	return nil
+}
+
+func (b *Backend) isFlushError(err error) bool {
+	return err != nil && (strings.Contains(err.Error(), "No such file") ||
+		strings.Contains(err.Error(), "table") ||
+		strings.Contains(err.Error(), "does not exist"))
 }
 
 func (b *Backend) run(ctx context.Context, args ...string) error {
@@ -147,4 +153,94 @@ func (b *Backend) runOutput(ctx context.Context, args ...string) (string, error)
 		return "", fmt.Errorf("%w (output: %s)", err, strings.TrimSpace(string(out)))
 	}
 	return string(out), nil
+}
+
+// RuleCounter holds a packet/byte count for one Kernloom rule.
+type RuleCounter struct {
+	RuleID  string
+	Chain   string
+	Packets uint64
+	Bytes   uint64
+}
+
+// ReadCounters reads per-rule counters from the Kernloom table using
+// `nft -j list table inet kernloom`. Requires nft JSON output support.
+func (b *Backend) ReadCounters(ctx context.Context) ([]RuleCounter, error) {
+	if !b.probe.JSONOutput {
+		return nil, fmt.Errorf("nft JSON output not supported on this host")
+	}
+	out, err := b.runOutput(ctx, "-j", "list", "table", "inet", b.opts.TableName)
+	if err != nil {
+		return nil, fmt.Errorf("nft list table: %w", err)
+	}
+	return parseNFTCounters(out, b.opts.CommentPrefix), nil
+}
+
+// nftJSONRuleset is a minimal subset of the nft JSON output schema.
+// Only the fields we need for counter extraction are decoded.
+type nftJSONRuleset struct {
+	Nftables []nftJSONItem `json:"nftables"`
+}
+
+type nftJSONItem struct {
+	Rule *nftJSONRule `json:"rule,omitempty"`
+}
+
+type nftJSONRule struct {
+	Chain   string        `json:"chain"`
+	Expr    []nftJSONExpr `json:"expr"`
+	Comment string        `json:"comment,omitempty"`
+}
+
+type nftJSONExpr struct {
+	Counter *nftJSONCounter `json:"counter,omitempty"`
+}
+
+type nftJSONCounter struct {
+	Packets uint64 `json:"packets"`
+	Bytes   uint64 `json:"bytes"`
+}
+
+// parseNFTCounters extracts rule counters from nft -j output.
+func parseNFTCounters(jsonOut, commentPrefix string) []RuleCounter {
+	var rs nftJSONRuleset
+	if err := json.Unmarshal([]byte(jsonOut), &rs); err != nil {
+		return nil
+	}
+	var counters []RuleCounter
+	for _, item := range rs.Nftables {
+		if item.Rule == nil {
+			continue
+		}
+		rule := item.Rule
+		ruleID := extractNFTRuleID(rule.Comment, commentPrefix)
+		if ruleID == "" {
+			continue
+		}
+		for _, expr := range rule.Expr {
+			if expr.Counter != nil {
+				counters = append(counters, RuleCounter{
+					RuleID:  ruleID,
+					Chain:   rule.Chain,
+					Packets: expr.Counter.Packets,
+					Bytes:   expr.Counter.Bytes,
+				})
+				break
+			}
+		}
+	}
+	return counters
+}
+
+// extractNFTRuleID finds "id=<value>" in a rule comment.
+func extractNFTRuleID(comment, prefix string) string {
+	if !strings.HasPrefix(comment, prefix) {
+		return ""
+	}
+	for _, field := range strings.Fields(comment) {
+		if strings.HasPrefix(field, "id=") {
+			return strings.TrimPrefix(field, "id=")
+		}
+	}
+	return ""
 }

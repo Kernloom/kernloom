@@ -43,16 +43,33 @@ type SetElement struct {
 	RuleID string        // trace back to the decision that added it
 }
 
+// RateLimitParams carries rate/burst for VerdictRateLimit rules.
+type RateLimitParams struct {
+	RatePPS uint64        // packets per second limit
+	Burst   uint64        // burst size (0 = 2× RatePPS)
+	TTL     time.Duration // timeout for hashlimit/meter entry (0 = no expiry)
+	Name    string        // unique name for hashlimit table / nft meter (auto-derived from RuleID when empty)
+}
+
+// Burst returns the effective burst (2× rate when zero).
+func (r RateLimitParams) EffectiveBurst() uint64 {
+	if r.Burst > 0 {
+		return r.Burst
+	}
+	return r.RatePPS * 2
+}
+
 // RulePlan is one enforcement rule.
 type RulePlan struct {
-	ID          string         // stable hash; see RuleID()
-	Chain       string         // target chain, e.g. "KERNLOOM_INPUT"
-	Selector    Selector       // match criteria
-	Verdict     Verdict        // what to do when the selector matches
-	Counter     bool           // include packet/byte counter
-	Comment     string         // appended to kernloom owner comment
-	Constraints map[string]any // rate, burst, conn-limit etc.
-	Priority    int            // lower = evaluated first within chain
+	ID          string           // stable hash; see RuleID()
+	Chain       string           // target chain, e.g. "KERNLOOM_INPUT"
+	Selector    Selector         // match criteria
+	Verdict     Verdict          // what to do when the selector matches
+	RateLimit   *RateLimitParams // set when Verdict == VerdictRateLimit
+	Counter     bool             // include packet/byte counter
+	Comment     string           // appended to kernloom owner comment
+	Constraints map[string]any   // reserved for future use
+	Priority    int              // lower = evaluated first within chain
 }
 
 // Selector describes the L3/L4 match criteria for a rule.
@@ -75,10 +92,11 @@ type Selector struct {
 type Verdict string
 
 const (
-	VerdictDrop   Verdict = "DROP"
-	VerdictAccept Verdict = "ACCEPT"
-	VerdictReturn Verdict = "RETURN" // exit Kernloom chain, continue host rules
-	VerdictLog    Verdict = "LOG"
+	VerdictDrop      Verdict = "DROP"
+	VerdictAccept    Verdict = "ACCEPT"
+	VerdictReturn    Verdict = "RETURN" // exit Kernloom chain, continue host rules
+	VerdictLog       Verdict = "LOG"
+	VerdictRateLimit Verdict = "RATE_LIMIT" // rendered as hashlimit (iptables) or meter (nftables)
 )
 
 // RuleID computes a stable, opaque ID for a rule from its semantic content.

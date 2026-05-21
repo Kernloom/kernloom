@@ -52,6 +52,21 @@ func DefaultRenderOptions() RenderOptions {
 //	    <rules>
 //	  }
 //	}
+//
+// RenderFlushAndTable produces a two-statement nft script that atomically
+// flushes and rebuilds the Kernloom table in a single nft -f transaction.
+// Using "flush table" + "table" avoids the delete→add gap that would leave
+// the host unprotected for a brief window between two separate nft calls.
+func RenderFlushAndTable(plan netfilter.NetfilterPlan, opts RenderOptions) string {
+	table := opts.TableName
+	if table == "" {
+		table = defaultTableName
+	}
+	// The flush is inside the same batch as the table declaration, so nft
+	// treats it as a single atomic operation: flush, then re-populate.
+	return fmt.Sprintf("flush table inet %s\n", table) + RenderTable(plan, opts)
+}
+
 func RenderTable(plan netfilter.NetfilterPlan, opts RenderOptions) string {
 	table := opts.TableName
 	if table == "" {
@@ -272,8 +287,21 @@ func renderRule(rule netfilter.RulePlan, opts RenderOptions) string {
 	comment := buildComment(opts.CommentPrefix, rule)
 	parts = append(parts, fmt.Sprintf("comment %q", comment))
 
-	// Verdict.
-	parts = append(parts, strings.ToLower(string(rule.Verdict)))
+	// Verdict / rate-limit via meter.
+	if rule.Verdict == netfilter.VerdictRateLimit && rule.RateLimit != nil {
+		rl := rule.RateLimit
+		name := rl.Name
+		if name == "" {
+			name = "kl_" + rule.ID
+		}
+		burst := rl.EffectiveBurst()
+		// nft meter: packets exceeding the rate are dropped.
+		parts = append(parts,
+			fmt.Sprintf("meter %s { ip saddr limit rate over %d/second burst %d packets } drop", name, rl.RatePPS, burst),
+		)
+	} else {
+		parts = append(parts, strings.ToLower(string(rule.Verdict)))
+	}
 
 	return strings.Join(parts, " ")
 }
@@ -296,6 +324,8 @@ func verdictToAction(v netfilter.Verdict) string {
 		return "allow"
 	case netfilter.VerdictReturn:
 		return "allow_return"
+	case netfilter.VerdictRateLimit:
+		return "rate_limit"
 	default:
 		return strings.ToLower(string(v))
 	}

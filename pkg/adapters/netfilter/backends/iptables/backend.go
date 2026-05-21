@@ -9,6 +9,7 @@ import (
 	"log"
 	"os"
 	"os/exec"
+	"strconv"
 	"strings"
 
 	"github.com/kernloom/kernloom/pkg/adapters/netfilter"
@@ -40,6 +41,12 @@ func New(probe netfilter.IPTablesProbe, cfg netfilter.Config) *Backend {
 // Apply applies a NetfilterPlan to the host.
 // In dry-run mode it logs planned operations without executing any commands.
 func (b *Backend) Apply(ctx context.Context, plan netfilter.NetfilterPlan) error {
+	// Ensure KERNLOOM_* chains and jump rules exist before restore.
+	// iptables-restore with --noflush requires the chains to already exist.
+	if err := b.EnsureChains(ctx); err != nil {
+		return fmt.Errorf("iptables: ensure chains: %w", err)
+	}
+
 	// Apply ipset operations first (sets must exist before rules reference them).
 	if b.cfg.Enforcement.PreferSets && len(plan.Sets) > 0 {
 		if err := b.applySets(ctx, plan.Sets); err != nil {
@@ -55,6 +62,100 @@ func (b *Backend) Apply(ctx context.Context, plan netfilter.NetfilterPlan) error
 	}
 
 	return b.restore(ctx, script)
+}
+
+// RuleCounter holds a packet/byte count for one Kernloom rule.
+type RuleCounter struct {
+	RuleID  string
+	Chain   string
+	Packets uint64
+	Bytes   uint64
+}
+
+// ReadCounters reads packet/byte counters for all Kernloom rules by parsing
+// `iptables -L <chain> -v -n -x` and matching comments back to rule IDs.
+func (b *Backend) ReadCounters(ctx context.Context) ([]RuleCounter, error) {
+	if b.probe.Path == "" {
+		return nil, fmt.Errorf("iptables not available")
+	}
+	var all []RuleCounter
+	for _, chain := range kernloomChains(b.cfg) {
+		counters, err := b.readChainCounters(ctx, chain)
+		if err != nil {
+			return nil, err
+		}
+		all = append(all, counters...)
+	}
+	return all, nil
+}
+
+func (b *Backend) readChainCounters(ctx context.Context, chain string) ([]RuleCounter, error) {
+	cmd := exec.CommandContext(ctx, b.probe.Path, "-L", chain, "-v", "-n", "-x")
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		// Chain might not exist yet — treat as empty, not an error.
+		if strings.Contains(string(out), "No chain") || strings.Contains(string(out), "does not exist") {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("iptables -L %s: %w", chain, err)
+	}
+	return parseChainCounters(chain, string(out), b.cfg.Ownership.CommentPrefix), nil
+}
+
+// parseChainCounters extracts RuleCounters from `iptables -L -v -n -x` output.
+// Lines look like:  pkts bytes target prot opt in out source destination  [comment]
+func parseChainCounters(chain, output, commentPrefix string) []RuleCounter {
+	var counters []RuleCounter
+	for _, line := range strings.Split(output, "\n") {
+		line = strings.TrimSpace(line)
+		// Skip header lines.
+		if line == "" || strings.HasPrefix(line, "Chain") || strings.HasPrefix(line, "pkts") {
+			continue
+		}
+		// Extract rule ID from comment: "kernloom action=deny id=<id>"
+		ruleID := extractRuleID(line, commentPrefix)
+		if ruleID == "" {
+			continue
+		}
+		pkts, bytes := parseCounterFields(line)
+		counters = append(counters, RuleCounter{
+			RuleID:  ruleID,
+			Chain:   chain,
+			Packets: pkts,
+			Bytes:   bytes,
+		})
+	}
+	return counters
+}
+
+// extractRuleID finds "id=<value>" in the comment part of an iptables -L line.
+func extractRuleID(line, prefix string) string {
+	idx := strings.Index(line, prefix+" ")
+	if idx < 0 {
+		return ""
+	}
+	rest := line[idx:]
+	for _, field := range strings.Fields(rest) {
+		if strings.HasPrefix(field, "id=") {
+			return strings.TrimPrefix(field, "id=")
+		}
+	}
+	return ""
+}
+
+// parseCounterFields extracts packet/byte counts from the first two numeric fields.
+func parseCounterFields(line string) (pkts, bytes uint64) {
+	fields := strings.Fields(line)
+	if len(fields) >= 2 {
+		pkts, _ = parseUint64(fields[0])
+		bytes, _ = parseUint64(fields[1])
+	}
+	return
+}
+
+func parseUint64(s string) (uint64, bool) {
+	v, err := strconv.ParseUint(s, 10, 64)
+	return v, err == nil
 }
 
 // Cleanup removes all Kernloom-owned chains and jump rules from the host.

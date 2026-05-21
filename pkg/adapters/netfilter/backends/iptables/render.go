@@ -176,8 +176,25 @@ func renderRule(rule netfilter.RulePlan, opts RenderOptions) string {
 	comment := buildComment(opts.CommentPrefix, rule)
 	parts = append(parts, "-m", "comment", "--comment", fmt.Sprintf("%q", comment))
 
-	// Verdict.
-	parts = append(parts, "-j", string(rule.Verdict))
+	// Verdict / rate-limit.
+	if rule.Verdict == netfilter.VerdictRateLimit && rule.RateLimit != nil {
+		rl := rule.RateLimit
+		name := rl.Name
+		if name == "" {
+			name = "kl_" + rule.ID
+		}
+		burst := rl.EffectiveBurst()
+		parts = append(parts,
+			"-m", "hashlimit",
+			fmt.Sprintf("--hashlimit-above %d/second", rl.RatePPS),
+			fmt.Sprintf("--hashlimit-burst %d", burst),
+			"--hashlimit-mode", "srcip",
+			fmt.Sprintf("--hashlimit-name %s", name),
+			"-j", "DROP",
+		)
+	} else {
+		parts = append(parts, "-j", string(rule.Verdict))
+	}
 
 	return strings.Join(parts, " ")
 }
@@ -200,6 +217,8 @@ func verdictToAction(v netfilter.Verdict) string {
 		return "allow"
 	case netfilter.VerdictReturn:
 		return "allow_return"
+	case netfilter.VerdictRateLimit:
+		return "rate_limit"
 	default:
 		return strings.ToLower(string(v))
 	}

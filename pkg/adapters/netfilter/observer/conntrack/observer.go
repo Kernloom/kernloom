@@ -16,6 +16,7 @@ package conntrack
 import (
 	"bufio"
 	"context"
+	"fmt"
 	"log"
 	"os"
 	"os/exec"
@@ -69,6 +70,11 @@ func New(cfg Config) (*Observer, error) {
 		path, err = exec.LookPath("conntrack")
 		if err != nil {
 			return nil, err
+		}
+	} else {
+		// Verify explicit path is executable.
+		if _, err := exec.LookPath(path); err != nil {
+			return nil, fmt.Errorf("conntrack binary not found at %q: %w", path, err)
 		}
 	}
 	if cfg.PollInterval == 0 {
@@ -242,12 +248,16 @@ func parseLine(line string) (Flow, bool) {
 				}
 			}
 		case "packets":
-			if n, err := strconv.ParseUint(val, 10, 64); err == nil {
-				f.Packets = n
+			if f.Packets == 0 {
+				if n, err := strconv.ParseUint(val, 10, 64); err == nil {
+					f.Packets = n
+				}
 			}
 		case "bytes":
-			if n, err := strconv.ParseUint(val, 10, 64); err == nil {
-				f.Bytes = n
+			if f.Bytes == 0 {
+				if n, err := strconv.ParseUint(val, 10, 64); err == nil {
+					f.Bytes = n
+				}
 			}
 		}
 	}
