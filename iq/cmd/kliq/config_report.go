@@ -20,7 +20,7 @@ import (
 //
 // No secret values are included — enrollment keys and certificate paths belong
 // in the deployment config, not in a report that may be logged or transmitted.
-func buildConfigAssetReport(c cfg, nodeID string, features featureset.FeatureSet) componentinventory.KliqConfigAssetReport {
+func buildConfigAssetReport(c cfg, nodeID string, features featureset.FeatureSet, klshieldActive bool) componentinventory.KliqConfigAssetReport {
 	r := componentinventory.KliqConfigAssetReport{
 		APIVersion: "kernloom.io/v1alpha1",
 		Kind:       "KliqConfigAssetReport",
@@ -50,7 +50,7 @@ func buildConfigAssetReport(c cfg, nodeID string, features featureset.FeatureSet
 
 	// KLShield is the only adapter for now.
 	r.Adapters = []componentinventory.AdapterSummary{
-		{ID: "klshield-" + nodeID, Plugin: "builtin-klshield", Enabled: true},
+		{ID: "klshield-" + nodeID, Plugin: "builtin-klshield", Enabled: klshieldActive},
 	}
 
 	// Analyzers active based on feature profile.

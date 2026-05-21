@@ -517,7 +517,7 @@ func main() {
 
 	// Runtime inventory and config-asset report — built after LKG bundle apply
 	// so that HasPolicyPack and ProfileName reflect the restored state.
-	report := buildConfigAssetReport(c, nodeID, features)
+	report := buildConfigAssetReport(c, nodeID, features, maps != nil)
 	inv := buildEmptyInventory(nodeID)
 	if pep != nil {
 		inv = pep.BuildInventory(nodeID)
