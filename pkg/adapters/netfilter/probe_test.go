@@ -51,9 +51,9 @@ func TestAdapter_InitDryRun_NeverApplies(t *testing.T) {
 	if err != nil {
 		t.Skipf("no Netfilter backend available: %v", err)
 	}
-	// Cleanup in dry-run should never return an error.
-	if err := a.Cleanup(context.Background()); err != nil {
-		t.Errorf("dry-run Cleanup returned error: %v", err)
+	// Stop (which calls Cleanup when CleanupOnExit=false) must not error.
+	if err := a.Stop(context.Background()); err != nil {
+		t.Errorf("Stop returned error: %v", err)
 	}
 }
 

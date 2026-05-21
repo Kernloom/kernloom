@@ -126,6 +126,14 @@ func updateSidecarPack(statePath, packName, maxAction string) {
 	}
 }
 
+// buildEmptyInventory returns a minimal ComponentRuntimeInventory for nodes
+// that start without klshield (netfilter-only or observation-only deployments).
+func buildEmptyInventory(nodeID string) componentinventory.ComponentRuntimeInventory {
+	var inv componentinventory.ComponentRuntimeInventory
+	inv.Metadata.ID = nodeID
+	return inv
+}
+
 // logInventoryAndReport logs a summary of the inventory and policy config, and
 // saves the full report as JSON to a sidecar file for "kliq status".
 func logInventoryAndReport(

@@ -7,51 +7,86 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"net"
 	"os"
+	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/kernloom/kernloom/pkg/adapterruntime"
 	"github.com/kernloom/kernloom/pkg/core/capability"
+	"github.com/kernloom/kernloom/pkg/core/fsm"
 )
 
 var logger = log.New(os.Stderr, "[netfilter] ", log.LstdFlags)
 
-// Adapter is the Kernloom Netfilter PEP adapter.
-// It implements adapterruntime.Adapter and selects the best available
-// Netfilter backend (nftables, iptables-nft, iptables-legacy) at Init time.
+// BackendIface is the common interface both iptables and nftables backends
+// implement. It is satisfied by backends/iptables.Backend and
+// backends/nftables.Backend. Defined here so the parent package does NOT need
+// to import the backend sub-packages (which would create a cycle, because the
+// backends import the parent for shared types).
 //
-// The adapter is intentionally conservative:
-//   - Default mode is dry-run.
-//   - It never modifies objects it does not own.
-//   - Cleanup removes only Kernloom-prefixed chains/tables/sets.
+// The concrete backend is injected from outside (kliq.go) via SetBackend.
+type BackendIface interface {
+	Apply(ctx context.Context, plan NetfilterPlan) error
+	Cleanup(ctx context.Context) error
+}
+
+// activeRule tracks an enforcement rule currently installed by the adapter.
+type activeRule struct {
+	srcIP   string
+	level   fsm.Level
+	expires time.Time // zero = no expiry
+}
+
+// Adapter is the Kernloom Netfilter PEP adapter.
+//
+// It implements adapterruntime.Adapter so it can be registered in KLIQ's
+// adapter registry, and implements the actions.PEPSidecar interface so it
+// receives FSM transition notifications from the ShieldActionExecutor.
+//
+// Usage:
+//
+//	probe := netfilter.Probe(ctx)
+//	backend := iptables.New(probe.IPTables, cfg)   // or nftables.New(...)
+//	adapter := netfilter.New(cfg)
+//	adapter.SetBackend(probe, backend)
+//	adapter.Init(ctx, nil)
 type Adapter struct {
-	cfg   Config
-	probe ProbeResult
+	cfg     Config
+	probe   ProbeResult
+	backend BackendIface
 
-	healthy uint32 // atomic: 1 = healthy, 0 = degraded/error
+	mu      sync.Mutex
+	rules   map[string]activeRule // key: srcIP string
+	healthy uint32                // atomic: 1 = healthy
 }
 
-// New creates a new netfilter adapter with the given configuration.
-// Call Init before use.
+// New creates a new Adapter. Call SetBackend then Init before use.
 func New(cfg Config) *Adapter {
-	return &Adapter{cfg: cfg}
+	return &Adapter{cfg: cfg, rules: make(map[string]activeRule)}
 }
 
-// NewDefault creates a new netfilter adapter with safe defaults (dry-run).
-func NewDefault() *Adapter {
-	return New(DefaultConfig())
+// NewDefault creates an Adapter with safe dry-run defaults.
+func NewDefault() *Adapter { return New(DefaultConfig()) }
+
+// SetBackend injects the backend and probe result. Must be called before Init.
+// This is kept separate from Init so that kliq.go (which imports both the
+// netfilter parent and the backend sub-packages) can wire them together
+// without creating an import cycle inside this package.
+func (a *Adapter) SetBackend(probe ProbeResult, b BackendIface) {
+	a.probe = probe
+	a.backend = b
 }
 
 /* ── adapterruntime.Adapter ─────────────────────────────────────────────── */
 
-// ID returns the unique adapter identifier.
-func (a *Adapter) ID() string { return "kernloom.netfilter" }
-
-// Kind returns AdapterPEP.
+func (a *Adapter) ID() string                       { return "kernloom.netfilter" }
 func (a *Adapter) Kind() adapterruntime.AdapterKind { return adapterruntime.AdapterPEP }
 
-// Capabilities returns the set of capabilities this adapter can provide,
-// based on what was detected during Init. Called once after Init.
+// SelectedBackend returns the backend type string selected during probe.
+func (a *Adapter) SelectedBackend() string { return string(a.probe.Selected) }
+
 func (a *Adapter) Capabilities() []*capability.Capability {
 	if atomic.LoadUint32(&a.healthy) == 0 {
 		return nil
@@ -59,124 +94,216 @@ func (a *Adapter) Capabilities() []*capability.Capability {
 	return buildCapabilities(a.probe, a.cfg)
 }
 
-// Init probes the host for available Netfilter tools and selects the backend.
-// Sets healthy=true on success; does not apply any rules.
-func (a *Adapter) Init(ctx context.Context, _ adapterruntime.AdapterConfig) error {
-	a.probe = Probe(ctx)
-
-	if a.cfg.Backend != BackendAuto && a.cfg.Backend != "" {
-		a.probe.Selected = a.cfg.Backend
+// Init validates that a backend was injected and marks the adapter healthy.
+func (a *Adapter) Init(_ context.Context, _ adapterruntime.AdapterConfig) error {
+	if a.backend == nil {
+		return fmt.Errorf("netfilter adapter: no backend set — call SetBackend before Init")
 	}
-
-	if a.probe.Selected == "" {
-		return fmt.Errorf("netfilter adapter: no supported backend found on this host " +
-			"(nft, iptables not available or not executable)")
-	}
-
-	logger.Printf("backend=%s mode=%s directions={input=%v forward=%v output=%v} dry_run=%v",
-		a.probe.Selected,
-		a.cfg.Mode,
-		a.cfg.Directions.Input,
-		a.cfg.Directions.Forward,
-		a.cfg.Directions.Output,
-		a.cfg.Mode == ModeDryRun,
-	)
+	logger.Printf("init: backend=%s mode=%s", a.probe.Selected, a.cfg.Mode)
 	logProbe(a.probe)
-
 	atomic.StoreUint32(&a.healthy, 1)
 	return nil
 }
 
-// Start connects the adapter to the event bus.
-// For now it is a no-op — enforcement is triggered synchronously via Apply.
-func (a *Adapter) Start(_ context.Context, _ adapterruntime.EventBus) error {
+// Start connects to the event bus and launches the TTL GC goroutine.
+func (a *Adapter) Start(ctx context.Context, _ adapterruntime.EventBus) error {
+	go a.gcLoop(ctx)
 	return nil
 }
 
-// Health reports whether the adapter initialised successfully.
 func (a *Adapter) Health(_ context.Context) adapterruntime.HealthStatus {
 	if atomic.LoadUint32(&a.healthy) == 1 {
 		return adapterruntime.HealthStatus{Healthy: true}
 	}
 	return adapterruntime.HealthStatus{
 		Healthy: false,
-		Message: "netfilter adapter: not initialised or no backend available",
+		Message: "netfilter adapter: not initialised or backend unavailable",
 	}
 }
 
-// Stop is a no-op unless CleanupOnExit is set.
 func (a *Adapter) Stop(ctx context.Context) error {
-	if a.cfg.Ownership.CleanupOnExit {
-		return a.Cleanup(ctx)
+	atomic.StoreUint32(&a.healthy, 0)
+	if a.cfg.Ownership.CleanupOnExit && a.backend != nil {
+		return a.backend.Cleanup(ctx)
 	}
 	return nil
 }
 
+/* ── actions.PEPSidecar ─────────────────────────────────────────────────── */
+
+// NotifyTransition4 mirrors an IPv4 FSM transition into Netfilter rules.
+// Called synchronously by ShieldActionExecutor after every authorized action.
+func (a *Adapter) NotifyTransition4(ip [4]byte, prev, next fsm.Level, ttl time.Duration) {
+	if atomic.LoadUint32(&a.healthy) == 0 {
+		return
+	}
+	a.applyLevel(context.Background(), net.IP(ip[:]).String(), prev, next, ttl)
+}
+
+// NotifyTransition6 mirrors an IPv6 FSM transition into Netfilter rules.
+func (a *Adapter) NotifyTransition6(ip [16]byte, prev, next fsm.Level, ttl time.Duration) {
+	if atomic.LoadUint32(&a.healthy) == 0 {
+		return
+	}
+	a.applyLevel(context.Background(), net.IP(ip[:]).String(), prev, next, ttl)
+}
+
 /* ── Enforcement ─────────────────────────────────────────────────────────── */
 
-// Cleanup removes all Kernloom-owned chains, tables and sets from the host.
-// It never touches foreign rules.
-func (a *Adapter) Cleanup(_ context.Context) error {
-	if a.cfg.Mode == ModeDryRun {
-		logger.Printf("[dry-run] Cleanup: would remove all %s-owned objects", a.cfg.Ownership.ChainPrefix)
-		return nil
+func (a *Adapter) applyLevel(ctx context.Context, ipStr string, prev, next fsm.Level, ttl time.Duration) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+
+	switch next {
+	case fsm.LevelObserve:
+		delete(a.rules, ipStr)
+	default:
+		exp := time.Time{}
+		if ttl > 0 {
+			exp = time.Now().Add(ttl)
+		}
+		a.rules[ipStr] = activeRule{srcIP: ipStr, level: next, expires: exp}
 	}
-	// Backend-specific cleanup will be implemented in Phase 2/6.
-	return fmt.Errorf("netfilter: Cleanup not yet implemented for backend %s", a.probe.Selected)
+
+	plan := a.buildPlan()
+	if err := a.backend.Apply(ctx, plan); err != nil {
+		logger.Printf("ERROR apply %s→%s for %s: %v", prev, next, ipStr, err)
+		return
+	}
+	if next == fsm.LevelObserve && prev != fsm.LevelObserve {
+		logger.Printf("de-enforced src=%s (%s→observe)", ipStr, prev)
+	} else if next != fsm.LevelObserve {
+		logger.Printf("enforced src=%s %s→%s", ipStr, prev, next)
+	}
 }
 
-/* ── Probe summary logging ───────────────────────────────────────────────── */
-
-func logProbe(p ProbeResult) {
-	if p.NFTables.Available {
-		logger.Printf("nftables: path=%s json=%v timeout_sets=%v meters=%v",
-			p.NFTables.Path, p.NFTables.JSONOutput, p.NFTables.SetTimeout, p.NFTables.Meters)
-	} else {
-		logger.Printf("nftables: not available")
+// buildPlan constructs the full desired-state NetfilterPlan from active rules.
+// Must be called with a.mu held.
+func (a *Adapter) buildPlan() NetfilterPlan {
+	plan := NetfilterPlan{TableName: a.cfg.Ownership.TableName}
+	if plan.TableName == "" {
+		plan.TableName = "filter"
 	}
 
-	if p.IPTables.Available {
-		logger.Printf("iptables: path=%s backend=%s ipset=%v hashlimit=%v connlimit=%v",
-			p.IPTables.Path,
-			p.IPTables.Backend,
-			p.IPTables.IPSet.Available,
-			p.IPTables.HasLimit,
-			p.IPTables.ConnLimit,
-		)
-	} else {
-		logger.Printf("iptables: not available")
+	prefix := a.cfg.Ownership.ChainPrefix
+	if a.cfg.Directions.Input {
+		plan.Chains = append(plan.Chains, ChainPlan{Name: prefix + "_INPUT", Hook: "input", Policy: "accept"})
+	}
+	if a.cfg.Directions.Forward {
+		plan.Chains = append(plan.Chains, ChainPlan{Name: prefix + "_FORWARD", Hook: "forward", Policy: "accept"})
+	}
+	if a.cfg.Directions.Output {
+		plan.Chains = append(plan.Chains, ChainPlan{Name: prefix + "_OUTPUT", Hook: "output", Policy: "accept"})
 	}
 
-	logger.Printf("conntrack: available=%v accounting=%v",
-		p.Conntrack.Available, p.Conntrack.Accounting)
+	chain := prefix + "_INPUT"
+
+	// Management allowlist: RETURN rules at priority -100 (always evaluated first).
+	for _, cidr := range a.cfg.Safety.ManagementAllowlist {
+		plan.Rules = append(plan.Rules, RulePlan{
+			ID:       RuleID(a.ID(), "management", Selector{SrcCIDR: cidr}, VerdictReturn, nil),
+			Chain:    chain,
+			Selector: Selector{SrcCIDR: cidr},
+			Verdict:  VerdictReturn,
+			Priority: -100,
+		})
+	}
+
+	for _, rule := range a.rules {
+		verdict := levelToVerdict(rule.level)
+		cap := levelToCapability(rule.level)
+		plan.Rules = append(plan.Rules, RulePlan{
+			ID:       RuleID(a.ID(), cap, Selector{SrcIP: rule.srcIP}, verdict, nil),
+			Chain:    chain,
+			Selector: Selector{SrcIP: rule.srcIP},
+			Verdict:  verdict,
+		})
+	}
+	return plan
 }
 
-/* ── Capability construction ─────────────────────────────────────────────── */
+/* ── TTL GC ──────────────────────────────────────────────────────────────── */
 
-// buildCapabilities returns the capability slice reflecting what was probed.
-// Capabilities are declared conditionally — only what the backend can actually do.
+func (a *Adapter) gcLoop(ctx context.Context) {
+	ticker := time.NewTicker(30 * time.Second)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			a.gcExpired(ctx)
+		}
+	}
+}
+
+func (a *Adapter) gcExpired(ctx context.Context) {
+	a.mu.Lock()
+	now := time.Now()
+	removed := 0
+	for k, r := range a.rules {
+		if !r.expires.IsZero() && now.After(r.expires) {
+			delete(a.rules, k)
+			removed++
+		}
+	}
+	if removed == 0 {
+		a.mu.Unlock()
+		return
+	}
+	plan := a.buildPlan()
+	a.mu.Unlock()
+
+	logger.Printf("GC: expired %d rules", removed)
+	if err := a.backend.Apply(ctx, plan); err != nil {
+		logger.Printf("GC apply error: %v", err)
+	}
+}
+
+/* ── helpers ─────────────────────────────────────────────────────────────── */
+
+func levelToVerdict(level fsm.Level) Verdict {
+	switch level {
+	case fsm.LevelBlock:
+		return VerdictDrop
+	case fsm.LevelSoft, fsm.LevelHard:
+		// Phase 4: will use hashlimit/nft meter; for now DROP is the safe fallback.
+		return VerdictDrop
+	default:
+		return VerdictReturn
+	}
+}
+
+func levelToCapability(level fsm.Level) string {
+	switch level {
+	case fsm.LevelBlock:
+		return "enforce.network.deny"
+	case fsm.LevelSoft, fsm.LevelHard:
+		return "enforce.network.rate_limit"
+	default:
+		return "enforce.network.allow"
+	}
+}
+
 func buildCapabilities(p ProbeResult, cfg Config) []*capability.Capability {
 	var caps []*capability.Capability
 
-	// enforce.network.deny — always available when any backend is selected.
 	caps = append(caps, capability.NewCapability(
 		"enforce.network.deny", "v1",
 		capability.TypeEnforcement, capability.LayerL3L4, capability.DirectionOutput,
 		"Drop traffic from a source IP or CIDR via Netfilter",
 	).AddTag("network").AddTag("enforcement").AddTag("netfilter"))
 
-	// enforce.network.allow — always available.
 	caps = append(caps, capability.NewCapability(
 		"enforce.network.allow", "v1",
 		capability.TypeEnforcement, capability.LayerL3L4, capability.DirectionOutput,
 		"Allow or return traffic from a source IP or CIDR via Netfilter",
 	).AddTag("network").AddTag("enforcement").AddTag("netfilter"))
 
-	// enforce.network.rate_limit — conditional on hashlimit (iptables) or meters (nftables).
 	if cfg.Enforcement.EnableRateLimit {
-		hasRateLimit := (p.Selected == BackendNFTables && p.NFTables.Meters) ||
+		hasRL := (p.Selected == BackendNFTables && p.NFTables.Meters) ||
 			(p.Selected != BackendNFTables && p.IPTables.HasLimit)
-		if hasRateLimit {
+		if hasRL {
 			caps = append(caps, capability.NewCapability(
 				"enforce.network.rate_limit", "v1",
 				capability.TypeEnforcement, capability.LayerL3L4, capability.DirectionOutput,
@@ -185,21 +312,35 @@ func buildCapabilities(p ProbeResult, cfg Config) []*capability.Capability {
 		}
 	}
 
-	// observe.network.rule_counters — available when enforcement is active.
 	caps = append(caps, capability.NewCapability(
 		"observe.network.rule_counters", "v1",
 		capability.TypeTelemetry, capability.LayerL3L4, capability.DirectionOutput,
 		"Read packet/byte counters from Netfilter rules and sets",
 	).AddTag("network").AddTag("telemetry").AddTag("netfilter"))
 
-	// observe.network.flow_edges — conditional on conntrack.
 	if p.Conntrack.Available {
 		caps = append(caps, capability.NewCapability(
 			"observe.network.flow_edges", "v1",
 			capability.TypeTelemetry, capability.LayerL3L4, capability.DirectionOutput,
-			"Observe L3/L4 communication edges for graph learning via conntrack",
+			"Observe L3/L4 flow edges for graph learning via conntrack",
 		).AddTag("network").AddTag("telemetry").AddTag("netfilter").AddTag("conntrack"))
 	}
-
 	return caps
+}
+
+func logProbe(p ProbeResult) {
+	if p.NFTables.Available {
+		logger.Printf("nftables: path=%s json=%v", p.NFTables.Path, p.NFTables.JSONOutput)
+	} else {
+		logger.Printf("nftables: not available")
+	}
+	if p.IPTables.Available {
+		logger.Printf("iptables: path=%s backend=%s ipset=%v hashlimit=%v",
+			p.IPTables.Path, p.IPTables.Backend,
+			p.IPTables.IPSet.Available, p.IPTables.HasLimit)
+	} else {
+		logger.Printf("iptables: not available")
+	}
+	logger.Printf("conntrack: available=%v accounting=%v",
+		p.Conntrack.Available, p.Conntrack.Accounting)
 }

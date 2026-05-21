@@ -379,12 +379,15 @@ func main() {
 		}
 	}
 
-	// Open Shield eBPF maps via shieldclient.
+	// Open Shield eBPF maps — optional. kliq runs without klshield when the
+	// maps are unavailable (e.g. netfilter-only or observation-only deployments).
 	maps, err := shieldclient.Open(c.BPFfsRoot, c.DryRun)
 	if err != nil {
-		log.Fatalf("open BPF maps: %v", err)
+		kliqLog.Printf("WARNING: klshield maps not available (%v) — running without XDP enforcement", err)
+		maps = nil
+	} else {
+		defer maps.Close()
 	}
-	defer maps.Close()
 
 	// Resolve node ID (shared by heuristic engine and graph learner).
 	nodeID := c.GraphNodeID
@@ -396,16 +399,29 @@ func main() {
 		}
 	}
 
-	// Create the Shield PEP adapter (synchronous enforcement).
-	pep := shieldpep.New(maps, c.DryRun)
-	if err := pep.Init(context.Background(), nil); err != nil {
-		log.Fatalf("init shield pep: %v", err)
+	// Create the Shield PEP adapter — nil maps = no-op enforcement (all BPF
+	// writes are skipped, state transitions still recorded in memory).
+	var pep *shieldpep.Adapter
+	if maps != nil {
+		pep = shieldpep.New(maps, c.DryRun)
+		if err := pep.Init(context.Background(), nil); err != nil {
+			kliqLog.Printf("WARNING: shield pep init failed: %v — continuing without XDP enforcement", err)
+			pep = nil
+		}
 	}
 
 	// Central enforcement pipeline: resolver is the policy gate; executor is the
 	// only component authorized to call TransitionV4/V6.
 	resolver := c.buildPolicyResolver()
 	executor := buildExecutor(pep)
+
+	// Netfilter adapter — optional additional PEP. Active when netfilter tools
+	// are available. Registered as a sidecar so it mirrors every enforcement
+	// decision alongside (or instead of) klshield.
+	if nfAdapter := initNetfilterAdapter(context.Background(), c); nfAdapter != nil {
+		executor.AddSidecar(nfAdapter)
+		kliqLog.Printf("Netfilter adapter active: backend=%s dry_run=%v", nfAdapter.SelectedBackend(), c.DryRun)
+	}
 
 	// Runtime inventory and config-asset report is logged after the LKG bundle
 	// apply (below) so that HasPolicyPack and ProfileName reflect the restored state.
@@ -484,8 +500,11 @@ func main() {
 
 	// Runtime inventory and config-asset report — built after LKG bundle apply
 	// so that HasPolicyPack and ProfileName reflect the restored state.
-	inv := pep.BuildInventory(nodeID)
 	report := buildConfigAssetReport(c, nodeID, features)
+	inv := buildEmptyInventory(nodeID)
+	if pep != nil {
+		inv = pep.BuildInventory(nodeID)
+	}
 	logInventoryAndReport(inv, report, c.StatePath)
 
 	// tupleActive is set after edge-map probe and read by the heartbeat goroutine.
@@ -630,8 +649,8 @@ func main() {
 	// after kliq started (or tuple support was activated post-startup).
 	// If maps are still unavailable, degrade gracefully to graph-learning behavior
 	// (graph learning + baselines still work; only XDP tuple drops are skipped).
-	if features.TupleEnforcement {
-		if !pep.TupleAvailable() {
+	if features.TupleEnforcement && pep != nil {
+		if !pep.TupleAvailable() && maps != nil {
 			maps.TryOpenEdgeMaps(c.BPFfsRoot)
 		}
 		if pep.TupleAvailable() {
@@ -737,7 +756,7 @@ func main() {
 					// Tuple enforcement (graph-enforce profile): deny the specific
 					// (src, dst_port, proto) tuple via the ActionResolver instead of
 					// calling pep.DenyEdge4 directly.
-					if features.TupleEnforcement && sig.Score >= 90 && pep.TupleAvailable() {
+					if features.TupleEnforcement && sig.Score >= 90 && pep != nil && pep.TupleAvailable() {
 						portStr := sig.Attributes["destination_port"]
 						proto := sig.Attributes["protocol"]
 						var port uint64
@@ -933,7 +952,7 @@ func main() {
 	// activating allow-mode (tuple-enforce allow). Also run periodically so newly
 	// approved edges are picked up without restarting KLIQ.
 	syncEdge4Allow := func() {
-		if graphStore == nil || !pep.TupleAvailable() {
+		if graphStore == nil || pep == nil || !pep.TupleAvailable() {
 			return
 		}
 		edges, err := graphStore.ListByNode(nodeID, "")
@@ -992,8 +1011,8 @@ func main() {
 	if bs.Enabled && bs.Phase != "" {
 		bootstrapPhase = bs.Phase
 	}
-	kliqLog.Printf("Kernloom IQ started profile=%s bootstrap=%s interval=%s dry_run=%v top=%d trig{pps=%.1f bps=%s syn=%.1f scan=%.1f} weights{pps=%.2f bps=%.2f syn=%.2f scan=%.2f} cap=%.1f (ipv6=%v)",
-		p.Name, bootstrapPhase, c.Interval.String(), c.DryRun, c.TopN, c.TrigPPS, fmtBPS(c.TrigBPS), c.TrigSyn, c.TrigScan, c.WPPS, c.WBps, c.WSyn, c.WScan, c.SevCap, maps.Src6 != nil)
+	kliqLog.Printf("Kernloom IQ started profile=%s bootstrap=%s interval=%s dry_run=%v top=%d trig{pps=%.1f bps=%s syn=%.1f scan=%.1f} weights{pps=%.2f bps=%.2f syn=%.2f scan=%.2f} cap=%.1f (klshield=%v ipv6=%v)",
+		p.Name, bootstrapPhase, c.Interval.String(), c.DryRun, c.TopN, c.TrigPPS, fmtBPS(c.TrigBPS), c.TrigSyn, c.TrigScan, c.WPPS, c.WBps, c.WSyn, c.WScan, c.SevCap, maps != nil, maps != nil && maps.Src6 != nil)
 
 	for {
 		select {
@@ -1045,16 +1064,18 @@ func main() {
 		wl.maybeReload(c.WhitelistReload)
 		fb.maybeReload(c.FeedbackReload)
 
-		fb.applyV4(nowWall, maps.Deny4, maps.RL4, state4, c.DryRun)
-		fb.applyV6(nowWall, maps.Deny6, maps.RL6, state6, c.DryRun)
+		if maps != nil {
+			fb.applyV4(nowWall, maps.Deny4, maps.RL4, state4, c.DryRun)
+			fb.applyV6(nowWall, maps.Deny6, maps.RL6, state6, c.DryRun)
 
-		if c.FeedbackCIDRDeenforce {
-			fb.applyCIDRsIfDue(nowWall, maps.Deny4, maps.RL4, state4, maps.Deny6, maps.RL6, state6, c.DryRun, c.FeedbackCIDREvery, c.FeedbackCIDRMax)
+			if c.FeedbackCIDRDeenforce {
+				fb.applyCIDRsIfDue(nowWall, maps.Deny4, maps.RL4, state4, maps.Deny6, maps.RL6, state6, c.DryRun, c.FeedbackCIDREvery, c.FeedbackCIDRMax)
+			}
 		}
 
 		// Compute drop ratio for learn gating.
 		dropRatio := 0.0
-		if maps.Totals != nil && !prevTotalsWall.IsZero() {
+		if maps != nil && maps.Totals != nil && !prevTotalsWall.IsZero() {
 			if t, err := shieldclient.ReadTotalsSum(maps.Totals); err == nil {
 				sec := nowWall.Sub(prevTotalsWall).Seconds()
 				if sec > 0 {
@@ -1078,150 +1099,152 @@ func main() {
 			celVarBuf = make(map[string]any, 8)
 		}
 
-		// ----- Iterate v4 sources -----
-		it4 := maps.Src4.Iterate()
-		var k4 [4]byte
-		var v4 shieldclient.SrcStatsV4
+		// ----- Iterate v4 sources (skipped when klshield unavailable) -----
+		if maps != nil && maps.Src4 != nil {
+			it4 := maps.Src4.Iterate()
+			var k4 [4]byte
+			var v4 shieldclient.SrcStatsV4
 
-		for it4.Next(&k4, &v4) {
-			pv, ok := prev4[k4]
-			if !ok {
-				prev4[k4] = prevV4{Pkts: v4.Pkts, Bytes: v4.Bytes, Syn: v4.Syn, Scan: v4.DportChanges, DropRL: v4.DropRL, LastWall: nowWall}
-				continue
-			}
-
-			sec := nowWall.Sub(pv.LastWall).Seconds()
-			if sec <= 0 {
-				sec = c.Interval.Seconds()
-				if sec <= 0 {
-					sec = 1
+			for it4.Next(&k4, &v4) {
+				pv, ok := prev4[k4]
+				if !ok {
+					prev4[k4] = prevV4{Pkts: v4.Pkts, Bytes: v4.Bytes, Syn: v4.Syn, Scan: v4.DportChanges, DropRL: v4.DropRL, LastWall: nowWall}
+					continue
 				}
-			}
 
-			// Counter-reset guard: if any of the eBPF counters appears to have
-			// shrunk (e.g. after `klshield reset`), reseed prev and skip the tick.
-			// Without this, uint64 wraparound produces deltas ≈ 2^64 → instant BLOCK.
-			if v4.Pkts < pv.Pkts || v4.Bytes < pv.Bytes || v4.Syn < pv.Syn ||
-				v4.DportChanges < pv.Scan || v4.DropRL < pv.DropRL {
+				sec := nowWall.Sub(pv.LastWall).Seconds()
+				if sec <= 0 {
+					sec = c.Interval.Seconds()
+					if sec <= 0 {
+						sec = 1
+					}
+				}
+
+				// Counter-reset guard: if any of the eBPF counters appears to have
+				// shrunk (e.g. after `klshield reset`), reseed prev and skip the tick.
+				// Without this, uint64 wraparound produces deltas ≈ 2^64 → instant BLOCK.
+				if v4.Pkts < pv.Pkts || v4.Bytes < pv.Bytes || v4.Syn < pv.Syn ||
+					v4.DportChanges < pv.Scan || v4.DropRL < pv.DropRL {
+					prev4[k4] = prevV4{Pkts: v4.Pkts, Bytes: v4.Bytes, Syn: v4.Syn, Scan: v4.DportChanges, DropRL: v4.DropRL, LastWall: nowWall}
+					continue
+				}
+
+				dPkts := v4.Pkts - pv.Pkts
+				dBytes := v4.Bytes - pv.Bytes
+				dSyn := v4.Syn - pv.Syn
+				dScan := v4.DportChanges - pv.Scan
+				dDropRL := v4.DropRL - pv.DropRL
+
+				pps := float64(dPkts) / sec
+				bps := float64(dBytes) / sec
+				synRate := float64(dSyn) / sec
+				scanRate := float64(dScan) / sec
+				dropRLRate := float64(dDropRL) / sec
+
+				subject4 := observation.EntityRef{Kind: observation.KindIP, ID: ip4String(k4)}
+
+				// Mirror telemetry into shadow metric pipeline (no enforcement effect).
+				if shadowPipeline.IsActive() {
+					shadowSamples = append(shadowSamples, klshieldshadow.TelemetrySample{
+						SourceIP: subject4.ID, PPS: pps, BPS: bps,
+						SYNRate: synRate, ScanRate: scanRate, DropRLRate: dropRLRate,
+						Window: c.Interval, Timestamp: nowWall,
+					})
+				}
+
+				// Source baseline update + per-source effective thresholds.
+				var fsmM4 fsm.Metrics
+				var sigs4 []signal.Signal
+				if srcBL != nil {
+					srcBL.Update(subject4.ID, pps, bps, synRate, scanRate, false, nowWall)
+					effPPS := srcBL.EffectiveTrigPPS(subject4.ID, c.TrigPPS)
+					effBPS := srcBL.EffectiveTrigBPS(subject4.ID, c.TrigBPS)
+					fsmM4, sigs4 = engine.EvaluateAt(subject4, pps, bps, synRate, scanRate, dropRLRate,
+						effPPS, c.TrigSyn, c.TrigScan, effBPS)
+				} else {
+					fsmM4, sigs4 = engine.Evaluate(subject4, pps, bps, synRate, scanRate, dropRLRate)
+				}
+				for _, sig := range sigs4 {
+					_ = mainBus.PublishSignal(context.Background(), sig)
+				}
+
+				// CEL rule evaluation (v1.2 packs): fire ActionProposals directly when
+				// the expression matches this source this tick. Runs independently of the
+				// FSM candidate path — CEL rules can fire even for low-PPS sources.
+				// celVarBuf is allocated once per source and reused across rules.
+				if len(c.CELRules) > 0 {
+					var blProfile sourcebaseline.Profile
+					var blOk bool
+					if srcBL != nil {
+						blProfile, blOk = srcBL.Get(subject4.ID)
+					}
+					sigs := &celeval.SourceSignals{
+						PPS: pps, BPS: bps, SynRate: synRate, ScanRate: scanRate,
+						HasBaseline:   blOk,
+						EWMAPPS:       blProfile.EWMAPPS,
+						EWMABPS:       blProfile.EWMABPS,
+						EWMASyn:       blProfile.EWMASyn,
+						Confidence:    blProfile.Confidence,
+						Promoted:      blProfile.Promoted,
+						GlobalTrigPPS: c.TrigPPS,
+						GlobalTrigBPS: c.TrigBPS,
+					}
+					st4 := state4[k4]
+					for _, rule := range c.CELRules {
+						if !rule.Evaluate(sigs, celVarBuf) {
+							continue
+						}
+						proposal := actions.ActionProposal{
+							Source:        "cel-policy",
+							Reason:        rule.Name,
+							DesiredAction: rule.Capability,
+							DesiredLevel:  rule.Level,
+							Target:        actions.ActionTarget{Granularity: "src_ip", Value: subject4.ID},
+							CreatedAt:     nowWall,
+						}
+						res := resolver.Resolve(proposal)
+						st4, _ = executor.Apply4(k4, st4, res, c.toPEPParams(), nowWall)
+						if res.DenyReason == "" {
+							kliqLog.Printf("CEL rule=%q matched: %s action=%s", rule.Name, subject4.ID, res.ExecutableLevel)
+						}
+						break // first matching rule per source per tick
+					}
+					state4[k4] = st4
+				}
+
+				// Baseline update and deviation check happen in the cands loop below,
+				// after `clean` is computed — same timing as the global autotune.
+
+				if dPkts > 0 || dSyn > 0 || dScan > 0 {
+					seenForLearn++
+					bootstrapDistinctSources[subject4.ID] = true
+					if fsmM4.Severity >= c.LearnSevGT {
+						highSevCount++
+					}
+				}
+
 				prev4[k4] = prevV4{Pkts: v4.Pkts, Bytes: v4.Bytes, Syn: v4.Syn, Scan: v4.DportChanges, DropRL: v4.DropRL, LastWall: nowWall}
-				continue
-			}
 
-			dPkts := v4.Pkts - pv.Pkts
-			dBytes := v4.Bytes - pv.Bytes
-			dSyn := v4.Syn - pv.Syn
-			dScan := v4.DportChanges - pv.Scan
-			dDropRL := v4.DropRL - pv.DropRL
+				// MinSev=0 means "no severity override" — only PPS decides.
+				// MinSev>0 lets a high-severity source bypass the PPS floor.
+				sevOverride := c.MinSev > 0 && fsmM4.Severity >= c.MinSev
+				if pps < c.MinPPS && !sevOverride && dropRLRate == 0 {
+					continue
+				}
 
-			pps := float64(dPkts) / sec
-			bps := float64(dBytes) / sec
-			synRate := float64(dSyn) / sec
-			scanRate := float64(dScan) / sec
-			dropRLRate := float64(dDropRL) / sec
-
-			subject4 := observation.EntityRef{Kind: observation.KindIP, ID: ip4String(k4)}
-
-			// Mirror telemetry into shadow metric pipeline (no enforcement effect).
-			if shadowPipeline.IsActive() {
-				shadowSamples = append(shadowSamples, klshieldshadow.TelemetrySample{
-					SourceIP: subject4.ID, PPS: pps, BPS: bps,
-					SYNRate: synRate, ScanRate: scanRate, DropRLRate: dropRLRate,
-					Window: c.Interval, Timestamp: nowWall,
+				cands = append(cands, metrics{
+					IPVer: 4, IP4: k4,
+					PPS: fsmM4.PPS, Bps: fsmM4.Bps, SynRate: fsmM4.SynRate, ScanRate: fsmM4.ScanRate, DropRLRate: fsmM4.DropRLRate, Severity: fsmM4.Severity,
 				})
 			}
-
-			// Source baseline update + per-source effective thresholds.
-			var fsmM4 fsm.Metrics
-			var sigs4 []signal.Signal
-			if srcBL != nil {
-				srcBL.Update(subject4.ID, pps, bps, synRate, scanRate, false, nowWall)
-				effPPS := srcBL.EffectiveTrigPPS(subject4.ID, c.TrigPPS)
-				effBPS := srcBL.EffectiveTrigBPS(subject4.ID, c.TrigBPS)
-				fsmM4, sigs4 = engine.EvaluateAt(subject4, pps, bps, synRate, scanRate, dropRLRate,
-					effPPS, c.TrigSyn, c.TrigScan, effBPS)
-			} else {
-				fsmM4, sigs4 = engine.Evaluate(subject4, pps, bps, synRate, scanRate, dropRLRate)
-			}
-			for _, sig := range sigs4 {
-				_ = mainBus.PublishSignal(context.Background(), sig)
-			}
-
-			// CEL rule evaluation (v1.2 packs): fire ActionProposals directly when
-			// the expression matches this source this tick. Runs independently of the
-			// FSM candidate path — CEL rules can fire even for low-PPS sources.
-			// celVarBuf is allocated once per source and reused across rules.
-			if len(c.CELRules) > 0 {
-				var blProfile sourcebaseline.Profile
-				var blOk bool
-				if srcBL != nil {
-					blProfile, blOk = srcBL.Get(subject4.ID)
-				}
-				sigs := &celeval.SourceSignals{
-					PPS: pps, BPS: bps, SynRate: synRate, ScanRate: scanRate,
-					HasBaseline:   blOk,
-					EWMAPPS:       blProfile.EWMAPPS,
-					EWMABPS:       blProfile.EWMABPS,
-					EWMASyn:       blProfile.EWMASyn,
-					Confidence:    blProfile.Confidence,
-					Promoted:      blProfile.Promoted,
-					GlobalTrigPPS: c.TrigPPS,
-					GlobalTrigBPS: c.TrigBPS,
-				}
-				st4 := state4[k4]
-				for _, rule := range c.CELRules {
-					if !rule.Evaluate(sigs, celVarBuf) {
-						continue
-					}
-					proposal := actions.ActionProposal{
-						Source:        "cel-policy",
-						Reason:        rule.Name,
-						DesiredAction: rule.Capability,
-						DesiredLevel:  rule.Level,
-						Target:        actions.ActionTarget{Granularity: "src_ip", Value: subject4.ID},
-						CreatedAt:     nowWall,
-					}
-					res := resolver.Resolve(proposal)
-					st4, _ = executor.Apply4(k4, st4, res, c.toPEPParams(), nowWall)
-					if res.DenyReason == "" {
-						kliqLog.Printf("CEL rule=%q matched: %s action=%s", rule.Name, subject4.ID, res.ExecutableLevel)
-					}
-					break // first matching rule per source per tick
-				}
-				state4[k4] = st4
-			}
-
-			// Baseline update and deviation check happen in the cands loop below,
-			// after `clean` is computed — same timing as the global autotune.
-
-			if dPkts > 0 || dSyn > 0 || dScan > 0 {
-				seenForLearn++
-				bootstrapDistinctSources[subject4.ID] = true
-				if fsmM4.Severity >= c.LearnSevGT {
-					highSevCount++
-				}
-			}
-
-			prev4[k4] = prevV4{Pkts: v4.Pkts, Bytes: v4.Bytes, Syn: v4.Syn, Scan: v4.DportChanges, DropRL: v4.DropRL, LastWall: nowWall}
-
-			// MinSev=0 means "no severity override" — only PPS decides.
-			// MinSev>0 lets a high-severity source bypass the PPS floor.
-			sevOverride := c.MinSev > 0 && fsmM4.Severity >= c.MinSev
-			if pps < c.MinPPS && !sevOverride && dropRLRate == 0 {
+			if err := it4.Err(); err != nil {
+				kliqLog.Printf("iterate src4 map err: %v", err)
 				continue
 			}
-
-			cands = append(cands, metrics{
-				IPVer: 4, IP4: k4,
-				PPS: fsmM4.PPS, Bps: fsmM4.Bps, SynRate: fsmM4.SynRate, ScanRate: fsmM4.ScanRate, DropRLRate: fsmM4.DropRLRate, Severity: fsmM4.Severity,
-			})
-		}
-		if err := it4.Err(); err != nil {
-			kliqLog.Printf("iterate src4 map err: %v", err)
-			continue
-		}
+		} // end if maps.Src4 != nil
 
 		// ----- Iterate v6 sources -----
-		if maps.Src6 != nil {
+		if maps != nil && maps.Src6 != nil {
 			it6 := maps.Src6.Iterate()
 			var k6 shieldclient.Src6Key
 			var v6 shieldclient.SrcStatsV6
