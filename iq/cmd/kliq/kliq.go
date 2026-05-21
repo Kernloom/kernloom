@@ -855,11 +855,13 @@ func main() {
 		graphStore = gs
 
 		// Shield telemetry adapter publishes flow observations onto the shared mainBus.
+		// Only created when klshield maps are available — when running netfilter-only,
+		// the conntrack observer (started via nfAdapter.Start) feeds the bus instead.
 		telAdapter := shieldtelemetry.NewFromMaps(shieldtelemetry.Config{
 			Interval: c.Interval,
 			NodeID:   nodeID,
 			PrevTTL:  c.PrevTTL,
-		}, maps)
+		}, maps) // maps may be nil; Start() is guarded below
 
 		mode := graphlearner.ModeLearn
 		switch c.GraphMode {
@@ -917,16 +919,24 @@ func main() {
 
 		gctx, cancel := context.WithCancel(context.Background())
 		graphCtxCancel = cancel
-		if err := telAdapter.Start(gctx, mainBus); err != nil {
-			cancel()
-			log.Fatalf("start graph telemetry adapter: %v", err)
+
+		// Shield telemetry only starts when klshield maps are available.
+		// In netfilter-only mode the conntrack observer feeds the bus instead.
+		if maps != nil && maps.Src4 != nil {
+			if err := telAdapter.Start(gctx, mainBus); err != nil {
+				cancel()
+				log.Fatalf("start graph telemetry adapter: %v", err)
+			}
+			defer telAdapter.Stop(context.Background())
+		} else {
+			kliqLog.Printf("Graph: klshield maps unavailable — graph observations via conntrack only")
 		}
+
 		if err := learner.Start(gctx, mainBus); err != nil {
 			cancel()
 			log.Fatalf("start graph learner: %v", err)
 		}
 		defer func() {
-			telAdapter.Stop(context.Background())
 			learner.Stop(context.Background())
 			cancel()
 		}()
