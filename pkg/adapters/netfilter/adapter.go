@@ -114,13 +114,14 @@ func (a *Adapter) Start(ctx context.Context, bus adapterruntime.EventBus) error 
 	if a.probe.Conntrack.Available && a.cfg.Observation.ConntrackSnapshot {
 		cfg := conntrack.Config{
 			ConntrackPath: a.probe.Conntrack.Path,
+			ProcPath:      a.probe.Conntrack.ProcPath,
 			PollInterval:  a.cfg.Observation.ConntrackPollInterval,
 			MaxFlows:      a.cfg.Observation.MaxObservationsPerTick,
 		}
 		obs, err := conntrack.New(cfg)
 		if err == nil {
 			go obs.Start(ctx, bus)
-			logger.Printf("conntrack observer started (poll=%s)", cfg.PollInterval)
+			logger.Printf("conntrack observer started: source=%s poll=%s", obs.Source(), cfg.PollInterval)
 		} else {
 			logger.Printf("conntrack observer unavailable: %v", err)
 		}

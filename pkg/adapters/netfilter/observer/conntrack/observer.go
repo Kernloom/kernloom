@@ -36,6 +36,11 @@ type Config struct {
 	// Empty = auto-detected via PATH.
 	ConntrackPath string
 
+	// ProcPath is an explicit path to /proc/net/nf_conntrack or /proc/net/ip_conntrack.
+	// Used as fallback when the conntrack binary is absent (e.g. Synology DSM).
+	// Empty = auto-detected by New() when binary not found.
+	ProcPath string
+
 	// PollInterval controls how often conntrack -L is run.
 	// Default: 5s.
 	PollInterval time.Duration
@@ -56,34 +61,65 @@ func DefaultConfig() Config {
 	}
 }
 
-// Observer polls conntrack and publishes flow observations on the event bus.
-type Observer struct {
-	cfg  Config
-	path string // resolved conntrack binary path
+// procPaths lists the known locations of the kernel conntrack proc file.
+var procPaths = []string{
+	"/proc/net/nf_conntrack",
+	"/proc/net/ip_conntrack", // older kernels
 }
 
-// New creates a new Observer. Returns an error if conntrack is not available.
+// Observer polls conntrack and publishes flow observations on the event bus.
+// It prefers the conntrack(8) binary but falls back to reading the kernel
+// proc file (/proc/net/nf_conntrack) directly when the binary is absent.
+// This makes it usable on Synology DSM and other minimal Linux systems.
+type Observer struct {
+	cfg      Config
+	path     string // conntrack binary path (empty when using proc)
+	procPath string // /proc/net/nf_conntrack path (empty when using binary)
+}
+
+// New creates a new Observer.
+// Priority: conntrack binary > /proc/net/nf_conntrack > /proc/net/ip_conntrack.
+// Returns an error only when neither source is available.
 func New(cfg Config) (*Observer, error) {
-	path := cfg.ConntrackPath
-	if path == "" {
-		var err error
-		path, err = exec.LookPath("conntrack")
-		if err != nil {
-			return nil, err
-		}
-	} else {
-		// Verify explicit path is executable.
-		if _, err := exec.LookPath(path); err != nil {
-			return nil, fmt.Errorf("conntrack binary not found at %q: %w", path, err)
-		}
-	}
 	if cfg.PollInterval == 0 {
 		cfg.PollInterval = DefaultConfig().PollInterval
 	}
 	if cfg.MaxFlows == 0 {
 		cfg.MaxFlows = DefaultConfig().MaxFlows
 	}
-	return &Observer{cfg: cfg, path: path}, nil
+
+	// Try the binary first.
+	binPath := cfg.ConntrackPath
+	if binPath == "" {
+		binPath, _ = exec.LookPath("conntrack")
+	} else if _, err := exec.LookPath(binPath); err != nil {
+		binPath = ""
+	}
+	if binPath != "" {
+		return &Observer{cfg: cfg, path: binPath}, nil
+	}
+
+	// Fall back to proc file — either explicitly configured or auto-detected.
+	candidates := procPaths
+	if cfg.ProcPath != "" {
+		candidates = []string{cfg.ProcPath}
+	}
+	for _, p := range candidates {
+		if _, err := os.Stat(p); err == nil {
+			logger.Printf("conntrack binary not found — reading %s directly", p)
+			return &Observer{cfg: cfg, procPath: p}, nil
+		}
+	}
+
+	return nil, fmt.Errorf("conntrack unavailable: binary not found and /proc/net/nf_conntrack does not exist")
+}
+
+// Source returns a human-readable description of the data source.
+func (o *Observer) Source() string {
+	if o.path != "" {
+		return "conntrack-binary:" + o.path
+	}
+	return "proc:" + o.procPath
 }
 
 // Start runs the poll loop until ctx is cancelled.
@@ -121,8 +157,35 @@ func (o *Observer) poll(ctx context.Context, bus adapterruntime.EventBus) {
 	}
 }
 
-// snapshot runs "conntrack -L" and returns parsed flows.
+// snapshot returns all current flows from the best available source.
 func (o *Observer) snapshot(ctx context.Context) ([]Flow, error) {
+	if o.procPath != "" {
+		return o.snapshotFromProc()
+	}
+	return o.snapshotFromBinary(ctx)
+}
+
+// snapshotFromProc reads /proc/net/nf_conntrack directly.
+func (o *Observer) snapshotFromProc() ([]Flow, error) {
+	f, err := os.Open(o.procPath)
+	if err != nil {
+		return nil, fmt.Errorf("open %s: %w", o.procPath, err)
+	}
+	defer f.Close()
+
+	var flows []Flow
+	scanner := bufio.NewScanner(f)
+	for scanner.Scan() {
+		line := scanner.Text()
+		if f, ok := parseNFConntrackLine(line); ok {
+			flows = append(flows, f)
+		}
+	}
+	return flows, scanner.Err()
+}
+
+// snapshotFromBinary runs "conntrack -L" and returns parsed flows.
+func (o *Observer) snapshotFromBinary(ctx context.Context) ([]Flow, error) {
 	cmd := exec.CommandContext(ctx, o.path, "-L")
 	out, err := cmd.StdoutPipe()
 	if err != nil {
@@ -187,6 +250,29 @@ func flowToObservation(f Flow, nodeID string) observation.Observation {
 		obs.SetAttribute("bytes", strconv.FormatUint(f.Bytes, 10))
 	}
 	return obs
+}
+
+// parseNFConntrackLine parses one line from /proc/net/nf_conntrack.
+//
+// The proc format prepends two extra fields vs. conntrack -L:
+//
+//	ipv4  2  tcp  6  431988 ESTABLISHED src=10.0.0.2 dst=10.0.0.1 ...
+//	ipv4  2  udp  17  30 src=10.0.0.2 dst=8.8.8.8 ...
+//
+// Fields [0] and [1] are the L3 family name/number — we strip them and
+// delegate to parseLine which handles the rest identically.
+func parseNFConntrackLine(line string) (Flow, bool) {
+	line = strings.TrimSpace(line)
+	if line == "" || strings.HasPrefix(line, "#") {
+		return Flow{}, false
+	}
+	fields := strings.Fields(line)
+	// Need at least: l3proto l3num l4proto l4num timeout [fields...]
+	if len(fields) < 6 {
+		return Flow{}, false
+	}
+	// Reconstruct the line from field [2] (l4proto) onwards.
+	return parseLine(strings.Join(fields[2:], " "))
 }
 
 // parseLine parses one line of "conntrack -L" output.

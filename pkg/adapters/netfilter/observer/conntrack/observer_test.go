@@ -152,6 +152,48 @@ func TestIsConnState(t *testing.T) {
 	}
 }
 
+func TestParseNFConntrackLine_TCP(t *testing.T) {
+	// /proc/net/nf_conntrack format: l3proto l3num l4proto l4num timeout [state] key=val...
+	line := `ipv4     2 tcp      6 431988 ESTABLISHED src=10.0.0.2 dst=10.0.0.1 sport=54321 dport=22 packets=10 bytes=1024 src=10.0.0.1 dst=10.0.0.2 sport=22 dport=54321 packets=8 bytes=2048 [ASSURED] mark=0 zone=0 use=2`
+	f, ok := parseNFConntrackLine(line)
+	if !ok {
+		t.Fatal("expected parse to succeed")
+	}
+	if f.Proto != "tcp" {
+		t.Errorf("proto: want tcp, got %q", f.Proto)
+	}
+	if f.SrcIP != "10.0.0.2" {
+		t.Errorf("src: want 10.0.0.2, got %q", f.SrcIP)
+	}
+	if f.DstPort != 22 {
+		t.Errorf("dport: want 22, got %d", f.DstPort)
+	}
+	if f.State != "ESTABLISHED" {
+		t.Errorf("state: want ESTABLISHED, got %q", f.State)
+	}
+	if f.Packets != 10 {
+		t.Errorf("packets: want 10 (original direction), got %d", f.Packets)
+	}
+}
+
+func TestParseNFConntrackLine_UDP(t *testing.T) {
+	line := `ipv4     2 udp      17 30 src=10.0.0.2 dst=8.8.8.8 sport=12345 dport=53 packets=1 bytes=60 src=8.8.8.8 dst=10.0.0.2 sport=53 dport=12345 packets=1 bytes=100 mark=0 zone=0 use=1`
+	f, ok := parseNFConntrackLine(line)
+	if !ok {
+		t.Fatal("expected UDP proc line to parse")
+	}
+	if f.Proto != "udp" || f.DstPort != 53 {
+		t.Errorf("want udp:53, got %s:%d", f.Proto, f.DstPort)
+	}
+}
+
+func TestParseNFConntrackLine_TooShort(t *testing.T) {
+	_, ok := parseNFConntrackLine("ipv4 2 tcp")
+	if ok {
+		t.Error("too-short line should not parse")
+	}
+}
+
 func TestNewObserver_NoBinary(t *testing.T) {
 	cfg := Config{ConntrackPath: "/nonexistent/conntrack"}
 	_, err := New(cfg)

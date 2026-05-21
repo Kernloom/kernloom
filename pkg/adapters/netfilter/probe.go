@@ -5,6 +5,7 @@ package netfilter
 
 import (
 	"context"
+	"os"
 	"os/exec"
 	"strings"
 )
@@ -54,11 +55,12 @@ type IPSetProbe struct {
 	Counters  bool // ipset supports counters flag
 }
 
-// ConntrackProbe holds conntrack tool availability.
+// ConntrackProbe holds conntrack tool and proc availability.
 type ConntrackProbe struct {
 	Available  bool
-	Path       string
-	Accounting bool // /proc/sys/net/netfilter/nf_conntrack_acct == 1
+	Path       string // conntrack binary path (empty when using proc)
+	ProcPath   string // /proc/net/nf_conntrack path (empty when using binary)
+	Accounting bool   // /proc/sys/net/netfilter/nf_conntrack_acct == 1
 }
 
 // Probe detects available Netfilter backends and features.
@@ -181,17 +183,34 @@ func probeIPSet(ctx context.Context) IPSetProbe {
 
 func probeConntrack(ctx context.Context) ConntrackProbe {
 	p := ConntrackProbe{}
-	path, err := exec.LookPath("conntrack")
-	if err != nil {
-		return p
-	}
-	p.Path = path
 
-	out, err := runCmd(ctx, path, "--version")
-	if err != nil || out == "" {
+	// Try the conntrack binary first.
+	if path, err := exec.LookPath("conntrack"); err == nil {
+		if out, err := runCmd(ctx, path, "--version"); err == nil && out != "" {
+			p.Path = path
+			p.Available = true
+		}
+	}
+
+	// Fall back to /proc/net/nf_conntrack (available even without the binary).
+	// This is the case on Synology DSM and other minimal Linux systems where
+	// the kernel has nf_conntrack loaded but the conntrack-tools package is absent.
+	if !p.Available {
+		for _, procPath := range []string{
+			"/proc/net/nf_conntrack",
+			"/proc/net/ip_conntrack",
+		} {
+			if _, err := os.Stat(procPath); err == nil {
+				p.Available = true
+				p.ProcPath = procPath
+				break
+			}
+		}
+	}
+
+	if !p.Available {
 		return p
 	}
-	p.Available = true
 
 	// Check if conntrack accounting is enabled.
 	acct, err := readFile("/proc/sys/net/netfilter/nf_conntrack_acct")
