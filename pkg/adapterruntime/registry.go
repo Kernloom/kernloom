@@ -98,6 +98,23 @@ func (r *Registry) All() []*capability.Capability {
 	return out
 }
 
+// ByCapability returns all adapters that have registered a given capability ID.
+func (r *Registry) ByCapability(capabilityID string) []string {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	var out []string
+	for adapterID, caps := range r.byAdapter {
+		for _, c := range caps {
+			if c.ID == capabilityID {
+				out = append(out, adapterID)
+				break
+			}
+		}
+	}
+	return out
+}
+
 // ByAdapter returns the capabilities registered by a specific adapter.
 func (r *Registry) ByAdapter(adapterID string) []*capability.Capability {
 	r.mu.RLock()
