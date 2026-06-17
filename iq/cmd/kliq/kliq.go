@@ -41,6 +41,7 @@ import (
 	"os"
 	ossignal "os/signal"
 	"sort"
+	"strconv"
 	"syscall"
 	"time"
 
@@ -48,29 +49,33 @@ import (
 	"github.com/kernloom/kernloom/iq/internal/lifecycle/bootstrapautotune"
 	lgraph "github.com/kernloom/kernloom/iq/internal/lifecycle/graph"
 	"github.com/kernloom/kernloom/pkg/adapterruntime"
-	"github.com/kernloom/kernloom/pkg/adapters/graphlearner"
+	"github.com/kernloom/kernloom/pkg/pipeline/graphpipeline"
 	"github.com/kernloom/kernloom/pkg/adapters/klshieldguard"
 	"github.com/kernloom/kernloom/pkg/adapters/klshieldshadow"
 	netfilteradapter "github.com/kernloom/kernloom/pkg/adapters/netfilter"
 	"github.com/kernloom/kernloom/pkg/adapters/shieldpep"
 	"github.com/kernloom/kernloom/pkg/adapters/shieldtelemetry"
-	"github.com/kernloom/kernloom/pkg/adapters/sourcebaseline"
+	"github.com/kernloom/kernloom/pkg/sourcebaseline"
 	"github.com/kernloom/kernloom/pkg/core/bundle"
 	celeval "github.com/kernloom/kernloom/pkg/core/cel"
 	"github.com/kernloom/kernloom/pkg/core/decision"
 	"github.com/kernloom/kernloom/pkg/core/featureset"
 	"github.com/kernloom/kernloom/pkg/core/fsm"
-	"github.com/kernloom/kernloom/pkg/core/graph"
+
 	kliqconfig "github.com/kernloom/kernloom/pkg/core/kliqconfig"
 	"github.com/kernloom/kernloom/pkg/core/observation"
 	corepdp "github.com/kernloom/kernloom/pkg/core/pdp"
 	corepolicy "github.com/kernloom/kernloom/pkg/core/policy"
 	"github.com/kernloom/kernloom/pkg/core/signal"
 	"github.com/kernloom/kernloom/pkg/decisionengine"
-	gstore "github.com/kernloom/kernloom/pkg/graphstore/sqlite"
+	"github.com/kernloom/kernloom/pkg/core/learning"
+	"github.com/kernloom/kernloom/pkg/core/relationship"
+	"github.com/kernloom/kernloom/pkg/learningguard"
 	"github.com/kernloom/kernloom/pkg/pipeline"
+	"github.com/kernloom/kernloom/pkg/relationshiplearner"
 	"github.com/kernloom/kernloom/pkg/shieldclient"
 	"github.com/kernloom/kernloom/pkg/signalengine/shieldheuristic"
+	sstore "github.com/kernloom/kernloom/pkg/statestore/sqlite"
 
 	// Ensure enforcement package is available for future tuple target use.
 	_ "github.com/kernloom/kernloom/pkg/core/enforcement"
@@ -110,16 +115,46 @@ type prevV6 struct {
 
 func main() {
 	// Handle subcommands before flag parsing so they work standalone.
-	const defaultDB = "/var/lib/kernloom/iq/kliq.db"
+	// All read-path subcommands use the state store (kliq-state.db), not the
+	// old graphstore.  --db overrides this default for all subcommands.
+	const defaultStateDB = "/var/lib/kernloom/iq/kliq-state.db"
 	const defaultStateFile = "/var/lib/kernloom/iq/state.json"
+
+	// Allow --db <path> to override the state store path for subcommands.
+	// This must be parsed before handleXxx calls so that e.g.
+	// "kliq graph edges --db /tmp/test.db" works.
+	subCmdDB := defaultStateDB
+	for i, a := range os.Args[1:] {
+		if a == "--db" && i+2 < len(os.Args) {
+			subCmdDB = os.Args[i+2]
+		} else if len(a) > 5 && a[:5] == "--db=" {
+			subCmdDB = a[5:]
+		}
+	}
+
 	if handleGraphSubcommand(
-		defaultDB,
+		subCmdDB,
 		"/opt/kernloom/attested/etc/frozen-graph.yaml",
 		"",
 	) {
 		return
 	}
-	if handleStatusSubcommand(defaultStateFile, defaultDB) {
+	if handleStatusSubcommand(defaultStateFile, subCmdDB) {
+		return
+	}
+	if handleEntitiesSubcommand(subCmdDB) {
+		return
+	}
+	if handleRelationshipsSubcommand(subCmdDB, "") {
+		return
+	}
+	if handleBaselinesGenericSubcommand(subCmdDB) {
+		return
+	}
+	if handleLearningSubcommand(subCmdDB) {
+		return
+	}
+	if handleStorageSubcommand(subCmdDB) {
 		return
 	}
 	c := parseFlags()
@@ -763,7 +798,7 @@ func main() {
 					return
 				}
 				logLine := fmt.Sprintf("SIGNAL type=%s subject=%s score=%d confidence=%d ttl=%s reasons=%v",
-					sig.Type, sig.Subject.ID, sig.Score, sig.Confidence, sig.TTL, sig.ReasonCodes)
+					sig.Type, formatSubject(sig.Subject), sig.Score, sig.Confidence, sig.TTL, sig.ReasonCodes)
 				if len(sig.Attributes) > 0 {
 					keys := make([]string, 0, len(sig.Attributes))
 					for k := range sig.Attributes {
@@ -849,18 +884,17 @@ func main() {
 		}
 	}()
 
-	// Graph learner (optional).
-	var graphStore *gstore.Store
-	var graphCtxCancel context.CancelFunc
-	var learner *graphlearner.Adapter
+	// Graph pipeline (optional) — uses generic relationship learner + state store.
+	var gpAdapter *graphpipeline.Adapter
+	var gpStateStore *sstore.Store
 
 	if c.GraphEnabled {
-		gs, err := gstore.Open(c.GraphStorePath)
-		if err != nil {
-			log.Fatalf("open graph store %s: %v", c.GraphStorePath, err)
+		ss, ssErr := sstore.Open(sstore.DefaultConfig(c.StateStorePath))
+		if ssErr != nil {
+			log.Fatalf("open state store %s: %v", c.StateStorePath, ssErr)
 		}
-		defer gs.Close()
-		graphStore = gs
+		defer ss.Close()
+		gpStateStore = ss
 
 		// Shield telemetry adapter publishes flow observations onto the shared mainBus.
 		// Only created when klshield maps are available — when running netfilter-only,
@@ -869,18 +903,16 @@ func main() {
 			Interval: c.Interval,
 			NodeID:   nodeID,
 			PrevTTL:  c.PrevTTL,
-		}, maps) // maps may be nil; Start() is guarded below
+		}, maps)
 
-		mode := graphlearner.ModeLearn
+		gpMode := graphpipeline.ModeLearn
 		switch c.GraphMode {
 		case "learn", "":
-			mode = graphlearner.ModeLearn
+			gpMode = graphpipeline.ModeLearn
 		case "frozen-observe":
-			mode = graphlearner.ModeFrozenObserve
+			gpMode = graphpipeline.ModeFrozenObserve
 		case "frozen-enforce":
-			mode = graphlearner.ModeFrozenEnforce
-			// frozen-enforce: override decision engine policy so graph signals
-			// trigger immediate PEP enforcement (score=95 meets this threshold).
+			gpMode = graphpipeline.ModeFrozenEnforce
 			decPolicy.GraphFreezeAction = decision.ActionBlock
 			decPolicy.AllowLocalBlock = true
 			decPolicy.MaxAction = decision.ActionBlock
@@ -896,43 +928,74 @@ func main() {
 			kliqLog.Printf("Graph: excluding source CIDRs from learning: %s", c.GraphExcludeSourceCIDR)
 		}
 
-		learner = graphlearner.New(graphlearner.Config{
-			NodeID: nodeID,
-			Mode:   mode,
-			Promotion: graph.PromotionConfig{
-				MinSeenCount:       c.GraphMinSeenCount,
-				MinDistinctWindows: c.GraphMinWindows,
-				MinFirstSeenAge:    c.GraphMinAge,
-			},
-			PromoteInterval:            c.GraphPromoteInterval,
-			ExpireTTL:                  c.GraphExpireTTL,
-			MinPacketsPerTick:          c.GraphMinPackets,
-			MinBytesPerTick:            c.GraphMinBytes,
-			ExcludeBroadcast:           c.GraphExcludeBcast,
-			ExcludeLoopback:            c.GraphExcludeLoopback,
-			ExcludeSourceCIDRs:         excludeCIDRs,
+		var guard learning.Guard = learningguard.New(learningguard.DefaultConfig(), ss, nil)
+		if c.WhitelistLearn {
+			guard = newWhitelistAwareGuard(guard, wl)
+			kliqLog.Printf("Graph: whitelist-aware guard active (whitelisted IPs bypass learning exclusions)")
+		}
+
+		rlCfg := relationshiplearner.DefaultConfig(nodeID)
+		rlCfg.Mode = relationshiplearner.Mode(gpMode)
+		rlCfg.Promotion = relationshiplearner.PromotionConfig{
+			MinSeenCount:       c.GraphMinSeenCount,
+			MinDistinctWindows: c.GraphMinWindows,
+			MinAge:             c.GraphMinAge,
+		}
+		rlLearner := relationshiplearner.New(rlCfg, guard, ss, mainBus)
+		if loadErr := rlLearner.LoadFromStore(context.Background()); loadErr != nil {
+			kliqLog.Printf("WARN: load relationships from store: %v", loadErr)
+		}
+
+		gpAdapter = graphpipeline.New(graphpipeline.Config{
+			NodeID:                     nodeID,
+			Mode:                       gpMode,
+			Promotion:                  rlCfg.Promotion,
 			BaselineAlpha:              c.BaselineAlpha,
 			BaselineAlphaBootstrap:     c.BaselineAlphaBootstrap,
 			BaselineMinObservations:    c.BaselineMinObservations,
-			BaselineMinObsTimeBased:    c.BaselineMinObsTimeBased,
-			BaselineMinAge:             c.BaselineMinAge,
 			BaselineDeviationThreshold: c.BaselineDeviationThreshold,
 			BaselineMinUpdatePPS:       c.BaselineMinUpdatePPS,
 			BaselineMinUpdateBPS:       c.BaselineMinUpdateBPS,
 			BaselinePeakTolerance:      c.BaselinePeakTolerance,
 			BaselineTrigPPS:            c.TrigPPS,
 			BaselineTrigBPS:            c.TrigBPS,
-			BaselinePeakDecayHalfLife:  c.BaselinePeakDecayHalfLife,
-		}, graphStore)
+			MinPacketsPerTick:          c.GraphMinPackets,
+			MinBytesPerTick:            c.GraphMinBytes,
+			ExcludeBroadcast:           c.GraphExcludeBcast,
+			ExcludeLoopback:            c.GraphExcludeLoopback,
+			ExcludeSourceCIDRs:         excludeCIDRs,
+		}, rlLearner, guard)
 
-		gctx, cancel := context.WithCancel(context.Background())
-		graphCtxCancel = cancel
+		// Periodic flush of dirty relationships + state store GC.
+		go func() {
+			flushT := time.NewTicker(30 * time.Second)
+			gcT := time.NewTicker(5 * time.Minute)
+			defer flushT.Stop()
+			defer gcT.Stop()
+			for {
+				select {
+				case <-sigCtx.Done():
+					_, _ = rlLearner.FlushDirty(context.Background())
+					_, _ = gpAdapter.BaselineEngine().FlushDirty(context.Background(), ss)
+					return
+				case <-flushT.C:
+					if _, err := rlLearner.FlushDirty(context.Background()); err != nil {
+						kliqLog.Printf("WARN: flush relationships: %v", err)
+					}
+					if _, err := gpAdapter.BaselineEngine().FlushDirty(context.Background(), ss); err != nil {
+						kliqLog.Printf("WARN: flush baselines: %v", err)
+					}
+				case <-gcT.C:
+					_ = ss.GC(context.Background())
+				}
+			}
+		}()
 
-		// Shield telemetry only starts when klshield maps are available.
-		// In netfilter-only mode the conntrack observer feeds the bus instead.
+		gctx, gcancel := context.WithCancel(context.Background())
+
 		if maps != nil && maps.Src4 != nil {
 			if err := telAdapter.Start(gctx, mainBus); err != nil {
-				cancel()
+				gcancel()
 				log.Fatalf("start graph telemetry adapter: %v", err)
 			}
 			defer telAdapter.Stop(context.Background())
@@ -940,18 +1003,17 @@ func main() {
 			kliqLog.Printf("Graph: klshield maps unavailable — graph observations via conntrack only")
 		}
 
-		if err := learner.Start(gctx, mainBus); err != nil {
-			cancel()
-			log.Fatalf("start graph learner: %v", err)
+		if err := gpAdapter.Start(gctx, mainBus); err != nil {
+			gcancel()
+			log.Fatalf("start graph pipeline adapter: %v", err)
 		}
 		defer func() {
-			learner.Stop(context.Background())
-			cancel()
+			gpAdapter.Stop(context.Background())
+			gcancel()
 		}()
 
-		kliqLog.Printf("Graph learning started: mode=%s store=%s node=%s", mode, c.GraphStorePath, nodeID)
+		kliqLog.Printf("Graph pipeline started: mode=%s state-db=%s node=%s", gpMode, c.StateStorePath, nodeID)
 	}
-	_ = graphCtxCancel // may be nil when graph is disabled
 
 	// Per-tick previous-snapshot maps (live here in kliq; not in the adapter).
 	prev4 := make(map[[4]byte]prevV4, 64_000)
@@ -992,30 +1054,42 @@ func main() {
 		}
 	}
 
-	// syncEdge4Allow writes all frozen/approved graph edges into edge4_allow so
-	// the XDP allowlist reflects the current frozen graph. Must be called before
-	// activating allow-mode (tuple-enforce allow). Also run periodically so newly
-	// approved edges are picked up without restarting KLIQ.
+	// syncEdge4Allow writes all frozen/approved network.connects_to relationships
+	// into edge4_allow so the XDP allowlist reflects the current frozen graph.
+	// Must be called before activating allow-mode (tuple-enforce allow). Also run
+	// periodically so newly approved edges are picked up without restarting KLIQ.
 	syncEdge4Allow := func() {
-		if graphStore == nil || pep == nil || !pep.TupleAvailable() {
+		if gpStateStore == nil || pep == nil || !pep.TupleAvailable() {
 			return
 		}
-		edges, err := graphStore.ListByNode(nodeID, "")
+		rels, err := gpStateStore.ListRelationships(context.Background(), nodeID, "network.connects_to", "")
 		if err != nil {
-			kliqLog.Printf("syncEdge4Allow: list edges: %v", err)
+			kliqLog.Printf("syncEdge4Allow: list relationships: %v", err)
 			return
 		}
 		n := 0
-		for _, e := range edges {
-			if e.State != graph.EdgeFrozen && e.State != graph.EdgeApproved {
+		for _, r := range rels {
+			if r.State != relationship.StateFrozen && r.State != relationship.StateApproved {
 				continue
 			}
-			ekey, ok := shieldclient.NewEdge4Key(e.Source.ID, e.DestinationPort, e.Protocol)
+			// Dimensions carry protocol + destination_port.
+			// SubjectEntityID is the stable entity ID hash, not a raw IP.
+			// For tuple enforcement we need the raw IP: read it from the entity table.
+			srcEntity, eErr := gpStateStore.GetEntityByStableID(context.Background(), r.SubjectEntityID)
+			if eErr != nil || srcEntity == nil {
+				continue
+			}
+			dport := uint16(0)
+			if p, err2 := strconv.ParseUint(r.Dimensions["destination_port"], 10, 16); err2 == nil {
+				dport = uint16(p)
+			}
+			proto := r.Dimensions["protocol"]
+			ekey, ok := shieldclient.NewEdge4Key(srcEntity.ID, dport, proto)
 			if !ok {
 				continue
 			}
 			if err := pep.AllowEdge4(ekey); err != nil {
-				kliqLog.Printf("syncEdge4Allow: %s:%d/%s: %v", e.Source.ID, e.DestinationPort, e.Protocol, err)
+				kliqLog.Printf("syncEdge4Allow: %s:%d/%s: %v", srcEntity.ID, dport, proto, err)
 			} else {
 				n++
 			}
@@ -1615,15 +1689,9 @@ func main() {
 		if features.TupleEnforcement && tickN%300 == 1 {
 			syncEdge4Allow()
 		}
-		// DB housekeeping: every 24 h delete edges that have been in 'expired'
-		// state long enough so the SQLite file does not grow without bound.
-		if graphStore != nil && nowWall.Sub(lastExpiredCleanup) >= 24*time.Hour {
-			cutoff := nowWall.Add(-c.GraphExpireTTL)
-			if n, err := graphStore.DeleteExpired(nodeID, cutoff); err != nil {
-				kliqLog.Printf("delete expired edges: %v", err)
-			} else if n > 0 {
-				kliqLog.Printf("deleted %d expired edges older than %s", n, c.GraphExpireTTL)
-			}
+		// State store GC runs via the dedicated goroutine (every 5 min);
+		// reset the cleanup timestamp so the old guard doesn't fire.
+		if gpStateStore != nil && nowWall.Sub(lastExpiredCleanup) >= 24*time.Hour {
 			lastExpiredCleanup = nowWall
 		}
 		// Bootstrap checkpoint every 30s: persist observed_seconds so a restart
@@ -1823,8 +1891,8 @@ func main() {
 			// just-learned host triggers. Without this it stays on the cold-start
 			// bootstrap values and either over-rejects (cap too low) or fails to
 			// reject attack-level traffic (cap too high) once autotune diverges.
-			if learner != nil {
-				learner.UpdateTriggers(c.TrigPPS, c.TrigBPS)
+			if gpAdapter != nil {
+				gpAdapter.UpdateTriggers(c.TrigPPS, c.TrigBPS)
 			}
 
 			kliqLog.Printf("AUTOTUNE applied: trig_pps %.1f->%.1f trig_syn %.1f->%.1f trig_scan %.1f->%.1f trig_bps %.0f->%.0f (median+MAD k=%.2f) samples=%d cleanRatio=%.4f clean=%v dropRatio=%.4f phase=%s",

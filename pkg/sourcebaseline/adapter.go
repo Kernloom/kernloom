@@ -2,6 +2,9 @@
 // Copyright (c) 2026 Adrian Enderlin
 
 // Package sourcebaseline maintains a lightweight per-source traffic baseline.
+// It is NOT a vendor adapter — it contains zero vendor-specific code and is
+// generic KLIQ infrastructure. It lives in pkg/sourcebaseline/ (not pkg/adapters/).
+//
 // It sits between the global heuristic triggers (TrigPPS, TrigSyn, ...) and
 // the per-edge EWMA baselines: it learns what is "normal" for each source IP
 // so that high-traffic but legitimate sources do not trip the global guardrails.
