@@ -9,6 +9,7 @@ import (
 	"sort"
 	"strings"
 
+	corebaseline "github.com/kernloom/kernloom/pkg/core/baseline"
 	"github.com/kernloom/kernloom/pkg/core/metric"
 )
 
@@ -67,4 +68,18 @@ func hashLabels(labels map[string]string, selected []string) string {
 	}
 	h := sha256.Sum256([]byte(sb.String()))
 	return fmt.Sprintf("%x", h[:4]) // 8 hex chars is enough for label hashing
+}
+
+// syntheticKey converts a corebaseline.Key to the Key type used by Profile/Result,
+// allowing profiles created via UpdateWithBaselineKey to coexist in the same map.
+func syntheticKey(k corebaseline.Key) Key {
+	return Key{
+		MetricID: metric.MetricID(k.MetricID),
+		Scope:    metric.Scope(k.ScopeType + ":" + k.ScopeID),
+		Subject: metric.Subject{
+			Type:  k.SourceClass,
+			Value: k.SubjectEntityID,
+		},
+		LabelHash: k.DimensionsHash,
+	}
 }

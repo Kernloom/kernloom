@@ -40,8 +40,8 @@ import (
 	"github.com/kernloom/kernloom/pkg/core/relationship"
 	"github.com/kernloom/kernloom/pkg/core/signal"
 	"github.com/kernloom/kernloom/pkg/metricbaseline"
-	rlnetwork "github.com/kernloom/kernloom/pkg/relationshiplearner/network"
 	"github.com/kernloom/kernloom/pkg/relationshiplearner"
+	rlnetwork "github.com/kernloom/kernloom/pkg/relationshiplearner/network"
 )
 
 var logger = log.New(os.Stderr, "[graph-pipeline] ", log.LstdFlags)
@@ -92,11 +92,11 @@ const exclusionCooldown = 2 * time.Minute
 
 // Adapter is the graph pipeline adapter.
 type Adapter struct {
-	cfgMu   sync.RWMutex
-	cfg     Config
-	learner *relationshiplearner.Learner
-	guard   learning.Guard
-	engine  *metricbaseline.Engine
+	cfgMu     sync.RWMutex
+	cfg       Config
+	learner   *relationshiplearner.Learner
+	guard     learning.Guard
+	engine    *metricbaseline.Engine
 	extractor *rlnetwork.Extractor
 	healthy   atomic.Bool
 	cancel    context.CancelFunc
@@ -104,7 +104,7 @@ type Adapter struct {
 
 	// exclMu guards lastExclusionAt — tracks when we last added an exclusion
 	// for each entity so we don't flood the DB with duplicate entries.
-	exclMu        sync.Mutex
+	exclMu          sync.Mutex
 	lastExclusionAt map[string]time.Time
 }
 

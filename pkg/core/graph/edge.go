@@ -10,7 +10,7 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/kernloom/kernloom/pkg/core/observation"
+	"github.com/kernloom/kernloom/pkg/core/entity"
 )
 
 // EdgeState represents the lifecycle state of a graph edge.
@@ -53,9 +53,9 @@ const (
 // EdgeKey uniquely identifies a communication edge on a node.
 type EdgeKey struct {
 	NodeID          string
-	SourceKind      observation.EntityKind
+	SourceKind      entity.Kind
 	SourceID        string
-	DestinationKind observation.EntityKind
+	DestinationKind entity.Kind
 	DestinationID   string
 	Protocol        string
 	DestinationPort uint16
@@ -73,10 +73,10 @@ type Edge struct {
 	NodeID string `json:"node_id"`
 
 	// Source is the originating entity.
-	Source observation.EntityRef `json:"source"`
+	Source entity.Ref `json:"source"`
 
 	// Destination is the target entity.
-	Destination observation.EntityRef `json:"destination"`
+	Destination entity.Ref `json:"destination"`
 
 	// Protocol is the network protocol (tcp, udp, icmp, ...).
 	Protocol string `json:"protocol"`
@@ -167,7 +167,7 @@ func (e *Edge) ShouldPromote(cfg PromotionConfig, now time.Time) bool {
 }
 
 // NewEdge creates a new candidate edge from an observed flow.
-func NewEdge(nodeID string, src, dst observation.EntityRef, proto string, dstPort uint16, dir Direction, now time.Time) *Edge {
+func NewEdge(nodeID string, src, dst entity.Ref, proto string, dstPort uint16, dir Direction, now time.Time) *Edge {
 	return &Edge{
 		ID:              generateID(),
 		NodeID:          nodeID,

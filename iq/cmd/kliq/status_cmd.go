@@ -15,10 +15,9 @@ import (
 
 	"github.com/kernloom/kernloom/pkg/adapters/netfilter"
 	"github.com/kernloom/kernloom/pkg/componentinventory"
-	"github.com/kernloom/kernloom/pkg/core/baseline"
 	"github.com/kernloom/kernloom/pkg/core/featureset"
-	"github.com/kernloom/kernloom/pkg/core/graph"
-	gstore "github.com/kernloom/kernloom/pkg/graphstore/sqlite"
+	"github.com/kernloom/kernloom/pkg/core/relationship"
+	sstore "github.com/kernloom/kernloom/pkg/statestore/sqlite"
 )
 
 // handleStatusSubcommand handles "kliq status" and "kliq runtime status"
@@ -153,50 +152,50 @@ func runStatus(statePath, dbPath string) {
 	// ── Policy / Inventory (from runtime sidecar + state fallback) ──────────
 	printRuntimeReport(statePath, st)
 
-	// ── Graph DB ─────────────────────────────────────────────────────────────
-	s, err := gstore.Open(dbPath)
+	// ── Graph (state store) ──────────────────────────────────────────────────
+	// dbPath points to the state store (kliq-state.db) at runtime.
+	// Fall back to the graph-store default path for backward compat.
+	stateDBPath := dbPath
+	ss, err := sstore.Open(sstore.DefaultConfig(stateDBPath))
 	if err != nil {
-		fmt.Printf("\nGraph:     db not accessible (%s)\n", dbPath)
+		fmt.Printf("\nGraph:     state store not accessible (%s)\n", stateDBPath)
 		return
 	}
-	defer s.Close()
+	defer ss.Close()
 
-	stats, _ := s.Stats(hostname)
-
-	total := 0
+	stats, _ := ss.RelationshipStats(context.Background(), hostname)
+	total := int64(0)
 	for _, n := range stats {
 		total += n
 	}
 
 	fmt.Printf("\nGraph:     ")
 	if total == 0 {
-		fmt.Println("no edges yet")
+		fmt.Println("no relationships yet")
 	} else {
-		fmt.Printf("%d edges total\n", total)
+		fmt.Printf("%d relationships total\n", total)
 		w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
-		for _, state := range []graph.EdgeState{
-			graph.EdgeFrozen, graph.EdgeApproved, graph.EdgeLearned,
-			graph.EdgeCandidate, graph.EdgeDenied, graph.EdgeExpired,
+		for _, st := range []relationship.State{
+			relationship.StateFrozen, relationship.StateApproved, relationship.StateLearned,
+			relationship.StateCandidate, relationship.StateDenied, relationship.StateExpired,
 		} {
-			if n := stats[state]; n > 0 {
-				fmt.Fprintf(w, "  %s\t%d\n", state, n)
+			if n := stats[string(st)]; n > 0 {
+				fmt.Fprintf(w, "  %s\t%d\n", st, n)
 			}
 		}
 		w.Flush()
 	}
 
-	// ── Baselines ────────────────────────────────────────────────────────────
-	bl, err := s.ListEdgeBaselines(hostname)
-	if err == nil && len(bl) > 0 {
-		candidate, learned := 0, 0
-		for _, e := range bl {
-			if e.Profile.State == baseline.StateLearned {
-				learned++
-			} else {
-				candidate++
-			}
-		}
-		fmt.Printf("\nBaselines: %d learned  %d candidate\n", learned, candidate)
+	// ── Baselines (generic) ──────────────────────────────────────────────────
+	var blCandidate, blLearned int64
+	row := ss.DB().QueryRowContext(context.Background(),
+		`SELECT COUNT(*) FROM metric_baselines WHERE state='candidate'`)
+	_ = row.Scan(&blCandidate)
+	row = ss.DB().QueryRowContext(context.Background(),
+		`SELECT COUNT(*) FROM metric_baselines WHERE state='learned'`)
+	_ = row.Scan(&blLearned)
+	if blCandidate+blLearned > 0 {
+		fmt.Printf("\nBaselines: %d learned  %d candidate\n", blLearned, blCandidate)
 	}
 }
 

@@ -244,6 +244,12 @@ type cfg struct {
 	// BPF filesystem root (default /sys/fs/bpf)
 	BPFfsRoot string
 
+	// State store (statestore/sqlite) for generic baselines, relationships,
+	// learning exclusions, evidence.  Defaults to a sidecar file next to the
+	// graph store.  The graph store (GraphStorePath) remains the source of truth
+	// for L3/L4 edges; the state store holds the generic pipeline state.
+	StateStorePath string
+
 	// Graph learning
 	GraphEnabled           bool
 	GraphStorePath         string // runtime state — /var/lib/kernloom/iq/
@@ -582,7 +588,10 @@ AGENT FLAGS
 
 	flag.BoolVar(&c.GraphEnabled, "graph", false, "enable graph learning")
 	// Runtime state — combined SQLite DB for graph edges and source baselines.
-	flag.StringVar(&c.GraphStorePath, "db", "/var/lib/kernloom/iq/kliq.db", "runtime SQLite database (graph edges + source baselines, not IMA-attested)")
+	// --db is the canonical state store path (used by both the runtime and all CLI subcommands).
+	// --state-db is an alias kept for backward compatibility.
+	flag.StringVar(&c.StateStorePath, "db", "/var/lib/kernloom/iq/kliq-state.db", "state store (relationships, baselines, exclusions, evidence)")
+	flag.StringVar(&c.StateStorePath, "state-db", "/var/lib/kernloom/iq/kliq-state.db", "alias for --db")
 	// IMA-attested: written once by 'kliq graph freeze', then static until next freeze.
 	flag.StringVar(&c.GraphFrozenPath, "graph-frozen", "/opt/kernloom/attested/etc/frozen-graph.yaml", "frozen graph baseline written by 'kliq graph freeze' (IMA-attested if activated)")
 	flag.StringVar(&c.GraphMode, "graph-mode", "learn", "graph mode: learn or frozen-observe")

@@ -9,7 +9,18 @@ import (
 	"net"
 	"strings"
 	"time"
+
+	"github.com/kernloom/kernloom/pkg/core/observation"
 )
+
+// formatSubject returns "kind:id" for log lines.
+// IPs show as plain "id" to keep the existing log format; other kinds show "user:xyz" etc.
+func formatSubject(s observation.EntityRef) string {
+	if s.Kind == "" || s.Kind == observation.KindIP {
+		return s.ID
+	}
+	return string(s.Kind) + ":" + s.ID
+}
 
 /* ---------------- misc helpers ---------------- */
 

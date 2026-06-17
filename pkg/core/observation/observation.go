@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MPL-2.0
-// Copyright (c) 2026 Adrian Enderlin
+// Copyright (c) 2026 Kernloom Contributors
 
 package observation
 
@@ -7,6 +7,8 @@ import (
 	"crypto/rand"
 	"fmt"
 	"time"
+
+	"github.com/kernloom/kernloom/pkg/core/entity"
 )
 
 // ObservationSource describes where an observation originates.
@@ -47,33 +49,29 @@ const (
 	TypeConnection ObservationType = "connection" // New service connection, disconnection
 )
 
-// EntityKind describes the type of entity in an EntityRef.
-type EntityKind string
+// EntityKind is an alias for entity.Kind.
+// Use entity.Kind in new code; this alias keeps existing call sites compiling.
+type EntityKind = entity.Kind
 
+// EntityRef is an alias for entity.Ref.
+// Use entity.Ref in new code; this alias keeps existing call sites compiling.
+type EntityRef = entity.Ref
+
+// Re-export entity.Kind constants so callers using observation.KindXxx continue to compile.
 const (
-	KindIP        EntityKind = "ip"        // Single IPv4 or IPv6 address
-	KindCIDR      EntityKind = "cidr"      // IPv4 or IPv6 CIDR range
-	KindNode      EntityKind = "node"      // Physical/virtual node with a node_id
-	KindService   EntityKind = "service"   // Logical service (e.g., "postgres", "api-gateway")
-	KindUser      EntityKind = "user"      // User identity (e.g., unix uid, LDAP user)
-	KindWorkload  EntityKind = "workload"  // Container, pod, process group
-	KindProcess   EntityKind = "process"   // Individual process
-	KindNamespace EntityKind = "namespace" // Kubernetes/OS namespace
+	KindIP          = entity.KindIP
+	KindCIDR        = entity.KindCIDR
+	KindNode        = entity.KindNode
+	KindService     = entity.KindService
+	KindUser        = entity.KindUser
+	KindWorkload    = entity.KindWorkload
+	KindProcess     = entity.KindProcess
+	KindNamespace   = entity.KindNamespace
+	KindHTTPRoute   = entity.KindHTTPRoute
+	KindSocket      = entity.KindSocket
+	KindZitiService = entity.KindZitiService
+	KindTrustState  = entity.KindTrustState
 )
-
-// EntityRef is a reference to an entity (IP, service, node, user, etc.)
-// It is used as subject and object in observations and signals.
-type EntityRef struct {
-	// Kind describes the type of entity
-	Kind EntityKind `json:"kind"`
-
-	// ID is the unique identifier within its kind (IP string, node ID, service name, etc.)
-	ID string `json:"id"`
-
-	// Optional: additional context
-	// Examples: "role": "public-api", "namespace": "default", "container_id": "abc123"
-	Labels map[string]string `json:"labels,omitempty"`
-}
 
 // Observation is a normalized, timestamped observation about activity in the system.
 // Observations come from various sources (shield, nginx, syslog, etc.) and are normalized

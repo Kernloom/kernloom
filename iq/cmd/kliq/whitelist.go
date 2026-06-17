@@ -66,6 +66,23 @@ func (w *whitelist) matchV6(ip6 [16]byte) bool {
 	return false
 }
 
+// matchIPString matches an IP address string against the whitelist.
+// Used by the LearningGuard wrapper to check whitelist membership by string IP.
+func (w *whitelist) matchIPString(addr string) bool {
+	ip := net.ParseIP(addr)
+	if ip == nil {
+		return false
+	}
+	if v4 := ip.To4(); v4 != nil {
+		var b [4]byte
+		copy(b[:], v4)
+		return w.matchV4(b)
+	}
+	var b [16]byte
+	copy(b[:], ip.To16())
+	return w.matchV6(b)
+}
+
 func parseWhitelistLine(line string) (family int, isCIDR bool, ip4 [4]byte, ip6 [16]byte, n *net.IPNet, ok bool) {
 	s := strings.TrimSpace(line)
 	if s == "" || strings.HasPrefix(s, "#") {

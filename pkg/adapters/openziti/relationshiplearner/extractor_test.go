@@ -7,14 +7,14 @@ import (
 	"context"
 	"testing"
 
-	"github.com/kernloom/kernloom/pkg/core/observation"
 	zitiext "github.com/kernloom/kernloom/pkg/adapters/openziti/relationshiplearner"
+	"github.com/kernloom/kernloom/pkg/core/observation"
 )
 
 func zitiObs(identity, service, posture, trustLevel string) observation.Observation {
 	return observation.Observation{
-		Source: observation.SourceZiti,
-		Type:   observation.TypeConnection,
+		Source:  observation.SourceZiti,
+		Type:    observation.TypeConnection,
 		Subject: observation.EntityRef{Kind: observation.KindUser, ID: identity},
 		Object:  observation.EntityRef{Kind: observation.KindZitiService, ID: service},
 		Attributes: map[string]string{

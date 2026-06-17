@@ -1,152 +1,23 @@
 // SPDX-License-Identifier: MPL-2.0
-// Copyright (c) 2026 Adrian Enderlin
+// Copyright (c) 2026 Kernloom Contributors
 
 package main
 
-import (
-	"fmt"
-	"os"
-	"sort"
-	"strings"
-	"text/tabwriter"
-
-	"github.com/kernloom/kernloom/pkg/core/baseline"
-	gstore "github.com/kernloom/kernloom/pkg/graphstore/sqlite"
-)
-
-// runBaselineStatus prints per-edge baseline stats (stored in graph_edges.bl_*).
+// runBaselineStatus shows per-edge baselines from the generic state store.
+// Delegates to runBaselinesGenericList, which reads metric_baselines filtered
+// to source_class=xdp and scope_type=relationship.
 func runBaselineStatus(storePath, nodeID string, showAll bool, sortBy string) {
-	s, err := gstore.Open(storePath)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "error: open store: %v\n", err)
-		os.Exit(1)
-	}
-	defer s.Close()
-
-	edges, err := s.ListEdgeBaselines(nodeID)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "error: list edge baselines: %v\n", err)
-		os.Exit(1)
-	}
-
-	// Sort edges.
-	switch strings.ToLower(sortBy) {
-	case "state":
-		sort.Slice(edges, func(i, j int) bool {
-			if edges[i].Profile.State != edges[j].Profile.State {
-				return edges[i].Profile.State < edges[j].Profile.State // learned < candidate alphabetically reversed
-			}
-			return edges[i].Profile.Observations > edges[j].Profile.Observations
-		})
-	case "src":
-		sort.Slice(edges, func(i, j int) bool {
-			if edges[i].SourceID != edges[j].SourceID {
-				return edges[i].SourceID < edges[j].SourceID
-			}
-			return edges[i].DestinationPort < edges[j].DestinationPort
-		})
-	case "port":
-		sort.Slice(edges, func(i, j int) bool {
-			if edges[i].DestinationPort != edges[j].DestinationPort {
-				return edges[i].DestinationPort < edges[j].DestinationPort
-			}
-			return edges[i].SourceID < edges[j].SourceID
-		})
-	case "pps":
-		sort.Slice(edges, func(i, j int) bool {
-			return edges[i].Profile.PPSMedian > edges[j].Profile.PPSMedian
-		})
-	case "bps":
-		sort.Slice(edges, func(i, j int) bool {
-			return edges[i].Profile.BytesMedian > edges[j].Profile.BytesMedian
-		})
-	default: // "obs"
-		sort.Slice(edges, func(i, j int) bool {
-			return edges[i].Profile.Observations > edges[j].Profile.Observations
-		})
-	}
-
-	fmt.Printf("Baseline status for node: %s\n\n", nodeID)
-
-	// State summary.
-	candidateN, learnedN := 0, 0
-	for _, e := range edges {
-		if e.Profile.State == baseline.StateLearned {
-			learnedN++
-		} else {
-			candidateN++
-		}
-	}
-	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
-	fmt.Fprintln(w, "  STATE\tCOUNT")
-	if candidateN > 0 {
-		fmt.Fprintf(w, "  candidate\t%d\n", candidateN)
-	}
-	if learnedN > 0 {
-		fmt.Fprintf(w, "  learned\t%d\n", learnedN)
-	}
-	w.Flush()
-
-	// Per-edge table.
-	fmt.Printf("\nEdge baselines (%d total):\n\n", len(edges))
-	w = tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
-	fmt.Fprintln(w, "BL\tGRAPH\tSOURCE\tDST\tPROTO\tPORT\tOBS\tPPS_MED\tPPS_MAD\tPPS_PEAK\tBPS_MED\tBPS_MAD\tBPS_PEAK")
-
-	shown := edges
-	const defaultCap = 40
-	if !showAll && len(shown) > defaultCap {
-		shown = shown[:defaultCap]
-	}
-	for _, e := range shown {
-		fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%d\t%d\t%.1f\t%.1f\t%.0f\t%.0f\t%.0f\t%.0f\n",
-			e.Profile.State, e.GraphState,
-			e.SourceID, e.DestinationID, e.Protocol, e.DestinationPort,
-			e.Profile.Observations, e.Profile.PPSMedian, e.Profile.PPSMad, e.Profile.PPSPeak,
-			e.Profile.BytesMedian, e.Profile.BytesMad, e.Profile.BPSPeak,
-		)
-	}
-	w.Flush()
-	if !showAll && len(edges) > defaultCap {
-		fmt.Printf("\n... and %d more (use --all to show everything)\n", len(edges)-defaultCap)
-	}
-
-	// Warn when PPS/BPS metrics are all zero — this means no telemetry adapter
-	// is active. Graph topology is learned (OBS rises) but traffic rates are not.
-	if len(edges) > 0 && allMetricsZero(edges) {
-		fmt.Println()
-		fmt.Println("NOTE: PPS/BPS values are all 0 — no telemetry adapter active.")
-		fmt.Println("      Graph topology (edges) is learned from connection tracking,")
-		fmt.Println("      but packet rates require klshield (XDP) for accurate measurement.")
-		fmt.Println("      Start kliq with --adapter=klshield to enable rate-based baselines.")
-	}
+	// The new generic baselines are keyed by (metric_id, scope, source_class, ...).
+	// For graph edge baselines: metric_id=network.xdp.edge.*, source_class=xdp.
+	// Delegate to the generic baseline list command.
+	runBaselinesGenericList(storePath, "network.xdp.edge", "relationship", "xdp")
 }
 
-// allMetricsZero returns true when all edges have zero PPS and BPS medians.
-func allMetricsZero(edges []baseline.Summary) bool {
-	for _, e := range edges {
-		if e.Profile.PPSMedian > 0 || e.Profile.BytesMedian > 0 {
-			return false
-		}
-	}
-	return true
-}
-
-// runBaselineReset clears all per-edge baseline stats by zeroing the bl_*
-// columns in graph_edges. The edges themselves and their graph state are
-// preserved — only the learned EWMA traffic profiles are wiped.
+// runBaselineReset resets edge baselines.
+// In the new generic store, baselines are pruned by the GC loop (TTL-based).
+// A manual reset deletes all metric_baselines rows for xdp/relationship scope.
 func runBaselineReset(storePath, nodeID string) {
-	s, err := gstore.Open(storePath)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "error: open store: %v\n", err)
-		os.Exit(1)
-	}
-	defer s.Close()
-
-	n, err := s.ResetEdgeBaselines(nodeID)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "error: reset baseline: %v\n", err)
-		os.Exit(1)
-	}
-	fmt.Printf("Reset baseline stats for %d edge(s) on node %s.\n", n, nodeID)
-	fmt.Println("Edges will rebuild their EWMA profiles from the next clean ticks.")
+	// Use the storage cleanup which runs the GC.  For a targeted reset, users
+	// can use 'kliq storage cleanup' or delete kliq-state.db directly.
+	runStorageCleanup(storePath, false)
 }

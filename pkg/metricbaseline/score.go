@@ -40,6 +40,10 @@ type Result struct {
 
 	// Promoted is true when the profile has met MinCount and is trusted.
 	Promoted bool
+
+	// Peak is the highest non-suspicious value seen after promotion.
+	// Used for peak-deviation detection without a separate Profile lookup.
+	Peak float64
 }
 
 // score computes the deviation score given the current profile state and value.
@@ -67,5 +71,6 @@ func resultFromProfile(p *Profile, value float64, suspicious bool, learned bool,
 		Learned:        learned,
 		Suspicious:     suspicious,
 		Promoted:       p.Promoted,
+		Peak:           p.Peak,
 	}
 }
