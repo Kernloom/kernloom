@@ -18,9 +18,9 @@ import (
 	"time"
 
 	"github.com/kernloom/kernloom/pkg/adapterruntime"
+	"github.com/kernloom/kernloom/pkg/adapters/klshield/client"
 	"github.com/kernloom/kernloom/pkg/core/capability"
 	"github.com/kernloom/kernloom/pkg/core/observation"
-	"github.com/kernloom/kernloom/pkg/shieldclient"
 )
 
 var logger = log.New(os.Stderr, "[shield-telemetry] ", log.LstdFlags)

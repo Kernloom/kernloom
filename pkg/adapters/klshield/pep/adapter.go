@@ -17,9 +17,9 @@ import (
 
 	"github.com/cilium/ebpf"
 	"github.com/kernloom/kernloom/pkg/adapterruntime"
+	"github.com/kernloom/kernloom/pkg/adapters/klshield/client"
 	"github.com/kernloom/kernloom/pkg/core/capability"
 	"github.com/kernloom/kernloom/pkg/core/fsm"
-	"github.com/kernloom/kernloom/pkg/shieldclient"
 )
 
 var logger = log.New(os.Stderr, "[shield-pep] ", log.LstdFlags)

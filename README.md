@@ -158,10 +158,13 @@ kernloom/
 │   │   ├── reason/            Signal reason code constants
 │   │   └── suspicious/        SuspiciousRegistry
 │   ├── adapters/              Vendor/product integrations ONLY
-│   │   ├── klshieldguard/     KLShield anti-poisoning learning guard
-│   │   ├── klshieldshadow/    KLShield shadow/dry-run wrapper
-│   │   ├── shieldpep/         KLShield PEP (writes eBPF maps)
-│   │   ├── shieldtelemetry/   KLShield telemetry → observations
+│   │   ├── klshield/          KLShield adapter package
+│   │   │   ├── client/        eBPF map client
+│   │   │   ├── guard/         anti-poisoning learning guard
+│   │   │   ├── pep/           PEP (writes eBPF maps)
+│   │   │   ├── shadow/        shadow/dry-run metric wrapper
+│   │   │   ├── signalengine/  KLShield heuristic signal engine
+│   │   │   └── telemetry/     telemetry → observations
 │   │   └── netfilter/         netfilter PEP (nftables + iptables)
 │   ├── pipeline/
 │   │   ├── runner.go          Generic pipeline runner
@@ -171,7 +174,6 @@ kernloom/
 │   ├── learningguard/         Learning guard (anti-poisoning)
 │   ├── featureextractor/      Feature extractor interface
 │   ├── signalengine/          Signal engine interface
-│   │   └── shieldheuristic/   KLShield signal engine (TO MOVE: → pkg/adapters/klshield/)
 │   ├── relationshiplearner/   Relationship extractor interface + implementations
 │   │   ├── network/           Generic L3/L4 network relationships
 │   │   ├── http/              Generic HTTP relationships
@@ -179,7 +181,6 @@ kernloom/
 │   ├── riskaggregator/        Signal risk aggregation
 │   ├── decisionengine/        Decision engine (FSM + signals → decisions)
 │   ├── adapterruntime/        Adapter lifecycle interface + EventBus
-│   ├── shieldclient/          KLShield eBPF map client (TO MOVE: → pkg/adapters/klshield/)
 │   └── statestore/sqlite/     SQLite state store
 └── configs/
     ├── pdp/                   PDPConfig profiles (16 profiles, all node roles)

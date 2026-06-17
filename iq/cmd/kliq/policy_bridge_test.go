@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/kernloom/kernloom/pkg/adapters/shieldpep"
+	"github.com/kernloom/kernloom/pkg/adapters/klshield/pep"
 	"github.com/kernloom/kernloom/pkg/core/fsm"
 	"github.com/kernloom/kernloom/pkg/core/policy"
 )

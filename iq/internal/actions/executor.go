@@ -6,9 +6,9 @@ package actions
 import (
 	"time"
 
-	"github.com/kernloom/kernloom/pkg/adapters/shieldpep"
+	"github.com/kernloom/kernloom/pkg/adapters/klshield/client"
+	"github.com/kernloom/kernloom/pkg/adapters/klshield/pep"
 	"github.com/kernloom/kernloom/pkg/core/fsm"
-	"github.com/kernloom/kernloom/pkg/shieldclient"
 )
 
 // ShieldActionExecutor is the ONLY component in KLIQ authorised to call

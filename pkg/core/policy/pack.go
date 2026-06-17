@@ -9,7 +9,7 @@
 // Architecture:
 //
 //	PolicyPack (this file) — abstract, PEP-agnostic policy rules
-//	AdapterManifest (pkg/adapters/shieldpep/manifest.go) — PEP-specific capability params
+//	AdapterManifest (pkg/adapters/klshield/pep/manifest.go) — PEP-specific capability params
 //	profiles.go in iq/cmd/kliq — PDP (kliq) internal FSM behavior defaults
 package policy
 
@@ -67,7 +67,7 @@ func (m *Metadata) ParseIssuedAt() (time.Time, bool) {
 // It is intentionally PEP-agnostic: it references abstract capability IDs
 // (network.rate_limit_source, network.block_source) rather than Shield-specific
 // parameters (rate_pps, burst). The concrete PEP parameters live in the
-// adapter manifest (pkg/adapters/shieldpep/manifest.go).
+// adapter manifest (pkg/adapters/klshield/pep/manifest.go).
 type Spec struct {
 	// TargetSelector is used by Forge to match this policy to nodes.
 	// Ignored in standalone mode but preserved for forward-compatibility.

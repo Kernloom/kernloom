@@ -9,7 +9,7 @@ import (
 	"time"
 
 	"github.com/kernloom/kernloom/pkg/adapterruntime"
-	"github.com/kernloom/kernloom/pkg/adapters/klshieldguard"
+	"github.com/kernloom/kernloom/pkg/adapters/klshield/guard"
 	"github.com/kernloom/kernloom/pkg/core/metric"
 	"github.com/kernloom/kernloom/pkg/core/signal"
 )

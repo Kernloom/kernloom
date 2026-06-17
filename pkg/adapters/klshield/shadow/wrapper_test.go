@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/kernloom/kernloom/pkg/adapters/klshieldshadow"
+	"github.com/kernloom/kernloom/pkg/adapters/klshield/shadow"
 )
 
 func TestSampleToMetrics_BasicMapping(t *testing.T) {

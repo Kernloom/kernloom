@@ -6,7 +6,7 @@ package main
 import (
 	"strconv"
 
-	"github.com/kernloom/kernloom/pkg/adapters/shieldpep"
+	"github.com/kernloom/kernloom/pkg/adapters/klshield/pep"
 	celeval "github.com/kernloom/kernloom/pkg/core/cel"
 	"github.com/kernloom/kernloom/pkg/core/fsm"
 	"github.com/kernloom/kernloom/pkg/core/pdp"

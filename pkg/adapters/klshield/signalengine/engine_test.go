@@ -7,9 +7,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/kernloom/kernloom/pkg/adapters/klshield/signalengine"
 	"github.com/kernloom/kernloom/pkg/core/observation"
 	"github.com/kernloom/kernloom/pkg/core/signal"
-	"github.com/kernloom/kernloom/pkg/signalengine/shieldheuristic"
 )
 
 var subject = observation.EntityRef{Kind: observation.KindIP, ID: "203.0.113.1"}

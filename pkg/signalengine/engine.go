@@ -5,15 +5,15 @@
 // engines. A signal engine receives observations, pre-computed metrics, and
 // metric baseline results, and produces scored signals for the decision engine.
 //
-// The existing pkg/signalengine/shieldheuristic implements the KLShield-specific
+// The existing pkg/adapters/klshield/signalengine implements the KLShield-specific
 // heuristic logic. It does NOT implement this interface in Track A — that
 // migration is Track B work and requires a real second adapter to drive the
 // correct abstraction boundary.
 //
 // Concrete implementations live alongside their adapter:
-//   - pkg/signalengine/shieldheuristic  — KLShield/XDP domain (existing, Track B)
-//   - pkg/signalengine/httpheuristic    — future NGINX/HTTP domain
-//   - pkg/signalengine/zitiheuristic    — future OpenZiti domain
+//   - pkg/adapters/klshield/signalengine  — KLShield/XDP domain (existing, Track B)
+//   - pkg/adapters/nginx/signalengine     — future NGINX/HTTP domain
+//   - pkg/adapters/openziti/signalengine  — future OpenZiti domain
 package signalengine
 
 import (

@@ -16,7 +16,7 @@ import (
 // those rules internally.
 //
 // PEP-specific parameters (rate_pps, burst, cooldown) are NOT here — they
-// live in the adapter manifest (pkg/adapters/shieldpep/manifest.go).
+// live in the adapter manifest (pkg/adapters/klshield/pep/manifest.go).
 //
 // TTLs (SoftTTL, HardTTL, BlockTTL) are kept here because they control how
 // long the PDP keeps a source at each enforcement level — a PDP scheduling
