@@ -20,7 +20,13 @@
 //	        └── nftables backend  (pkg/adapters/netfilter/backends/nftables)
 package netfilter
 
-import "time"
+import (
+	"fmt"
+	"os"
+	"time"
+
+	"gopkg.in/yaml.v3"
+)
 
 // BackendType identifies which Netfilter backend is in use.
 type BackendType string
@@ -122,6 +128,9 @@ type EnforcementConfig struct {
 	MinTTL time.Duration `yaml:"min_ttl"`
 	MaxTTL time.Duration `yaml:"max_ttl"`
 
+	SoftRatePPS uint64 `yaml:"soft_rate_pps"`
+	HardRatePPS uint64 `yaml:"hard_rate_pps"`
+
 	// RateLimitFallback controls what happens when rate-limit primitives
 	// (hashlimit / nft meters) are not available on the host.
 	RateLimitFallback RateLimitFallbackConfig `yaml:"rate_limit_fallback"`
@@ -204,6 +213,8 @@ func DefaultConfig() Config {
 			MaxRulesWithoutSet: 500,
 			MinTTL:             30 * time.Second,
 			MaxTTL:             24 * time.Hour,
+			SoftRatePPS:        100,
+			HardRatePPS:        20,
 			RateLimitFallback: RateLimitFallbackConfig{
 				WhenUnsupported:  "observe_only",
 				BlockMinSeverity: 0.95,
@@ -223,4 +234,113 @@ func DefaultConfig() Config {
 			RestoreBackupOnError: true,
 		},
 	}
+}
+
+// AdapterSpec is the netfilter-specific PDPConfig adapter section.
+// It intentionally lives in the adapter package, not pkg/core/pdp.
+type AdapterSpec struct {
+	// Backend pins the backend. Empty or "auto" selects the best available one.
+	Backend string `yaml:"backend,omitempty"`
+
+	Directions struct {
+		Input   *bool `yaml:"input,omitempty"`
+		Forward *bool `yaml:"forward,omitempty"`
+		Output  *bool `yaml:"output,omitempty"`
+	} `yaml:"directions,omitempty"`
+
+	RateLimit struct {
+		SoftRatePPS uint64 `yaml:"soft_rate_pps,omitempty"`
+		HardRatePPS uint64 `yaml:"hard_rate_pps,omitempty"`
+	} `yaml:"rate_limit,omitempty"`
+
+	Observation struct {
+		ConntrackSnapshot     *bool    `yaml:"conntrack_snapshot,omitempty"`
+		ConntrackPollInterval Duration `yaml:"conntrack_poll_interval,omitempty"`
+	} `yaml:"observation,omitempty"`
+
+	Safety struct {
+		ManagementAllowlist []string `yaml:"management_allowlist,omitempty"`
+	} `yaml:"safety,omitempty"`
+}
+
+// Duration is a YAML-friendly time.Duration for the adapter-owned config.
+type Duration struct{ D time.Duration }
+
+func (d *Duration) UnmarshalYAML(value *yaml.Node) error {
+	var s string
+	if err := value.Decode(&s); err == nil && s != "" {
+		parsed, perr := time.ParseDuration(s)
+		if perr != nil {
+			return perr
+		}
+		d.D = parsed
+		return nil
+	}
+	var n int64
+	if err := value.Decode(&n); err == nil {
+		d.D = time.Duration(n)
+		return nil
+	}
+	return fmt.Errorf("invalid duration %q", value.Value)
+}
+
+// LoadPDPAdapterSpec reads spec.adapters.netfilter from a PDPConfig YAML file.
+func LoadPDPAdapterSpec(path string) (AdapterSpec, bool, error) {
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return AdapterSpec{}, false, fmt.Errorf("netfilter: read adapter config %s: %w", path, err)
+	}
+	var doc struct {
+		Spec struct {
+			Adapters struct {
+				Netfilter *AdapterSpec `yaml:"netfilter"`
+			} `yaml:"adapters"`
+		} `yaml:"spec"`
+	}
+	if err := yaml.Unmarshal(raw, &doc); err != nil {
+		return AdapterSpec{}, false, fmt.Errorf("netfilter: parse adapter config %s: %w", path, err)
+	}
+	if doc.Spec.Adapters.Netfilter == nil {
+		return AdapterSpec{}, false, nil
+	}
+	return *doc.Spec.Adapters.Netfilter, true, nil
+}
+
+// ApplyAdapterSpec overlays the adapter-owned PDPConfig values onto cfg.
+func ApplyAdapterSpec(cfg Config, spec AdapterSpec) (Config, error) {
+	if spec.Backend != "" {
+		backend := BackendType(spec.Backend)
+		switch backend {
+		case BackendAuto, BackendNFTables, BackendIPTablesNFT, BackendIPTablesLegacy:
+			cfg.Backend = backend
+		default:
+			return cfg, fmt.Errorf("netfilter: unsupported backend %q", spec.Backend)
+		}
+	}
+	if spec.Directions.Input != nil {
+		cfg.Directions.Input = *spec.Directions.Input
+	}
+	if spec.Directions.Forward != nil {
+		cfg.Directions.Forward = *spec.Directions.Forward
+	}
+	if spec.Directions.Output != nil {
+		cfg.Directions.Output = *spec.Directions.Output
+	}
+	if spec.RateLimit.SoftRatePPS > 0 {
+		cfg.Enforcement.SoftRatePPS = spec.RateLimit.SoftRatePPS
+	}
+	if spec.RateLimit.HardRatePPS > 0 {
+		cfg.Enforcement.HardRatePPS = spec.RateLimit.HardRatePPS
+	}
+	if spec.Observation.ConntrackSnapshot != nil {
+		cfg.Observation.ConntrackSnapshot = *spec.Observation.ConntrackSnapshot
+		cfg.Observation.Enabled = cfg.Observation.Enabled || *spec.Observation.ConntrackSnapshot
+	}
+	if spec.Observation.ConntrackPollInterval.D > 0 {
+		cfg.Observation.ConntrackPollInterval = spec.Observation.ConntrackPollInterval.D
+	}
+	if spec.Safety.ManagementAllowlist != nil {
+		cfg.Safety.ManagementAllowlist = append([]string(nil), spec.Safety.ManagementAllowlist...)
+	}
+	return cfg, nil
 }

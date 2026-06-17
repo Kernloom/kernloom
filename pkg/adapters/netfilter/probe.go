@@ -70,13 +70,59 @@ func Probe(ctx context.Context) ProbeResult {
 	r.NFTables = probeNFTables(ctx)
 	r.IPTables = probeIPTables(ctx)
 	r.Conntrack = probeConntrack(ctx)
-	r.Selected = selectBackend(r)
+	r.Selected = SelectBackend(r, BackendAuto)
 	return r
 }
 
-// selectBackend picks the best available backend.
+// ResolveBackend returns a probe result pinned to requested when possible.
+// It can discover explicit iptables-nft/iptables-legacy binaries even when the
+// generic "iptables" command points at the other implementation.
+func ResolveBackend(ctx context.Context, r ProbeResult, requested BackendType) ProbeResult {
+	selected := SelectBackend(r, requested)
+	if selected != "" {
+		r.Selected = selected
+		return r
+	}
+
+	switch requested {
+	case BackendIPTablesNFT:
+		if p := probeIPTablesBinary(ctx, "iptables-nft"); p.Available && p.Backend == "nft" {
+			r.IPTables = p
+			r.Selected = BackendIPTablesNFT
+		}
+	case BackendIPTablesLegacy:
+		if p := probeIPTablesBinary(ctx, "iptables-legacy"); p.Available && p.Backend == "legacy" {
+			r.IPTables = p
+			r.Selected = BackendIPTablesLegacy
+		}
+	}
+	return r
+}
+
+// SelectBackend picks the requested backend if available, otherwise auto-selects
+// the best available backend when requested is empty or BackendAuto.
 // Priority: nftables > iptables-nft > iptables-legacy > none.
-func selectBackend(r ProbeResult) BackendType {
+func SelectBackend(r ProbeResult, requested BackendType) BackendType {
+	switch requested {
+	case "", BackendAuto:
+	case BackendNFTables:
+		if r.NFTables.Available {
+			return BackendNFTables
+		}
+		return ""
+	case BackendIPTablesNFT:
+		if r.IPTables.Available && r.IPTables.Backend == "nft" {
+			return BackendIPTablesNFT
+		}
+		return ""
+	case BackendIPTablesLegacy:
+		if r.IPTables.Available && r.IPTables.Backend != "nft" {
+			return BackendIPTablesLegacy
+		}
+		return ""
+	default:
+		return ""
+	}
 	if r.NFTables.Available {
 		return BackendNFTables
 	}
@@ -122,10 +168,14 @@ func probeNFTables(ctx context.Context) NFTablesProbe {
 }
 
 func probeIPTables(ctx context.Context) IPTablesProbe {
+	return probeIPTablesBinary(ctx, "iptables")
+}
+
+func probeIPTablesBinary(ctx context.Context, binary string) IPTablesProbe {
 	p := IPTablesProbe{}
 
 	// Look for iptables — may be a symlink to iptables-nft or iptables-legacy.
-	path, err := exec.LookPath("iptables")
+	path, err := exec.LookPath(binary)
 	if err != nil {
 		return p
 	}
@@ -140,14 +190,23 @@ func probeIPTables(ctx context.Context) IPTablesProbe {
 	}
 	p.Available = true
 
-	if sp, err := exec.LookPath("iptables-save"); err == nil {
+	saveBinary := binary + "-save"
+	restoreBinary := binary + "-restore"
+	ip6Binary := strings.Replace(binary, "iptables", "ip6tables", 1)
+	if binary == "iptables" {
+		saveBinary = "iptables-save"
+		restoreBinary = "iptables-restore"
+		ip6Binary = "ip6tables"
+	}
+
+	if sp, err := exec.LookPath(saveBinary); err == nil {
 		p.SavePath = sp
 	}
-	if rp, err := exec.LookPath("iptables-restore"); err == nil {
+	if rp, err := exec.LookPath(restoreBinary); err == nil {
 		p.RestorePath = rp
 		p.AtomicRestore = true
 	}
-	if ip6, err := exec.LookPath("ip6tables"); err == nil {
+	if ip6, err := exec.LookPath(ip6Binary); err == nil {
 		p.IP6TablesPath = ip6
 	}
 

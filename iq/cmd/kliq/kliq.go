@@ -758,8 +758,7 @@ func main() {
 	// Main signal bus — shared by heuristic engine, graph learner and future adapters.
 	mainBus := adapterruntime.NewBus(512)
 
-	// Start the netfilter adapter on the bus (launches GC goroutine and
-	// conntrack observer if conntrack is available).
+	// Start the netfilter adapter on the bus (launches the TTL GC goroutine).
 	if nfAdapter != nil {
 		nfCtx, nfCancel := context.WithCancel(context.Background())
 		defer nfCancel()
@@ -773,7 +772,11 @@ func main() {
 	// updates (pps < BaselineMinUpdatePPS) but still upserts edges for topology.
 	// Only runs when: klshield maps unavailable AND graph learning is enabled.
 	if maps == nil && c.GraphEnabled {
-		startConntrackObserver(context.Background(), mainBus, nodeID)
+		nfCfg := netfilteradapter.DefaultConfig()
+		if nfAdapter != nil {
+			nfCfg = nfAdapter.Config()
+		}
+		startConntrackObserver(context.Background(), mainBus, nodeID, nfCfg)
 	}
 
 	// graphStrikeCh bridges graph.new_edge_after_freeze signals to the main tick loop.
@@ -897,7 +900,7 @@ func main() {
 
 		// Shield telemetry adapter publishes flow observations onto the shared mainBus.
 		// Only created when klshield maps are available — when running netfilter-only,
-		// the conntrack observer (started via nfAdapter.Start) feeds the bus instead.
+		// the conntrack observer feeds the bus instead.
 		telAdapter := shieldtelemetry.NewFromMaps(shieldtelemetry.Config{
 			Interval: c.Interval,
 			NodeID:   nodeID,

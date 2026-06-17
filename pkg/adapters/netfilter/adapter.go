@@ -70,6 +70,9 @@ func New(cfg Config) *Adapter {
 // NewDefault creates an Adapter with safe dry-run defaults.
 func NewDefault() *Adapter { return New(DefaultConfig()) }
 
+// Config returns the effective adapter configuration.
+func (a *Adapter) Config() Config { return a.cfg }
+
 // SetBackend injects the backend and probe result. Must be called before Init.
 func (a *Adapter) SetBackend(probe ProbeResult, b BackendIface) {
 	a.probe = probe
@@ -200,36 +203,43 @@ func (a *Adapter) buildPlan() NetfilterPlan {
 		plan.Chains = append(plan.Chains, ChainPlan{Name: prefix + "_OUTPUT", Hook: "output", Policy: "accept"})
 	}
 
-	chain := prefix + "_INPUT"
+	chains := make([]ChainPlan, len(plan.Chains))
+	copy(chains, plan.Chains)
 
-	for _, cidr := range a.cfg.Safety.ManagementAllowlist {
-		plan.Rules = append(plan.Rules, RulePlan{
-			ID:       RuleID(a.ID(), "management", Selector{SrcCIDR: cidr}, VerdictReturn, nil),
-			Chain:    chain,
-			Selector: Selector{SrcCIDR: cidr},
-			Verdict:  VerdictReturn,
-			Priority: -100,
-		})
+	for _, chain := range chains {
+		for _, cidr := range a.cfg.Safety.ManagementAllowlist {
+			sel := Selector{SrcCIDR: cidr, Direction: chain.Hook}
+			plan.Rules = append(plan.Rules, RulePlan{
+				ID:       RuleID(a.ID(), "management", sel, VerdictReturn, nil),
+				Chain:    chain.Name,
+				Selector: sel,
+				Verdict:  VerdictReturn,
+				Priority: -100,
+			})
+		}
 	}
 
 	for _, rule := range a.rules {
 		verdict := levelToVerdict(rule.level, a.probe)
 		cap := levelToCapability(rule.level)
-		ruleID := RuleID(a.ID(), cap, Selector{SrcIP: rule.srcIP}, verdict, nil)
-		rp := RulePlan{
-			ID:      ruleID,
-			Chain:   chain,
-			Selector: Selector{SrcIP: rule.srcIP},
-			Verdict: verdict,
-		}
-		if verdict == VerdictRateLimit {
-			rate := ratePPSForLevel(rule.level)
-			rp.RateLimit = &RateLimitParams{
-				RatePPS: rate,
-				Name:    "kl_" + ruleID[:8],
+		for _, chain := range chains {
+			sel := Selector{SrcIP: rule.srcIP, Direction: chain.Hook}
+			ruleID := RuleID(a.ID(), cap, sel, verdict, nil)
+			rp := RulePlan{
+				ID:       ruleID,
+				Chain:    chain.Name,
+				Selector: sel,
+				Verdict:  verdict,
 			}
+			if verdict == VerdictRateLimit {
+				rate := a.ratePPSForLevel(rule.level)
+				rp.RateLimit = &RateLimitParams{
+					RatePPS: rate,
+					Name:    "kl_" + ruleID[:8],
+				}
+			}
+			plan.Rules = append(plan.Rules, rp)
 		}
-		plan.Rules = append(plan.Rules, rp)
 	}
 	return plan
 }
@@ -303,11 +313,17 @@ func levelToVerdict(level fsm.Level, probe ProbeResult) Verdict {
 	}
 }
 
-func ratePPSForLevel(level fsm.Level) uint64 {
+func (a *Adapter) ratePPSForLevel(level fsm.Level) uint64 {
 	switch level {
 	case fsm.LevelHard:
+		if a.cfg.Enforcement.HardRatePPS > 0 {
+			return a.cfg.Enforcement.HardRatePPS
+		}
 		return 20
 	default:
+		if a.cfg.Enforcement.SoftRatePPS > 0 {
+			return a.cfg.Enforcement.SoftRatePPS
+		}
 		return 100
 	}
 }

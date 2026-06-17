@@ -87,10 +87,26 @@ func TestSelectBackend_Priority(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got := selectBackend(tc.probe)
+			got := SelectBackend(tc.probe, BackendAuto)
 			if got != tc.expected {
-				t.Errorf("selectBackend() = %q, want %q", got, tc.expected)
+				t.Errorf("SelectBackend() = %q, want %q", got, tc.expected)
 			}
 		})
+	}
+}
+
+func TestSelectBackend_Pinned(t *testing.T) {
+	probe := ProbeResult{
+		NFTables: NFTablesProbe{Available: true},
+		IPTables: IPTablesProbe{
+			Available: true,
+			Backend:   "legacy",
+		},
+	}
+	if got := SelectBackend(probe, BackendIPTablesLegacy); got != BackendIPTablesLegacy {
+		t.Fatalf("expected pinned iptables-legacy, got %q", got)
+	}
+	if got := SelectBackend(probe, BackendIPTablesNFT); got != "" {
+		t.Fatalf("expected unavailable pinned iptables-nft to fail, got %q", got)
 	}
 }

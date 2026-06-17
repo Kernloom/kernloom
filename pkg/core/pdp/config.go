@@ -11,8 +11,8 @@
 //	            Forge signs and distributes this.
 //
 //	PDPConfig   (this package)    — HOW kliq operates: signal engine,
-//	            progressive enforcement, graph learning, and the concrete
-//	            parameters for each built-in adapter (shield_pep, etc.).
+//	            progressive enforcement, graph learning, and generic adapter
+//	            selection. Adapter-specific config is owned by each adapter.
 //	            Forge signs and distributes this too.
 //
 // Autotune overrides SignalEngine thresholds at runtime as kliq learns
@@ -66,9 +66,8 @@ type Spec struct {
 	// Baseline controls per-source traffic baseline learning and deviation detection.
 	Baseline BaselineSpec `yaml:"baseline,omitempty"`
 
-	// Adapters holds the concrete parameters for each built-in PEP adapter.
-	// These are the values the adapter uses to implement abstract capabilities
-	// (network.rate_limit_source, network.block_source) requested by the policy.
+	// Adapters holds generic built-in adapter parameters that are still owned by
+	// the core runtime. Product-specific adapter config is parsed by the adapter.
 	Adapters AdaptersSpec `yaml:"adapters,omitempty"`
 
 	// Autotune controls how kliq learns trigger thresholds (TrigPPS/TrigSyn/
@@ -281,16 +280,12 @@ type GraphExcludeSpec struct {
 
 // ─── Adapters ─────────────────────────────────────────────────────────────────
 
-// AdaptersSpec holds concrete parameters for each built-in PEP adapter.
-// These translate abstract policy actions (rate_limit, block) into the
-// specific values the adapter writes to its enforcement backend.
+// AdaptersSpec holds concrete parameters still owned by the core runtime.
+// Vendor/product-specific adapters parse their own config sections so core does
+// not grow adapter-specific Go types.
 type AdaptersSpec struct {
 	// ShieldPEP configures the built-in Kernloom Shield XDP/eBPF adapter.
 	ShieldPEP ShieldPEPAdapterSpec `yaml:"shield_pep,omitempty"`
-
-	// Netfilter configures the kernloom.netfilter adapter.
-	// Active when --adapter includes "netfilter" (NAS/legacy systems without XDP).
-	Netfilter NetfilterAdapterSpec `yaml:"netfilter,omitempty"`
 }
 
 // ShieldPEPAdapterSpec is the Shield-specific implementation of the abstract
@@ -316,47 +311,6 @@ type ShieldPEPAdapterSpec struct {
 
 	// Cooldown is the minimum time between FSM level transitions.
 	Cooldown Duration `yaml:"cooldown"`
-}
-
-// ─── Netfilter adapter ────────────────────────────────────────────────────────
-
-// NetfilterAdapterSpec configures the kernloom.netfilter PEP adapter.
-// Used when --adapter includes "netfilter" (e.g. NAS/legacy systems without XDP).
-type NetfilterAdapterSpec struct {
-	// Backend pins the Netfilter backend. Empty = auto-select (preferred).
-	// Values: "nftables" | "iptables-nft" | "iptables-legacy"
-	// Set to "iptables-legacy" on Synology/QNAP-like systems.
-	Backend string `yaml:"backend,omitempty"`
-
-	// Directions controls which Netfilter hooks Kernloom installs rules in.
-	Directions struct {
-		Input   bool `yaml:"input"`   // default: true
-		Forward bool `yaml:"forward"` // default: false
-		Output  bool `yaml:"output"`  // default: false
-	} `yaml:"directions,omitempty"`
-
-	// RateLimit configures default enforcement rates for SOFT/HARD levels.
-	// Per-source rates: falls back to hashlimit (iptables) or meter (nftables).
-	RateLimit struct {
-		SoftRatePPS uint64 `yaml:"soft_rate_pps,omitempty"` // default: 100
-		HardRatePPS uint64 `yaml:"hard_rate_pps,omitempty"` // default: 20
-	} `yaml:"rate_limit,omitempty"`
-
-	// Observation configures conntrack-based flow telemetry for GraphLearner.
-	Observation struct {
-		// ConntrackSnapshot enables periodic conntrack -L polling.
-		ConntrackSnapshot bool `yaml:"conntrack_snapshot,omitempty"` // default: true
-		// ConntrackPollInterval is the polling frequency.
-		ConntrackPollInterval Duration `yaml:"conntrack_poll_interval,omitempty"` // default: 5s
-	} `yaml:"observation,omitempty"`
-
-	// Safety controls lockout-prevention behaviour.
-	Safety struct {
-		// ManagementAllowlist are CIDRs that must never be blocked.
-		// Applied as RETURN rules before all Kernloom deny rules.
-		// Recommended: set to management/admin subnet on production systems.
-		ManagementAllowlist []string `yaml:"management_allowlist,omitempty"`
-	} `yaml:"safety,omitempty"`
 }
 
 // ─── Duration ─────────────────────────────────────────────────────────────────
