@@ -218,13 +218,40 @@ func TestEnforcementReceiptWithMessage(t *testing.T) {
 }
 
 func TestReceiptStatuses(t *testing.T) {
-	statuses := []ReceiptStatus{StatusApplied, StatusFailed, StatusSkipped, StatusUnsupported, StatusDryRun}
+	statuses := []ReceiptStatus{StatusApplied, StatusFailed, StatusSkipped, StatusUnsupported, StatusDryRun, StatusReverted, StatusConflict}
 
 	for _, status := range statuses {
 		receipt := NewEnforcementReceipt("dec-123", "node-001", "adapter", status)
 		if receipt.Status != status {
 			t.Errorf("expected status=%s, got %s", status, receipt.Status)
 		}
+	}
+}
+
+func TestEnforcementReceiptWithLease(t *testing.T) {
+	exp := time.Now().UTC().Add(time.Minute)
+	lease := ActionLease{
+		LeaseID:      "lease-123",
+		DecisionID:   "dec-123",
+		NodeID:       "node-001",
+		AdapterID:    "shield-pep",
+		Target:       "ip:10.0.0.1",
+		Action:       "enforce.traffic.rate_limit",
+		Level:        "soft",
+		Status:       ActionLeaseActive,
+		FencingToken: "fence-123",
+		AppliedAt:    time.Now().UTC(),
+		ExpiresAt:    exp,
+	}
+	receipt := NewEnforcementReceipt("dec-123", "node-001", "shield-pep", StatusApplied).SetLease(lease)
+	if receipt.LeaseID != "lease-123" {
+		t.Fatalf("expected lease id, got %q", receipt.LeaseID)
+	}
+	if receipt.Target != "ip:10.0.0.1" || receipt.Action != "enforce.traffic.rate_limit" {
+		t.Fatalf("lease target/action not copied: %#v", receipt)
+	}
+	if receipt.ExpiresAt == nil || !receipt.ExpiresAt.Equal(exp) {
+		t.Fatalf("lease expiry not copied: %#v", receipt.ExpiresAt)
 	}
 }
 

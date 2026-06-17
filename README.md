@@ -131,18 +131,18 @@ sudo ./kliq --pdp-config=configs/pdp/idp-bootstrap.yaml \
 ```
 kernloom/
 ├── iq/cmd/kliq/               KLIQ agent main loop and CLI subcommands
+├── iq/internal/
+│   ├── actionbroker/          Action lease journal + receipt/revert handling
+│   ├── actions/               Action proposal/resolution/executor contracts
+│   └── lifecycle/             Bootstrap autotune and graph lifecycle helpers
 ├── shield/
 │   ├── bpf/                   XDP/eBPF program (C)
 │   └── cmd/klshield/          klshield CLI
 ├── pkg/
-│   ├── contracts/             Versioned Forge↔KLIQ protocol schemas
-│   │                          (RuntimeBundle, RuntimePolicyPack,
-│   │                           RuntimePDPProfile, LocalRiskAssessment,
-│   │                           BundleAck, EnforcementReceipt, RuntimeFinding)
 │   ├── core/
 │   │   ├── observation/       Canonical observation model
 │   │   ├── signal/            Signal type catalog
-│   │   ├── decision/          Decision + EnforcementReceipt
+│   │   ├── decision/          Decision, ActionLease + EnforcementReceipt
 │   │   ├── entity/            Entity model (Kind, Ref)
 │   │   ├── graph/             Graph edge model + lifecycle
 │   │   ├── evidence/          Evidence records
@@ -181,7 +181,7 @@ kernloom/
 │   ├── riskaggregator/        Signal risk aggregation
 │   ├── decisionengine/        Decision engine (FSM + signals → decisions)
 │   ├── adapterruntime/        Adapter lifecycle interface + EventBus
-│   └── statestore/sqlite/     SQLite state store
+│   └── statestore/sqlite/     SQLite state store + action lease journal
 └── configs/
     ├── pdp/                   PDPConfig profiles (16 profiles, all node roles)
     └── policies/              LocalPolicyPack examples
@@ -202,6 +202,14 @@ The core packages (`pkg/core/`, `pkg/pipeline/`, etc.) must never contain vendor
 
 ---
 
+## Action leases and receipts
+
+KLIQ records TTL-bounded enforcement actions as action leases before calling a PEP. Each lease carries a fencing token, expiry time and revert state. On expiry, the action broker checks the current fencing token before reverting; a mismatch is recorded as `conflict` and no blind revert is attempted.
+
+Receipts are emitted from the same model and include apply/revert status, lease ID, target, action, expiry and fencing token. This keeps future KLShield, netfilter and OpenZiti enforcement paths behind one auditable boundary.
+
+---
+
 ## Forge integration
 
 Forge produces signed `RuntimeBundle` artifacts. KLIQ:
@@ -210,7 +218,7 @@ Forge produces signed `RuntimeBundle` artifacts. KLIQ:
 3. Activates the embedded `RuntimePolicyPack` in its Runtime PDP
 4. Reports `BundleAck`, `LocalRiskAssessment`, `EnforcementReceipt`, and `RuntimeFinding` back to Forge
 
-Shared protocol schemas live in `pkg/contracts/` (schema version: `kernloom.io/runtime/v1alpha1`).
+Shared protocol schemas are planned for `pkg/contracts/` / a pinned contracts module (schema version: `kernloom.io/runtime/v1alpha1`). The current repository still carries the local runtime models in `pkg/core/`.
 
 ---
 

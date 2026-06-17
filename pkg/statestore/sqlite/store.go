@@ -153,6 +153,40 @@ func (s *Store) migrate() error {
 		}
 	}
 
+	if applied < 3 {
+		steps := []string{
+			`CREATE TABLE IF NOT EXISTS action_leases (
+				lease_id      TEXT    PRIMARY KEY,
+				decision_id   TEXT    NOT NULL,
+				proposal_id   TEXT    NOT NULL DEFAULT '',
+				node_id       TEXT    NOT NULL DEFAULT '',
+				adapter_id    TEXT    NOT NULL,
+				target        TEXT    NOT NULL,
+				action        TEXT    NOT NULL,
+				level         TEXT    NOT NULL DEFAULT '',
+				status        TEXT    NOT NULL,
+				fencing_token TEXT    NOT NULL,
+				policy_id     TEXT    NOT NULL DEFAULT '',
+				bundle_id     TEXT    NOT NULL DEFAULT '',
+				reason        TEXT    NOT NULL DEFAULT '',
+				applied_at    TEXT    NOT NULL,
+				expires_at    TEXT    NOT NULL,
+				reverted_at   TEXT    NOT NULL DEFAULT '',
+				last_error    TEXT    NOT NULL DEFAULT '',
+				metadata      TEXT    NOT NULL DEFAULT '{}'
+			)`,
+			`CREATE INDEX IF NOT EXISTS idx_action_leases_status_expires ON action_leases (status, expires_at)`,
+			`CREATE INDEX IF NOT EXISTS idx_action_leases_decision ON action_leases (decision_id)`,
+			`CREATE INDEX IF NOT EXISTS idx_action_leases_target ON action_leases (adapter_id, target, status)`,
+			`INSERT OR IGNORE INTO schema_migrations (version) VALUES (3)`,
+		}
+		for _, step := range steps {
+			if _, err := s.db.Exec(step); err != nil {
+				return fmt.Errorf("migration v3: %w\nSQL: %s", err, step)
+			}
+		}
+	}
+
 	return nil
 }
 

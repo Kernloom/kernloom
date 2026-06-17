@@ -183,6 +183,9 @@ type EnforcementReceipt struct {
 	// DecisionID is the ID of the Decision this Receipt corresponds to.
 	DecisionID string `json:"decision_id"`
 
+	// LeaseID links this receipt to the local action lease/journal entry.
+	LeaseID string `json:"lease_id,omitempty"`
+
 	// NodeID is the node where enforcement was attempted.
 	NodeID string `json:"node_id"`
 
@@ -193,11 +196,29 @@ type EnforcementReceipt struct {
 	// Status describes the outcome.
 	Status ReceiptStatus `json:"status"`
 
+	// RevertStatus describes the outcome of automatic expiry/revert handling.
+	RevertStatus RevertStatus `json:"revert_status,omitempty"`
+
 	// Message is a human-readable note about the status.
 	Message string `json:"message,omitempty"`
 
+	// Action is the concrete action/capability attempted.
+	Action string `json:"action,omitempty"`
+
+	// Target is the concrete enforcement target.
+	Target string `json:"target,omitempty"`
+
+	// FencingToken identifies the adapter state this receipt refers to.
+	FencingToken string `json:"fencing_token,omitempty"`
+
 	// AppliedAt is when the action was applied (or attempted).
 	AppliedAt time.Time `json:"applied_at"`
+
+	// ExpiresAt is when the lease/action is expected to expire.
+	ExpiresAt *time.Time `json:"expires_at,omitempty"`
+
+	// RevertedAt is when automatic revert was attempted/completed.
+	RevertedAt *time.Time `json:"reverted_at,omitempty"`
 }
 
 // ReceiptStatus describes the result of an enforcement attempt.
@@ -209,7 +230,53 @@ const (
 	StatusSkipped     ReceiptStatus = "skipped"     // Decision skipped (policy/permission)
 	StatusUnsupported ReceiptStatus = "unsupported" // Capability not available
 	StatusDryRun      ReceiptStatus = "dry_run"     // Simulated; not actually applied
+	StatusReverted    ReceiptStatus = "reverted"    // Action was reverted after expiry
+	StatusConflict    ReceiptStatus = "conflict"    // Revert fenced off by changed adapter state
 )
+
+// RevertStatus describes the outcome of action expiry/revert handling.
+type RevertStatus string
+
+const (
+	RevertStatusPending  RevertStatus = "pending"
+	RevertStatusReverted RevertStatus = "reverted"
+	RevertStatusFailed   RevertStatus = "failed"
+	RevertStatusConflict RevertStatus = "conflict"
+)
+
+// ActionLeaseStatus is the durable state of a TTL-bounded enforcement action.
+type ActionLeaseStatus string
+
+const (
+	ActionLeasePending  ActionLeaseStatus = "pending"
+	ActionLeaseActive   ActionLeaseStatus = "active"
+	ActionLeaseReverted ActionLeaseStatus = "reverted"
+	ActionLeaseExpired  ActionLeaseStatus = "expired"
+	ActionLeaseFailed   ActionLeaseStatus = "failed"
+	ActionLeaseConflict ActionLeaseStatus = "conflict"
+)
+
+// ActionLease is the durable journal record for a bounded enforcement action.
+type ActionLease struct {
+	LeaseID      string            `json:"lease_id"`
+	DecisionID   string            `json:"decision_id"`
+	ProposalID   string            `json:"proposal_id,omitempty"`
+	NodeID       string            `json:"node_id"`
+	AdapterID    string            `json:"adapter_id"`
+	Target       string            `json:"target"`
+	Action       string            `json:"action"`
+	Level        string            `json:"level"`
+	Status       ActionLeaseStatus `json:"status"`
+	FencingToken string            `json:"fencing_token"`
+	PolicyID     string            `json:"policy_id,omitempty"`
+	BundleID     string            `json:"bundle_id,omitempty"`
+	Reason       string            `json:"reason,omitempty"`
+	AppliedAt    time.Time         `json:"applied_at"`
+	ExpiresAt    time.Time         `json:"expires_at"`
+	RevertedAt   *time.Time        `json:"reverted_at,omitempty"`
+	LastError    string            `json:"last_error,omitempty"`
+	Metadata     map[string]string `json:"metadata,omitempty"`
+}
 
 // NewEnforcementReceipt creates a new receipt.
 func NewEnforcementReceipt(decisionID, nodeID, adapterID string, status ReceiptStatus) *EnforcementReceipt {
@@ -226,6 +293,17 @@ func NewEnforcementReceipt(decisionID, nodeID, adapterID string, status ReceiptS
 // SetMessage adds a message to the receipt.
 func (r *EnforcementReceipt) SetMessage(msg string) *EnforcementReceipt {
 	r.Message = msg
+	return r
+}
+
+// SetLease links this receipt to an action lease.
+func (r *EnforcementReceipt) SetLease(lease ActionLease) *EnforcementReceipt {
+	r.LeaseID = lease.LeaseID
+	r.Action = lease.Action
+	r.Target = lease.Target
+	r.FencingToken = lease.FencingToken
+	r.ExpiresAt = &lease.ExpiresAt
+	r.RevertedAt = lease.RevertedAt
 	return r
 }
 

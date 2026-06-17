@@ -184,6 +184,31 @@ CREATE TABLE IF NOT EXISTS decisions (
 CREATE INDEX IF NOT EXISTS idx_decisions_subject ON decisions (subject_id, decided_at);
 CREATE INDEX IF NOT EXISTS idx_decisions_expires ON decisions (expires_at, revoked);
 
+-- ── Action leases / revert journal ───────────────────────────────────────────
+CREATE TABLE IF NOT EXISTS action_leases (
+    lease_id      TEXT    PRIMARY KEY,
+    decision_id   TEXT    NOT NULL,
+    proposal_id   TEXT    NOT NULL DEFAULT '',
+    node_id       TEXT    NOT NULL DEFAULT '',
+    adapter_id    TEXT    NOT NULL,
+    target        TEXT    NOT NULL,
+    action        TEXT    NOT NULL,
+    level         TEXT    NOT NULL DEFAULT '',
+    status        TEXT    NOT NULL,
+    fencing_token TEXT    NOT NULL,
+    policy_id     TEXT    NOT NULL DEFAULT '',
+    bundle_id     TEXT    NOT NULL DEFAULT '',
+    reason        TEXT    NOT NULL DEFAULT '',
+    applied_at    TEXT    NOT NULL,
+    expires_at    TEXT    NOT NULL,
+    reverted_at   TEXT    NOT NULL DEFAULT '',
+    last_error    TEXT    NOT NULL DEFAULT '',
+    metadata      TEXT    NOT NULL DEFAULT '{}'
+);
+CREATE INDEX IF NOT EXISTS idx_action_leases_status_expires ON action_leases (status, expires_at);
+CREATE INDEX IF NOT EXISTS idx_action_leases_decision ON action_leases (decision_id);
+CREATE INDEX IF NOT EXISTS idx_action_leases_target ON action_leases (adapter_id, target, status);
+
 -- ── Adapter state ─────────────────────────────────────────────────────────────
 -- Opaque per-adapter checkpoint blobs (cursor positions, sequence numbers, etc.)
 CREATE TABLE IF NOT EXISTS adapter_state (
@@ -205,4 +230,4 @@ CREATE TABLE IF NOT EXISTS registry_versions (
 
 // currentSchemaVersion is incremented whenever schema changes are made.
 // The migrate() function applies missing versions in order.
-const currentSchemaVersion = 2
+const currentSchemaVersion = 3
