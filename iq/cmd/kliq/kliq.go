@@ -48,6 +48,7 @@ import (
 
 	"github.com/kernloom/kernloom/iq/internal/actionbroker"
 	"github.com/kernloom/kernloom/iq/internal/actions"
+	"github.com/kernloom/kernloom/iq/internal/forgeagent"
 	"github.com/kernloom/kernloom/iq/internal/lifecycle/bootstrapautotune"
 	lgraph "github.com/kernloom/kernloom/iq/internal/lifecycle/graph"
 	"github.com/kernloom/kernloom/pkg/adapterruntime"
@@ -556,9 +557,10 @@ func main() {
 		ms.BundleHash = stFile.Active.ForgeBundleHash
 	}
 
-	// bundleUpdateCh receives raw bundle YAML from the heartbeat goroutine.
-	// Non-blocking: the main loop drains it once per tick.
-	bundleUpdateCh := make(chan []byte, 1)
+	// bundleUpdateCh receives raw bundle YAML from the forgeagent heartbeat.
+	// Declared as receive-only so it can be set from forgeAgent.BundleUpdates()
+	// or from a local channel when running without Forge.
+	var bundleUpdateCh <-chan []byte = make(chan []byte, 1)
 
 	// ── Shadow metric pipeline ──────────────────────────────────────────────────
 	// Disabled by default (metric_pipeline.enabled=false). When enabled in shadow
@@ -609,11 +611,10 @@ func main() {
 	receiptUploaderCtx, receiptUploaderCancel := context.WithCancel(context.Background())
 	defer receiptUploaderCancel()
 
-	// Forge enrollment + heartbeat loop (only when --forge-url is set).
+	// Forge enrollment + heartbeat — driven by internal/forgeagent.
 	var forgeC *forgeClient
-	var enrolledPackName string
-	var activePackIssuedAt time.Time // rollback protection: tracks IssuedAt of running pack
-	var activePackHash string        // drift detection: SHA-256 of last applied pack bytes
+	var activePackIssuedAt time.Time // set by applyForgePack; used for rollback protection
+	var forgeAgent *forgeagent.Agent
 	if c.ForgeURL != "" {
 		var fcErr error
 		forgeC, fcErr = newForgeClient(c.ForgeURL, c.ForgeEnrollToken, nodeID, c.ForgeCAPath)
@@ -625,126 +626,81 @@ func main() {
 		startReceiptUploader(receiptUploaderCtx, stateStore, forgeC,
 			log.New(os.Stderr, "[receipt-uploader] ", log.LstdFlags))
 
-		// Restore persisted Forge state from state file (avoids re-enrollment after restart).
+		// Restore persisted session from state file (avoids re-enrollment on restart).
+		initPackName, initPackHash := "", ""
 		if stFile != nil && stFile.Active.ForgeSessionToken != "" {
 			forgeC.RestoreSession(stFile.Active.ForgeSessionToken)
-			enrolledPackName = stFile.Active.ForgePackName
+			initPackName = stFile.Active.ForgePackName
+			initPackHash = stFile.Active.ForgePackHash
 			activePackIssuedAt = stFile.Active.ForgePackIssuedAt
-			activePackHash = stFile.Active.ForgePackHash
-			kliqLog.Printf("FORGE session restored from state: pack=%s", enrolledPackName)
+			kliqLog.Printf("FORGE session restored from state: pack=%s", initPackName)
 		}
 
-		// Enroll only when no valid session token was restored.
-		if forgeC.SessionToken() == "" {
-			enrollCtx, enrollCancel := context.WithTimeout(context.Background(), 30*time.Second)
-			er, err := forgeC.Enroll(enrollCtx, c.Mode, inv, report)
-			enrollCancel()
-			if err != nil {
-				kliqLog.Printf("WARNING: forge enrollment failed: %v — continuing with local config", err)
-			} else {
-				kliqLog.Printf("FORGE enrolled: node=%s status=%s", er.NodeID, er.Status)
-				// Persist session token immediately after enrollment.
-				if stFile != nil && forgeC.SessionToken() != "" {
-					stFile.Active.ForgeSessionToken = forgeC.SessionToken()
+		forgeAgent = forgeagent.New(
+			forgeagent.Config{
+				NodeID:          nodeID,
+				Heartbeat:       c.ForgeHeartbeat,
+				InitialPackName: initPackName,
+				InitialPackHash: initPackHash,
+			},
+			forgeagent.Callbacks{
+				Enroll: func(ctx context.Context) (string, string, error) {
+					er, err := forgeC.Enroll(ctx, c.Mode, inv, report)
+					if err != nil {
+						return "", "", err
+					}
+					if stFile != nil && forgeC.SessionToken() != "" {
+						stFile.Active.ForgeSessionToken = forgeC.SessionToken()
+						_ = writeStateAtomic(c.StatePath, stFile)
+					}
+					return er.NodeID, er.Status, nil
+				},
+				Heartbeat: func(ctx context.Context, packName string) (bool, string, error) {
+					return forgeC.Heartbeat(ctx, packName, false)
+				},
+				PullPack: func(ctx context.Context) ([]byte, string, error) {
+					return forgeC.PullPack(ctx)
+				},
+				PullBundle: func(ctx context.Context) ([]byte, error) {
+					b, _, err := forgeC.PullBundle(ctx)
+					return b, err
+				},
+				ReportPackStatus: func(ctx context.Context, name string, ok bool, msg string) error {
+					return forgeC.ReportPackStatus(ctx, name, ok, msg)
+				},
+				ReportStatus: func(ctx context.Context) error {
+					status := buildRuntimeStatus(nodeID, ms, bsCtl, graphCtl, lgraph.GraphStats{}, &c, tupleActive)
+					reportBundleStatus(ctx, forgeC, status)
+					return nil
+				},
+			},
+			func(packBytes []byte, packName string) error {
+				// Apply the pack and update rollback state.
+				if err := applyForgePack(packBytes, packName, c.PolicyVerifyKeyPath, &c, &activePackIssuedAt); err != nil {
+					return err
+				}
+				hash := PackHash(packBytes)
+				forgeAgent.SetPackHash(hash)
+				updateSidecarPack(c.StatePath, packName, c.PolicyMaxAction)
+				return nil
+			},
+			func(packName, packHash string) {
+				if stFile != nil {
+					stFile.Active.ForgePackName = packName
+					stFile.Active.ForgePackIssuedAt = activePackIssuedAt
+					stFile.Active.ForgePackHash = packHash
 					_ = writeStateAtomic(c.StatePath, stFile)
 				}
-				if er.Status == "approved" {
-					if packBytes, packName, err := forgeC.PullPack(context.Background()); err != nil {
-						kliqLog.Printf("WARNING: forge pack pull failed: %v", err)
-					} else if packBytes != nil {
-						enrolledPackName = packName
-						if err := applyForgePack(packBytes, packName, c.PolicyVerifyKeyPath, &c, &activePackIssuedAt); err != nil {
-							kliqLog.Printf("WARNING: forge pack apply failed: %v — using local config", err)
-							forgeC.ReportPackStatus(context.Background(), packName, false, err.Error())
-						} else {
-							activePackHash = PackHash(packBytes)
-							kliqLog.Printf("FORGE pack applied: %s", packName)
-							updateSidecarPack(c.StatePath, packName, c.PolicyMaxAction)
-							forgeC.ReportPackStatus(context.Background(), packName, true, "")
-							if stFile != nil {
-								stFile.Active.ForgePackName = packName
-								stFile.Active.ForgePackIssuedAt = activePackIssuedAt
-								stFile.Active.ForgePackHash = activePackHash
-								_ = writeStateAtomic(c.StatePath, stFile)
-							}
-						}
-					}
-				}
-			}
+			},
+			log.New(os.Stderr, "[forge-agent] ", log.LstdFlags),
+		)
+		agentCtx, agentCancel := context.WithCancel(context.Background())
+		defer agentCancel()
+		if err := forgeAgent.Start(agentCtx); err != nil {
+			kliqLog.Printf("WARNING: forge agent start: %v", err)
 		}
-
-		// Heartbeat goroutine.
-		hbCtx, hbCancel := context.WithCancel(context.Background())
-		defer hbCancel()
-		lastNodeStatus := "pending" // tracks the last known Forge node status
-		go func() {
-			ticker := time.NewTicker(c.ForgeHeartbeat)
-			defer ticker.Stop()
-			for {
-				select {
-				case <-hbCtx.Done():
-					return
-				case <-ticker.C:
-					// Drift detection: compare running pack hash against last applied.
-					// Drift means the config that's actually running differs from what
-					// Forge last pushed — e.g. if someone manually edited the pack file.
-					drift := activePackHash != "" && PackHash(nil) != activePackHash
-					// PackHash(nil) would be wrong — we don't re-read the file here.
-					// Instead drift is true when activePackHash is set but the in-memory
-					// pack identity (enrolledPackName) no longer matches state.
-					// Full file-hash drift detection requires reading the temp pack path,
-					// which is not persisted. Use name-mismatch as a conservative proxy.
-					drift = false // TODO: implement full hash-based drift after pack path is persisted
-					_ = drift
-
-					packUpdated, nodeStatus, err := forgeC.Heartbeat(context.Background(), enrolledPackName, false)
-					if err != nil {
-						kliqLog.Printf("FORGE heartbeat failed: %v", err)
-						continue
-					}
-					if nodeStatus != "" && nodeStatus != lastNodeStatus {
-						kliqLog.Printf("FORGE node status: %s → %s", lastNodeStatus, nodeStatus)
-						lastNodeStatus = nodeStatus
-					}
-					kliqLog.Printf("FORGE heartbeat ok: pack=%s pack_updated=%v status=%s", enrolledPackName, packUpdated, nodeStatus)
-
-					// Report rich runtime status to Forge (non-fatal if it fails).
-					status := buildRuntimeStatus(nodeID, ms, bsCtl, graphCtl, lgraph.GraphStats{}, &c, tupleActive)
-					reportBundleStatus(context.Background(), forgeC, status)
-					// Pull and deliver RuntimeBundle when available (non-blocking send).
-					if bundleBytes, _, bundleErr := forgeC.PullBundle(context.Background()); bundleErr == nil && bundleBytes != nil {
-						select {
-						case bundleUpdateCh <- bundleBytes:
-						default: // channel full — drop; next heartbeat will retry
-						}
-					}
-					if packUpdated {
-						kliqLog.Printf("FORGE pack update available — pulling")
-						if packBytes, packName, err := forgeC.PullPack(context.Background()); err != nil {
-							kliqLog.Printf("FORGE pack pull failed: %v", err)
-						} else if packBytes != nil {
-							if err := applyForgePack(packBytes, packName, c.PolicyVerifyKeyPath, &c, &activePackIssuedAt); err != nil {
-								kliqLog.Printf("FORGE pack apply failed: %v", err)
-								forgeC.ReportPackStatus(context.Background(), packName, false, err.Error())
-							} else {
-								enrolledPackName = packName
-								activePackHash = PackHash(packBytes)
-								kliqLog.Printf("FORGE pack updated: %s", packName)
-								updateSidecarPack(c.StatePath, packName, c.PolicyMaxAction)
-								forgeC.ReportPackStatus(context.Background(), packName, true, "")
-								// Persist updated Forge state.
-								if stFile != nil {
-									stFile.Active.ForgePackName = packName
-									stFile.Active.ForgePackIssuedAt = activePackIssuedAt
-									stFile.Active.ForgePackHash = activePackHash
-									_ = writeStateAtomic(c.StatePath, stFile)
-								}
-							}
-						}
-					}
-				}
-			}
-		}()
+		// Wire the agent's bundle channel to the main loop.
+		bundleUpdateCh = forgeAgent.BundleUpdates()
 	}
 
 	// Tuple enforcement: activate XDP edge maps when the feature is enabled.
