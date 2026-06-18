@@ -65,10 +65,11 @@ Recommended fix:
 - Keep `klshield-light` as a CLI-only compatibility alias or replace it with a capability view once
   runtime profiles are capability-based.
 
-### 3. Action Broker is not yet the live enforcement path
+### 3. Action Broker is only partially live
 
-`iq/internal/actionbroker` now models leases, receipts, and fencing-aware revert behavior, but the
-main KLIQ enforcement path still goes through older action/executor code.
+`iq/internal/actionbroker` now models leases, receipts, and fencing-aware revert behavior. KLIQ now
+routes TTL-bounded FSM/CEL source enforcement through a brokered executor that journals leases and
+logs receipts before delegating to the existing KLShield/netfilter PEP path.
 
 Relevant files:
 
@@ -80,18 +81,15 @@ Relevant files:
 
 Risk:
 
-- The central invariant "every action has a receipt and revert outcome" is not true for live KLIQ
-  behavior yet.
-- Future PDP work could produce decisions that bypass lease journaling.
-- Pending leases can now be reconciled after broker startup, but the broker is not yet wired into the
-  live KLIQ loop.
+- Tuple enforcement and explicit de-enforcement are still lease-less compatibility paths.
+- Receipts are logged but not yet persisted/uploaded as a durable Forge-facing queue.
+- Expiry revert is modeled, but full runtime-state-map revert wiring still needs a dedicated pass.
 
 Recommended fix:
 
-- Wire one real enforcement path through `actionbroker.Broker`.
 - Persist receipts or an upload queue, not only lease records.
-- Call broker pending reconciliation during KLIQ startup once the broker is live.
-- Make broker integration independent of graph state store initialization.
+- Route tuple enforcement through a broker-compatible PEP once tuple leases have a target model.
+- Wire expiry revert to runtime FSM state maps or make lease expiry explicitly advisory.
 
 ## P1 - High Priority
 
@@ -140,21 +138,21 @@ Recommended fix:
   - `internal/proposals`
 - Keep `cmd/kliq` as composition, config loading, and CLI surface.
 
-### 6. Local risk still lacks `LocalRiskAssessment`
+### 6. Local risk assessment is not yet wired into Runtime PDP
 
-The current risk path is still too coarse for the documented architecture. It does not yet expose
-level, confidence, completeness, domains, contributions, missing inputs, and validity windows as a
-first-class assessment.
+`iq/internal/localrisk` now turns riskaggregator output into an explainable assessment with level,
+confidence, completeness, domains, contributions, missing inputs, validity window, and model
+reference. The current runtime does not yet feed this into a Runtime PDP.
 
 Risk:
 
-- Runtime PDP cannot make explainable decisions on local context.
-- Missing inputs and confidence cannot be surfaced to Forge or feedback/proposal flows.
+- Runtime PDP cannot consume the assessment until that package exists.
+- Missing inputs and confidence are not yet surfaced to Forge or feedback/proposal flows.
 
 Recommended fix:
 
-- Implement the documented Local Risk Engine shape before broadening PDP behavior.
-- Make the existing shadow risk value one contribution, not the whole risk contract.
+- Feed `iq/internal/localrisk.Assessment` into `internal/runtimepdp`.
+- Map the internal assessment to shared contracts once the contracts package/module is decided.
 
 ### 7. Runtime PDP is not yet a generic runtime decision service
 
@@ -296,7 +294,6 @@ Recommended fix:
 ## Recommended Immediate Order
 
 1. Add Forge/KLIQ conformance fixtures for signed RuntimeBundles and trust-root rotation.
-2. Wire one live KLIQ enforcement path through `iq/internal/actionbroker`, including pending lease
-   recovery.
-3. Add `pkg/contracts` and fixture tests so Forge and KLIQ share one schema contract.
-4. Extract `internal/runtimepdp` and `internal/riskengine` once the enforcement invariant is live.
+2. Add `pkg/contracts` and fixture tests so Forge and KLIQ share one schema contract.
+3. Extract `internal/runtimepdp` and feed it `iq/internal/localrisk.Assessment`.
+4. Persist/upload enforcement receipts and finish broker support for tuple/de-enforce paths.

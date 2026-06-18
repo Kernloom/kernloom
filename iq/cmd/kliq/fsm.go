@@ -7,17 +7,25 @@ import (
 	"time"
 
 	"github.com/kernloom/kernloom/iq/internal/actions"
+	shieldpep "github.com/kernloom/kernloom/pkg/adapters/klshield/pep"
 	"github.com/kernloom/kernloom/pkg/core/fsm"
 )
 
 /* ---------------- Per-candidate FSM logic ---------------- */
+
+type fsmActionExecutor interface {
+	Apply4([4]byte, fsm.State, actions.ActionResolution, shieldpep.EnforcementParams, time.Time) (fsm.State, actions.ActionResult)
+	Apply6([16]byte, fsm.State, actions.ActionResolution, shieldpep.EnforcementParams, time.Time) (fsm.State, actions.ActionResult)
+	ApplyDeEnforce4([4]byte, fsm.State, shieldpep.EnforcementParams, time.Time) fsm.State
+	ApplyDeEnforce6([16]byte, fsm.State, shieldpep.EnforcementParams, time.Time) fsm.State
+}
 
 // processCandidate4 runs the FSM for a single IPv4 source.
 // It handles whitelist/feedback de-enforcement, constructs the doTransition
 // callback (which drives the shieldpep adapter), calls fsm.Advance and adds
 // learning samples when appropriate.
 func processCandidate4(m metrics, st fsm.State, nowWall time.Time, c cfg,
-	wl *whitelist, fb *feedbackManager, resolver *actions.PolicyResolver, executor *actions.ShieldActionExecutor,
+	wl *whitelist, fb *feedbackManager, resolver *actions.PolicyResolver, executor fsmActionExecutor,
 	resPPS, resSyn, resScan, resBps *reservoir, clean bool,
 ) fsm.State {
 	st.LastSeenWallTime = nowWall
@@ -53,6 +61,7 @@ func processCandidate4(m metrics, st fsm.State, nowWall time.Time, c cfg,
 			DesiredAction: actions.FsmLevelToCapability(target),
 			DesiredLevel:  actions.FsmLevelName(target),
 			Target:        actions.ActionTarget{Granularity: "src_ip", Value: m.ipString()},
+			TTL:           c.ttlForFSMLevel(target),
 			CreatedAt:     nowWall,
 		}
 		res := resolver.Resolve(proposal)
@@ -86,7 +95,7 @@ func processCandidate4(m metrics, st fsm.State, nowWall time.Time, c cfg,
 
 // processCandidate6 runs the FSM for a single IPv6 source.
 func processCandidate6(m metrics, st fsm.State, nowWall time.Time, c cfg,
-	wl *whitelist, fb *feedbackManager, resolver *actions.PolicyResolver, executor *actions.ShieldActionExecutor,
+	wl *whitelist, fb *feedbackManager, resolver *actions.PolicyResolver, executor fsmActionExecutor,
 	resPPS, resSyn, resScan, resBps *reservoir, clean bool,
 ) fsm.State {
 	st.LastSeenWallTime = nowWall
@@ -122,6 +131,7 @@ func processCandidate6(m metrics, st fsm.State, nowWall time.Time, c cfg,
 			DesiredAction: actions.FsmLevelToCapability(target),
 			DesiredLevel:  actions.FsmLevelName(target),
 			Target:        actions.ActionTarget{Granularity: "src_ip", Value: m.ipString()},
+			TTL:           c.ttlForFSMLevel(target),
 			CreatedAt:     nowWall,
 		}
 		res := resolver.Resolve(proposal)

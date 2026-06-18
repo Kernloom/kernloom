@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/kernloom/kernloom/iq/internal/actions"
 	"github.com/kernloom/kernloom/pkg/adapters/klshield/pep"
 	celeval "github.com/kernloom/kernloom/pkg/core/cel"
 	"github.com/kernloom/kernloom/pkg/core/fsm"
@@ -384,6 +385,23 @@ func (c cfg) toPEPParams() shieldpep.EnforcementParams {
 		BlockTTL:  c.BlockTTL,
 		Cooldown:  c.adapterParams.Cooldown,
 	}
+}
+
+func (c cfg) ttlForLevelName(level string) time.Duration {
+	switch level {
+	case "soft":
+		return c.SoftTTL
+	case "hard":
+		return c.HardTTL
+	case "block":
+		return c.BlockTTL
+	default:
+		return 0
+	}
+}
+
+func (c cfg) ttlForFSMLevel(level fsm.Level) time.Duration {
+	return c.ttlForLevelName(actions.FsmLevelName(level))
 }
 
 func parseFlags() cfg {

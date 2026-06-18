@@ -40,11 +40,13 @@ import (
 	"math"
 	"os"
 	ossignal "os/signal"
+	"path/filepath"
 	"sort"
 	"strconv"
 	"syscall"
 	"time"
 
+	"github.com/kernloom/kernloom/iq/internal/actionbroker"
 	"github.com/kernloom/kernloom/iq/internal/actions"
 	"github.com/kernloom/kernloom/iq/internal/lifecycle/bootstrapautotune"
 	lgraph "github.com/kernloom/kernloom/iq/internal/lifecycle/graph"
@@ -464,10 +466,41 @@ func main() {
 		}
 	}
 
+	if c.StateStorePath != "" && c.StateStorePath != ":memory:" {
+		if err := os.MkdirAll(filepath.Dir(c.StateStorePath), 0o755); err != nil {
+			log.Fatalf("create state store dir for %s: %v", c.StateStorePath, err)
+		}
+	}
+	stateStore, ssErr := sstore.Open(sstore.DefaultConfig(c.StateStorePath))
+	if ssErr != nil {
+		log.Fatalf("open state store %s: %v", c.StateStorePath, ssErr)
+	}
+	defer stateStore.Close()
+
 	// Central enforcement pipeline: resolver is the policy gate; executor is the
-	// only component authorized to call TransitionV4/V6.
+	// only component authorized to call TransitionV4/V6, through the action broker
+	// for TTL-bounded actions.
 	resolver := c.buildPolicyResolver()
-	executor := buildExecutor(pep)
+	legacyExecutor := buildExecutor(pep)
+	brokerPEP := newBrokeredFSMPEP(legacyExecutor)
+	actionBroker, abErr := actionbroker.New(actionbroker.Config{
+		NodeID: nodeID,
+		Store:  stateStore,
+		PEP:    brokerPEP,
+		Now:    func() time.Time { return time.Now().UTC() },
+	})
+	if abErr != nil {
+		log.Fatalf("action broker init: %v", abErr)
+	}
+	executor := newBrokeredActionExecutor(legacyExecutor, actionBroker, brokerPEP)
+	if receipts, err := actionBroker.ReconcilePending(context.Background()); err != nil {
+		kliqLog.Printf("WARNING: action broker pending lease reconciliation failed: %v", err)
+	} else if len(receipts) > 0 {
+		kliqLog.Printf("Action broker reconciled %d pending leases", len(receipts))
+		for _, receipt := range receipts {
+			logEnforcementReceipt(receipt)
+		}
+	}
 
 	// Netfilter adapter — active when "netfilter" is in --adapter list.
 	// Registered as a sidecar so every enforcement decision is also mirrored
@@ -900,12 +933,8 @@ func main() {
 	var gpStateStore *sstore.Store
 
 	if c.GraphEnabled {
-		ss, ssErr := sstore.Open(sstore.DefaultConfig(c.StateStorePath))
-		if ssErr != nil {
-			log.Fatalf("open state store %s: %v", c.StateStorePath, ssErr)
-		}
-		defer ss.Close()
-		gpStateStore = ss
+		ss := stateStore
+		gpStateStore = stateStore
 
 		// Shield telemetry adapter publishes flow observations onto the shared mainBus.
 		// Only created when klshield maps are available — when running netfilter-only,
@@ -1330,6 +1359,7 @@ func main() {
 							DesiredAction: rule.Capability,
 							DesiredLevel:  rule.Level,
 							Target:        actions.ActionTarget{Granularity: "src_ip", Value: subject4.ID},
+							TTL:           c.ttlForLevelName(rule.Level),
 							CreatedAt:     nowWall,
 						}
 						res := resolver.Resolve(proposal)
@@ -1622,6 +1652,7 @@ func main() {
 					DesiredAction: actions.FsmLevelToCapability(target),
 					DesiredLevel:  actions.FsmLevelName(target),
 					Target:        actions.ActionTarget{Granularity: "src_ip", Value: ip4String(ip)},
+					TTL:           c.ttlForFSMLevel(target),
 					CreatedAt:     nowWall,
 				}
 				res := resolver.Resolve(proposal)
@@ -1646,6 +1677,7 @@ func main() {
 					DesiredAction: actions.FsmLevelToCapability(target),
 					DesiredLevel:  actions.FsmLevelName(target),
 					Target:        actions.ActionTarget{Granularity: "src_ip", Value: ip6String(ip)},
+					TTL:           c.ttlForFSMLevel(target),
 					CreatedAt:     nowWall,
 				}
 				res := resolver.Resolve(proposal)
