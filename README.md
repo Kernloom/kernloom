@@ -18,7 +18,7 @@ Git / Enterprise PAP
     │
     ↓
 Forge (policy compiler)          kernloom-forge repo
-    │ signed RuntimeBundle        pkg/contracts/ schemas
+    │ signed RuntimeBundle        kernloom-contracts + core bundle schemas
     │
     ↓
 ┌──────────────────────────────────────────────────────────────┐
@@ -37,7 +37,7 @@ Forge (policy compiler)          kernloom-forge repo
 │  PEP adapters ───────────────┘                               │
 │  KLShield PEP (eBPF maps)                                    │
 │  netfilter PEP (nftables)                                    │
-│  OpenZiti action adapter ①                                   │
+│  OpenZiti action adapter (planned) ①                         │
 │                                                              │
 │  Shadow/Active RuntimePDP                                    │
 │  shadow: logs decisions alongside FSM                        │
@@ -50,8 +50,8 @@ Forge (policy compiler)          kernloom-forge repo
 │  → PASS / DROP                          │
 └─────────────────────────────────────────┘
 
-① OpenZiti: eventsource, decoder, mapping Phase 1 complete;
-  action adapter planned in Phase 3
+① OpenZiti: eventsource, decoder, mapping and relationship learning are
+  present; enforcement actions are planned.
 ```
 
 ---
@@ -68,7 +68,7 @@ Forge (policy compiler)          kernloom-forge repo
 
 **When:** Internal nodes communicating with a small, known set of services — database, IdP, internal API, NAS.
 
-**What:** KLIQ learns the full communication graph. After freeze, any unexpected connection is detected and blocked to the exact `(src_ip, port, proto)` tuple in XDP with zero race window.
+**What:** KLIQ learns the full communication graph. After freeze, unexpected connections are detected and can be rate-limited or blocked at the exact `(src_ip, port, proto)` tuple in XDP.
 
 ---
 
@@ -77,9 +77,10 @@ Forge (policy compiler)          kernloom-forge repo
 | Profile | Active subsystems |
 |---|---|
 | `dos-light` | Source heuristics + autotune. No graph, no SQLite. |
-| `iq-learning` | dos-light + per-source EWMA baseline. |
+| `iq-learning` | dos-light + per-source EWMA baseline + state store. |
 | `graph-learning` | iq-learning + flow telemetry + graph learning + edge baselines + SQLite. |
 | `graph-enforce` | graph-learning + XDP tuple enforcement. |
+| `full-learning-experimental` | graph-learning + generic relationship/baseline paths for lab use. |
 
 ---
 
@@ -90,12 +91,8 @@ Forge (policy compiler)          kernloom-forge repo
 export PATH=$PATH:/usr/local/go/bin
 sudo mount -t bpf bpf /sys/fs/bpf 2>/dev/null || true
 
-# BPF object
-make -C shield/bpf
-
-# Binaries
-go build -o klshield ./shield/cmd/klshield
-go build -o kliq     ./iq/cmd/kliq
+# BPF object + binaries in ./bin
+make build
 
 # Tests
 go test ./...
@@ -106,14 +103,16 @@ go test ./...
 ## Quick start — DoS Prevention
 
 ```bash
-sudo ./klshield attach-xdp --iface eth0 \
+sudo ./bin/klshield attach-xdp --iface eth0 \
   --obj shield/bpf/out/xdp_kernloom_shield.bpf.o
-sudo cp configs/pdp/ziti-controller-bootstrap.yaml \
-        /opt/kernloom/attested/etc/pdp/node.yaml
-sudo ./kliq \
-  --pdp-config=/opt/kernloom/attested/etc/pdp/node.yaml \
-  --dry-run=true --whitelist-learn=true
-./kliq status
+sudo ./bin/kliq run \
+  --adapter=klshield \
+  --feature-profile=dos-light \
+  --pdp-config=configs/pdp/ziti-controller-bootstrap.yaml \
+  --runtime-pdp-mode=shadow \
+  --dry-run=true \
+  --whitelist-learn=true
+./bin/kliq status
 ```
 
 See `configs/pdp/` for all PDPConfig profiles.
@@ -124,16 +123,26 @@ See `configs/pdp/` for all PDPConfig profiles.
 
 ```bash
 # Phase 1 — learn (14 days dry-run)
-sudo ./kliq --pdp-config=configs/pdp/idp-bootstrap.yaml \
-  --graph --graph-mode=learn --dry-run=true --whitelist-learn=true
+sudo ./bin/kliq run \
+  --adapter=klshield \
+  --feature-profile=graph-learning \
+  --pdp-config=configs/pdp/idp-bootstrap.yaml \
+  --graph --graph-mode=learn \
+  --dry-run=true --whitelist-learn=true
 
-./kliq graph edges --sort=state
-./kliq graph freeze --dry-run
-sudo ./kliq graph freeze
+./bin/kliq graph edges --sort=state
+./bin/kliq graph freeze --dry-run
+sudo ./bin/kliq graph freeze
 
 # Phase 2 — enforce
-sudo ./kliq --pdp-config=configs/pdp/idp-bootstrap.yaml \
-  --graph --graph-mode=frozen-enforce --dry-run=false
+sudo ./bin/kliq run \
+  --adapter=klshield \
+  --feature-profile=graph-enforce \
+  --pdp-config=configs/pdp/idp.yaml \
+  --graph --graph-mode=frozen-enforce \
+  --graph-freeze-action=rate_limit \
+  --graph-freeze-max-action=rate_limit \
+  --dry-run=false
 ```
 
 ---
@@ -147,9 +156,11 @@ When a Forge control plane is available, KLIQ operates in managed mode:
 forge serve --addr :8443
 
 # Connect KLIQ to Forge
-./kliq \
+./bin/kliq run \
+  --mode=managed \
   --forge-url=https://forge.example.com:8443 \
   --forge-enroll-token=<token> \
+  --policy-verify-key=/etc/kernloom/forge.pub \
   --runtime-pdp-mode=shadow   # or: active
 ```
 
@@ -158,17 +169,18 @@ forge serve --addr :8443
 - `active` — Runtime PDP decisions become enforcement actions via the action broker. The FSM remains active for network-layer defence.
 
 In managed mode KLIQ:
-1. Downloads a signed `RuntimeBundle` from Forge
-2. Verifies Ed25519 signature, generation monotonicity, and expiry
-3. Activates the embedded `RuntimePolicyPack` in the Runtime PDP
-4. Persists enforcement receipts locally and uploads them to Forge every 30 s
-5. Sends `LocalRiskAssessment` and `RuntimeFinding` to Forge
+1. Enrolls the node and heartbeats runtime status to Forge
+2. Downloads a signed `RuntimeBundle` from Forge
+3. Verifies Ed25519 signature, generation monotonicity, and expiry
+4. Applies bootstrap autotune, graph lifecycle and enforcement bounds
+5. Loads local or Forge-delivered policy packs through the same policy gate
+6. Persists enforcement leases/receipts locally and uploads pending receipts to Forge
 
 ---
 
 ## Forge compatibility contract
 
-Shared wire schemas live in `github.com/kernloom/kernloom-contracts` (v0.1.0):
+Shared Runtime PDP wire schemas are imported from `github.com/kernloom/kernloom-contracts` (v0.1.0). During the migration, managed bundle ingestion still uses the local `pkg/core/bundle` model.
 
 ```
 RuntimeBundle          kernloom.io/runtime/v1alpha1
@@ -194,18 +206,17 @@ Receipts are emitted for every apply/revert and persisted in SQLite (`action_rec
 
 ## OpenZiti adapter
 
-Phase 1 of the OpenZiti adapter is implemented in `pkg/adapters/openziti/`:
+The OpenZiti adapter currently lives in `pkg/adapters/openziti/`:
 
 | Package | Status | Description |
 |---|---|---|
-| `eventsource/` | ✅ Phase 1 | `EventSource` interface, `RawVendorEvent`, version discovery, file replay |
-| `decoder/` | ✅ Phase 1 | Tolerant decoder for P0 namespaces (authentication, apiSession, session, usage, sdk) |
-| `mapping/` | ✅ Phase 1 | VendorFact → canonical Observation (no vendor field names in output) |
-| `relationshiplearner/` | ✅ stub | `identity_dials_service` relationships |
-| `extractor/` | planned | featureextractor.Extractor |
-| `signalengine/` | planned | signalengine.Engine |
+| `eventsource/` | ✅ implemented | `EventSource` interface, `RawVendorEvent`, version discovery, file replay |
+| `decoder/` | ✅ implemented | Tolerant decoder for P0 namespaces (authentication, apiSession, session, usage, sdk) |
+| `mapping/` | ✅ implemented | VendorFact → canonical Observation (no vendor field names in output) |
+| `relationshiplearner/` | ✅ implemented | `ziti.dials` identity → service relationships from canonical observations |
+| `signalengine/` | planned | OpenZiti-specific signal engine |
 | `learningguard/` | planned | adapterruntime.LearningGuard |
-| `actions/` | planned Phase 3 | remove_kernloom_access_attribute, identity.disable |
+| `actions/` | planned | remove access attribute, disable identity and related OpenZiti PEP actions |
 
 Key invariants:
 - `decoder/` is the only package that references OpenZiti field names.
@@ -220,7 +231,7 @@ Key invariants:
 kernloom/
 ├── iq/
 │   ├── cmd/kliq/                 KLIQ agent — main loop, CLI, wiring
-│   │   ├── kliq.go               main loop (1950 lines; split planned TD-P1-004)
+│   │   ├── kliq.go               main loop and CLI runtime composition
 │   │   ├── shadow_pdp.go         RuntimePDP shadow/active mode runner
 │   │   ├── brokered_executor.go  Action broker wiring + receipt persistence
 │   │   ├── receipt_uploader.go   Background Forge receipt upload queue
@@ -228,42 +239,51 @@ kernloom/
 │   └── internal/
 │       ├── actionbroker/         Lease journal, fencing, receipt/revert handling
 │       ├── actions/              ActionProposal → PolicyResolver → ActionResolution
+│       ├── forgeagent/           Forge agent helpers and tests
 │       ├── localrisk/            LocalRiskAssessment (level, confidence, completeness)
 │       ├── runtimepdp/           CEL-based Runtime PDP (contracts.RuntimePolicyPack)
+│       ├── sourcefilters/        Whitelist/feedback loaders
 │       └── lifecycle/            Bootstrap autotune and graph lifecycle helpers
 ├── shield/
 │   ├── bpf/                      XDP/eBPF program (C)
 │   └── cmd/klshield/             klshield CLI
 ├── pkg/
-│   ├── contracts/                Forge↔KLIQ wire schemas (local; v0.1.0 in contracts repo)
 │   ├── core/
+│   │   ├── capability/           Generic capability IDs
 │   │   ├── observation/          Canonical observation model
 │   │   ├── signal/               Signal type catalog
 │   │   ├── decision/             Decision, ActionLease, EnforcementReceipt
+│   │   ├── enforcement/          Generic enforcement targets
 │   │   ├── entity/               Entity model (Kind, Ref)
 │   │   ├── graph/                Graph edge model + lifecycle
+│   │   ├── relationship/         Generic relationship model
 │   │   ├── evidence/             Evidence records
 │   │   ├── learning/             Learning guard contracts + exclusions
 │   │   ├── baseline/             Baseline key + profile types
+│   │   ├── featureset/           Runtime feature profiles
+│   │   ├── kliqconfig/           Deployment/component config schemas
 │   │   ├── metric/               Metric model
 │   │   ├── fsm/                  FSM levels, State, Advance()
 │   │   ├── policy/               LocalPolicyPack schema + loader
 │   │   ├── pdp/                  PDPConfig schema + loader
 │   │   └── cel/                  CEL evaluator for KLShield policy rules
 │   ├── adapters/                 Vendor/product integrations ONLY
+│   │   ├── catalog/              Runtime adapter catalog, tuning and source baseline hooks
 │   │   ├── klshield/
 │   │   │   ├── client/           eBPF map client
 │   │   │   ├── guard/            KLShield learning guard
 │   │   │   ├── pep/              PEP (writes eBPF deny/rl/allow maps)
+│   │   │   ├── runtime/          Runtime adapter factory, telemetry/tuning wiring
 │   │   │   ├── shadow/           Shadow/dry-run wrapper
 │   │   │   ├── signalengine/     KLShield heuristic signal engine
 │   │   │   └── telemetry/        eBPF telemetry → observations
 │   │   ├── netfilter/            netfilter PEP (nftables + iptables)
+│   │   │   └── runtime/          netfilter runtime setup/status hooks
 │   │   └── openziti/             OpenZiti adapter (Phase 1)
 │   │       ├── eventsource/      EventSource interface + FileReplaySource
 │   │       ├── decoder/          Tolerant decoder for P0 namespaces
 │   │       ├── mapping/          VendorFact → canonical Observation
-│   │       └── relationshiplearner/  identity_dials_service extractor (stub)
+│   │       └── relationshiplearner/  ziti.dials relationship extractor
 │   ├── pipeline/
 │   │   ├── runner.go             Generic pipeline runner
 │   │   └── graphpipeline/        Graph learning pipeline component
@@ -280,8 +300,7 @@ kernloom/
 │   ├── adapterruntime/           Adapter lifecycle interface + EventBus
 │   └── statestore/sqlite/        SQLite state store, baselines, leases, receipts
 └── configs/
-    ├── pdp/                      PDPConfig profiles (16 profiles, all node roles)
-    └── policies/                 LocalPolicyPack examples
+    └── pdp/                      PDPConfig profiles for supported node roles
 ```
 
 ---
@@ -301,12 +320,13 @@ Core packages (`pkg/core/`, `pkg/pipeline/`, etc.) must never contain vendor nam
 
 See `TECHNICAL_DEBT.md` for the full prioritised list. Key items:
 
-| ID | Issue | Priority |
-|---|---|---|
-| TD-P0-001 | Two RuntimeBundle schemas (old `pkg/core/bundle/` + new `contracts`) need consolidation | P0 |
-| TD-P1-003 | Action broker not yet fully live for tuple/de-enforce paths | P1 |
-| TD-P1-004 | `kliq.go` is 1950 lines — split into `internal/forgeagent/`, `internal/runtimepdp/` etc. | P1 |
-| TD-P1-005 | `pkg/contracts/` not yet committed to git (in `kernloom-contracts` repo with replace directive) | P1 |
+| Issue | Priority |
+|---|---|
+| RuntimeBundle trust contract still needs Forge/KLIQ conformance fixtures | P0 |
+| Action Broker is live for source enforcement, but tuple/de-enforce paths still need lease coverage | P0 |
+| Shared `kernloom-contracts` module is not yet fully adopted by managed bundle ingestion | P1 |
+| `iq/cmd/kliq` still owns too much runtime orchestration and should keep shrinking into internal services | P1 |
+| Historical names such as `LocalPolicyPack` and `PDPConfig` remain visible during the migration | P2 |
 
 ---
 
