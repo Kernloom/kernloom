@@ -5,73 +5,31 @@ package main
 
 import (
 	"strconv"
+	"strings"
 
-	"github.com/kernloom/kernloom/pkg/adapters/klshield/pep"
-	celeval "github.com/kernloom/kernloom/pkg/core/cel"
+	"github.com/kernloom/kernloom/pkg/adapterruntime"
 	"github.com/kernloom/kernloom/pkg/core/fsm"
 	"github.com/kernloom/kernloom/pkg/core/pdp"
 	"github.com/kernloom/kernloom/pkg/core/policy"
 )
-
-// forgeCapabilityToKLIQ maps Forge vocabulary capability IDs to KLIQ's internal
-// abstract capability IDs (used in the well-known capability registry).
-//
-// This is the initial PluginTranslationCatalog for the KLShield adapter.
-// It bridges the Forge standard vocabulary and KLIQ's existing capability naming
-// until a shared SDK or full Plugin Adapter framework is in place.
-//
-// Forge vocabulary:       KLIQ internal:
-//
-//	enforce.traffic.rate_limit  →  network.rate_limit_source
-//	enforce.access.deny         →  network.block_source
-//	enforce.access.allow        →  network.allow_source
-var forgeCapabilityToKLIQ = map[string]string{
-	// Generic access control
-	"enforce.access.deny":         "network.block_source",
-	"enforce.access.allow":        "network.allow_source",
-	"enforce.access.default_deny": "network.enforce_allowlist",
-
-	// Generic traffic control
-	"enforce.traffic.rate_limit":       "network.rate_limit_source",
-	"enforce.traffic.connection_limit": "network.rate_limit_source",
-	"enforce.traffic.bandwidth_limit":  "network.rate_limit_source",
-	"enforce.traffic.drop":             "network.block_source",
-	"enforce.traffic.quarantine":       "network.block_source",
-	"enforce.traffic.tarpit":           "network.rate_limit_source",
-
-	// Legacy enforce.network.* (Forge maintains these for backward compatibility)
-	"enforce.network.deny":         "network.block_source",
-	"enforce.network.rate_limit":   "network.rate_limit_source",
-	"enforce.network.default_deny": "network.enforce_allowlist",
-	"enforce.network.quarantine":   "network.block_source",
-	"enforce.network.syn_protect":  "network.rate_limit_source",
-}
-
-// normalizeCapabilityID converts a Forge capability ID to KLIQ's internal
-// capability ID. Returns the input unchanged if it is already a KLIQ ID or
-// is unknown (forward-compatibility: unknown IDs pass through for logging).
-func normalizeCapabilityID(id string) string {
-	if kliq, ok := forgeCapabilityToKLIQ[id]; ok {
-		return kliq
-	}
-	return id
-}
 
 // pdpConfigToProfile converts a PDPConfig into the internal profile struct.
 func pdpConfigToProfile(c *pdp.Config) profile {
 	s := c.Spec
 	pe := s.ProgressiveEnforcement
 	return profile{
-		Name:         c.Metadata.Name,
-		TrigPPS:      s.SignalEngine.PPSTrigger,
-		TrigSyn:      s.SignalEngine.SynTrigger,
-		TrigScan:     s.SignalEngine.ScanTrigger,
-		TrigBPS:      s.SignalEngine.BPSTrigger,
-		WPPS:         s.SignalEngine.Weights.PPS,
-		WSyn:         s.SignalEngine.Weights.Syn,
-		WScan:        s.SignalEngine.Weights.Scan,
-		WBps:         s.SignalEngine.Weights.BPS,
-		SevCap:       s.SignalEngine.Weights.Cap,
+		Name: c.Metadata.Name,
+		LegacyNetworkScoring: adapterruntime.LegacyNetworkScoring{
+			TrigPPS:  s.SignalEngine.PPSTrigger,
+			TrigSyn:  s.SignalEngine.SynTrigger,
+			TrigScan: s.SignalEngine.ScanTrigger,
+			TrigBPS:  s.SignalEngine.BPSTrigger,
+			WPPS:     s.SignalEngine.Weights.PPS,
+			WSyn:     s.SignalEngine.Weights.Syn,
+			WScan:    s.SignalEngine.Weights.Scan,
+			WBps:     s.SignalEngine.Weights.BPS,
+			SevCap:   s.SignalEngine.Weights.Cap,
+		},
 		SoftAt:       pe.SoftAt,
 		HardAt:       pe.HardAt,
 		BlockAt:      pe.BlockAt,
@@ -86,54 +44,6 @@ func pdpConfigToProfile(c *pdp.Config) profile {
 		NonCompSev:   s.NonCompliance.Sev,
 		NonCompReset: s.NonCompliance.Reset,
 	}
-}
-
-// adapterParamsFromPDPConfig extracts Shield PEP adapter parameters from the
-// PDPConfig. Returns defaults for any field that is zero (not configured).
-func adapterParamsFromPDPConfig(c *pdp.Config) (shieldpep.CapabilityParams, error) {
-	p := shieldpep.DefaultCapabilityParams()
-	a, found, err := shieldpep.PDPAdapterConfigFrom(c.Spec.Adapters)
-	if err != nil {
-		return p, err
-	}
-	if !found {
-		return p, nil
-	}
-	if a.SoftRatePPS > 0 {
-		p.SoftRatePPS = a.SoftRatePPS
-	}
-	if a.SoftBurst > 0 {
-		p.SoftBurst = a.SoftBurst
-	}
-	if a.HardRatePPS > 0 {
-		p.HardRatePPS = a.HardRatePPS
-	}
-	if a.HardBurst > 0 {
-		p.HardBurst = a.HardBurst
-	}
-	if a.Cooldown.D > 0 {
-		p.Cooldown = a.Cooldown.D
-	}
-	return p, nil
-}
-
-// applyPDPAdaptiveRatesToCfg reads the adaptive rate factors from PDPConfig and
-// writes them into cfg. Only non-zero values override CLI defaults (0 = disabled).
-func applyPDPAdaptiveRatesToCfg(dc *pdp.Config, c *cfg) error {
-	a, found, err := shieldpep.PDPAdapterConfigFrom(dc.Spec.Adapters)
-	if err != nil {
-		return err
-	}
-	if !found {
-		return nil
-	}
-	if a.SoftRateFactor > 0 {
-		c.SoftRateFactor = a.SoftRateFactor
-	}
-	if a.HardRateFactor > 0 {
-		c.HardRateFactor = a.HardRateFactor
-	}
-	return nil
 }
 
 // rulesFromPolicyPack extracts enforcement TTLs and capabilities from the Rules
@@ -188,34 +98,8 @@ func rulesFromPolicyPack(pp *policy.PolicyPack, c *cfg) {
 		}
 	}
 
-	// Compile v1.2 CEL rules. These are evaluated per-source-IP on every tick
-	// independently of the FSM-level rules above.
-	c.CELRules = nil
-	for i, rule := range pp.Spec.Rules {
-		if rule.When.Language != "cel" || rule.When.Expression == "" {
-			continue
-		}
-		level := capabilityToFsmLevel(rule.Then.Capability)
-		compiled, err := celeval.Compile(
-			rule.Name,
-			rule.Then.Capability,
-			level,
-			rule.Then.TTL.D.String(),
-			rule.Then.Params,
-			rule.When,
-		)
-		if err != nil {
-			kliqLog.Printf("WARNING: pack rule[%d] %q CEL compile error: %v — rule skipped", i, rule.Name, err)
-			continue
-		}
-		c.CELRules = append(c.CELRules, compiled)
-		kliqLog.Printf("Policy pack: CEL rule %q compiled (capability=%s level=%s)", rule.Name, rule.Then.Capability, level)
-	}
-
 	// Log enforcement mode so operators can verify pack intent after all rules are read.
-	if len(c.CELRules) > 0 {
-		kliqLog.Printf("Policy pack: %d CEL rule(s) active (v1.2 expression-based enforcement)", len(c.CELRules))
-	} else if c.SoftDirectiveRatePPS > 0 || c.HardDirectiveRatePPS > 0 {
+	if c.SoftDirectiveRatePPS > 0 || c.HardDirectiveRatePPS > 0 {
 		kliqLog.Printf("Policy pack: directive mode — soft=%dpps hard=%dpps (access-control, fixed rate from pack)",
 			c.SoftDirectiveRatePPS, c.HardDirectiveRatePPS)
 	} else {
@@ -371,6 +255,19 @@ func capabilityToFsmLevel(forgeCapID string) string {
 	}
 }
 
+func normalizeCapabilityID(id string) string {
+	switch strings.TrimSpace(id) {
+	case "network.rate_limit_source":
+		return "enforce.traffic.rate_limit"
+	case "network.block_source":
+		return "enforce.access.deny"
+	case "network.allow_source":
+		return "enforce.access.allow"
+	default:
+		return strings.TrimSpace(id)
+	}
+}
+
 // applyPDPBaselineToCfg writes baseline engine configuration from a PDPConfig.
 func applyPDPBaselineToCfg(dc *pdp.Config, c *cfg) {
 	b := dc.Spec.Baseline
@@ -394,10 +291,10 @@ func applyPDPBaselineToCfg(dc *pdp.Config, c *cfg) {
 		c.BaselineDeviationThreshold = b.DeviationThreshold
 	}
 	if b.MinUpdatePPS > 0 {
-		c.BaselineMinUpdatePPS = b.MinUpdatePPS
+		c.BaselineMinUpdatePacketRate = b.MinUpdatePPS
 	}
 	if b.MinUpdateBPS > 0 {
-		c.BaselineMinUpdateBPS = b.MinUpdateBPS
+		c.BaselineMinUpdateByteRate = b.MinUpdateBPS
 	}
 	if b.PeakTolerance > 0 {
 		c.BaselinePeakTolerance = b.PeakTolerance

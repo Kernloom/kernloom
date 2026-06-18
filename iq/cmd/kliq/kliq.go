@@ -2,32 +2,10 @@
 // Copyright (c) 2026 Adrian Enderlin
 
 /*
-Kernloom IQ (kliq) — controller for Kernloom Shield (XDP) with:
-- Progressive enforcement: OBSERVE -> SOFT -> HARD -> BLOCK
-- Anti-flap: up/down streaks + minimum hold
-- Non-compliance: if DropRL/s stays > 0 while in HARD -> go BLOCK faster
-- Autotune: learn trig-pps/trig-syn/trig-scan using Median+MAD (robust)
-- Anti-poisoning: learn only during "clean ticks" (incl optional total drop-ratio gating)
-- Persistence: versioned state.json with atomic writes; load on startup
-- Whitelist: exclude specific IPs/CIDRs from enforcement (and optionally from learning)
-- Feedback: temporary exemptions (forgive/whitelist) + optional CIDR de-enforcement scan
-
-Pinned maps (defaults, from Kernloom Shield):
-  Telemetry:
-    /sys/fs/bpf/kernloom_src4_stats     (key=[4]byte  => IPv4)
-    /sys/fs/bpf/kernloom_src6_stats     (key=src6Key  => IPv6)
-    /sys/fs/bpf/kernloom_totals         (per-cpu array, optional for learn gating)
-  Enforcement:
-    /sys/fs/bpf/kernloom_deny4_hash     (key=[4]byte, value=u8)
-    /sys/fs/bpf/kernloom_deny6_hash     (key=key6Bytes, value=u8)
-    /sys/fs/bpf/kernloom_rl_policy4     (key=[4]byte, value={u64 rate_pps, u64 burst})
-    /sys/fs/bpf/kernloom_rl_policy6     (key=src6Key, value={u64 rate_pps, u64 burst})
-
-NOTE:
-  The upstream documentation may state "IPv4 only". This build wires IPv6 into the same flow:
-  - reads src6 telemetry
-  - applies per-IP RL and deny entries for IPv6
-  - supports IPv6 in whitelist + feedback inputs
+Kernloom IQ (kliq) is the local runtime orchestrator. It hosts Forge bundle
+handling, adapter lifecycle, local evidence/risk/decision flow, temporary
+action brokering, state persistence and feedback upload. Product-specific
+telemetry and enforcement mechanics belong in pkg/adapters/<vendor>/.
 */
 
 package main
@@ -42,7 +20,6 @@ import (
 	ossignal "os/signal"
 	"path/filepath"
 	"sort"
-	"strconv"
 	"syscall"
 	"time"
 
@@ -51,22 +28,14 @@ import (
 	"github.com/kernloom/kernloom/iq/internal/forgeagent"
 	"github.com/kernloom/kernloom/iq/internal/lifecycle/bootstrapautotune"
 	lgraph "github.com/kernloom/kernloom/iq/internal/lifecycle/graph"
-	klshieldautotuner "github.com/kernloom/kernloom/pkg/adapters/klshield/autotuner"
+	"github.com/kernloom/kernloom/iq/internal/sourcefilters"
 	"github.com/kernloom/kernloom/pkg/adapterruntime"
-	"github.com/kernloom/kernloom/pkg/adapters/klshield/client"
-	"github.com/kernloom/kernloom/pkg/adapters/klshield/guard"
-	"github.com/kernloom/kernloom/pkg/adapters/klshield/pep"
-	"github.com/kernloom/kernloom/pkg/adapters/klshield/shadow"
-	"github.com/kernloom/kernloom/pkg/adapters/klshield/signalengine"
-	"github.com/kernloom/kernloom/pkg/adapters/klshield/telemetry"
-	netfilteradapter "github.com/kernloom/kernloom/pkg/adapters/netfilter"
-	celeval "github.com/kernloom/kernloom/pkg/core/cel"
+	"github.com/kernloom/kernloom/pkg/adapters/catalog"
+	netfilterruntime "github.com/kernloom/kernloom/pkg/adapters/netfilter/runtime"
 	"github.com/kernloom/kernloom/pkg/core/decision"
 	"github.com/kernloom/kernloom/pkg/core/featureset"
-	"github.com/kernloom/kernloom/pkg/core/fsm"
 	kliqconfig "github.com/kernloom/kernloom/pkg/core/kliqconfig"
 	"github.com/kernloom/kernloom/pkg/core/learning"
-	"github.com/kernloom/kernloom/pkg/core/observation"
 	corepdp "github.com/kernloom/kernloom/pkg/core/pdp"
 	corepolicy "github.com/kernloom/kernloom/pkg/core/policy"
 	"github.com/kernloom/kernloom/pkg/core/relationship"
@@ -76,7 +45,6 @@ import (
 	"github.com/kernloom/kernloom/pkg/pipeline"
 	"github.com/kernloom/kernloom/pkg/pipeline/graphpipeline"
 	"github.com/kernloom/kernloom/pkg/relationshiplearner"
-	"github.com/kernloom/kernloom/pkg/sourcebaseline"
 	sstore "github.com/kernloom/kernloom/pkg/statestore/sqlite"
 
 	// Ensure enforcement package is available for future tuple target use.
@@ -89,7 +57,7 @@ const kliqUsage = `Kernloom IQ — local intelligence and enforcement agent
 
 Usage:
   kliq run [flags...]         Start the KLIQ runtime (DoS prevention / microsegmentation)
-  kliq graph <subcommand>     Communication graph: edges, baselines, freeze, approve-ip, ...
+  kliq graph <subcommand>     Communication graph: edges, baselines, freeze, approve-source, ...
   kliq status                 Show current runtime status (autotune, FSM, bootstrap)
   kliq entities               Entity store browser
   kliq relationships          Relationship store browser
@@ -104,34 +72,18 @@ Examples:
   kliq graph edges --sort=state
   kliq status`
 
-// graphStrikeMsg carries FSM strike credits from a graph.new_edge_after_freeze signal
-// to the main tick loop where state4/state6 are owned.
+// graphStrikeMsg carries graph-derived escalation hints to the source FSM
+// boundary.
 // forceBlock=true overrides n and sets strikes to BlockAt+1 so the FSM
 // transitions directly to BLOCK in the next tick (frozen-enforce mode).
 type graphStrikeMsg struct {
-	ip4        [4]byte
-	ip6        [16]byte
-	isV6       bool
-	n          int  // strike credits to add
-	forceBlock bool // frozen-enforce: skip FSM accumulation, go straight to BLOCK
-	// addToCands: when true the IP is added to cands so it gets FSM-processed
-	// this tick even without Shield telemetry. Set for freeze violations (source
-	// is active). False for baseline deviations — strikes accumulate and are
-	// applied the next time the source naturally appears in telemetry with real
-	// metrics, avoiding UpStreak reset from zero-metric processing.
+	sourceID    string
+	n           int // strike credits to add before FSM processing
+	signalScore int // graph signal score, mapped to FSM severity when addToCands is true
+	forceBlock  bool
+	// addToCands: when true the source is added to cands so it gets FSM-processed
+	// this tick even without source-level adapter telemetry.
 	addToCands bool
-}
-
-// prevV4 stores the previous tick's counters for an IPv4 source.
-type prevV4 struct {
-	Pkts, Bytes, Syn, Scan, DropRL uint64
-	LastWall                       time.Time
-}
-
-// prevV6 stores the previous tick's counters for an IPv6 source.
-type prevV6 struct {
-	Pkts, Bytes, Syn, Scan, DropRL uint64
-	LastWall                       time.Time
 }
 
 // main is organised into the following phases:
@@ -139,7 +91,7 @@ type prevV6 struct {
 //	§1 Subcommand dispatch  (before flag parse; early return on match)
 //	§2 Config + PDP setup   (flags, profiles, PDPConfig, bootstrap)
 //	§3 State store + graph  (SQLite, lifecycle controllers)
-//	§4 Adapter init         (KLShield PEP, netfilter, PIPs)
+//	§4 Adapter init         (catalog adapters, netfilter, PIPs)
 //	§5 Decision pipeline    (bus, signal engine, decision engine)
 //	§6 Forge agent          (enrollment, heartbeat, bundle delivery)
 //	§7 Tick-loop prep       (ticker, signals, runtime PDP, shadow pipeline)
@@ -184,7 +136,7 @@ func main() {
 
 	case "graph":
 		if !handleGraphSubcommand(subCmdDB, "/opt/kernloom/attested/etc/frozen-graph.yaml", "") {
-			fmt.Fprintln(os.Stderr, "usage: kliq graph <edges|baselines|freeze|approve-ip|deny-ip|export|reset>")
+			fmt.Fprintln(os.Stderr, "usage: kliq graph <edges|baselines|freeze|approve-source|deny-source|export|reset>")
 			os.Exit(1)
 		}
 		return
@@ -258,13 +210,20 @@ func main() {
 		applyPDPGraphToCfg(pdpc, &c)
 		applyPDPBaselineToCfg(pdpc, &c)
 		applyPDPAutotuneToCfg(pdpc, &c)
-		adapterParams, err := adapterParamsFromPDPConfig(pdpc)
+		adapterParams, err := catalog.CapabilityParamsFromPDP(catalog.DefaultAdapterID, pdpc)
 		if err != nil {
 			log.Fatalf("load PDP adapter config: %v", err)
 		}
 		c.adapterParams = adapterParams
-		if err := applyPDPAdaptiveRatesToCfg(pdpc, &c); err != nil {
+		softFactor, hardFactor, err := catalog.AdaptiveRateFactorsFromPDP(catalog.DefaultAdapterID, pdpc)
+		if err != nil {
 			log.Fatalf("load PDP adaptive adapter config: %v", err)
+		}
+		if softFactor > 0 {
+			c.SoftRateFactor = softFactor
+		}
+		if hardFactor > 0 {
+			c.HardRateFactor = hardFactor
 		}
 	} else {
 		// In managed mode: LKG bundle may override pdp_profile and adapters.
@@ -285,7 +244,7 @@ func main() {
 			}
 		}
 		p = profileByName(c.ProfileName)
-		c.adapterParams = shieldpep.DefaultCapabilityParams()
+		c.adapterParams = catalog.DefaultCapabilityParams(catalog.DefaultAdapterID)
 	}
 
 	// Policy: abstract enforcement rules (autonomy, when/then, exports).
@@ -359,21 +318,12 @@ func main() {
 		c.GraphEnabled = true
 	}
 
-	// Source baseline cache (iq-learning and higher).
-	// Nil when disabled — the main loop checks before calling Update/Resolve.
-	var srcBL *sourcebaseline.Cache
-	if features.SourceBaseline {
-		srcBL = sourcebaseline.New(sourcebaseline.Config{
-			Alpha:          c.SrcBaselineAlpha,
-			AlphaPromoted:  c.SrcBaselineAlphaStable,
-			MinUpdatePPS:   c.SrcBaselineMinPPS,
-			MinObs:         c.SrcBaselineMinObs,
-			MaxSources:     c.SrcBaselineMaxSources,
-			PeakMultiplier: c.SrcBaselinePeakMul,
-			MinConfidence:  c.SrcBaselineMinConf,
-		})
-		kliqLog.Printf("Source baseline cache started: min_pps=%.1f min_obs=%d max_sources=%d peak_mul=%.2f",
-			c.SrcBaselineMinPPS, c.SrcBaselineMinObs, c.SrcBaselineMaxSources, c.SrcBaselinePeakMul)
+	sourceBaseline, sourceBaselineSummary, err := runtimeSourceBaseline(catalog.DefaultAdapterID, features.SourceBaseline, c)
+	if err != nil {
+		log.Fatalf("source baseline setup: %v", err)
+	}
+	if sourceBaseline != nil {
+		kliqLog.Printf("Source baseline cache started: %s", sourceBaselineSummary)
 	}
 
 	// Collect flags the user explicitly set on the command line.
@@ -411,25 +361,13 @@ func main() {
 				st.Active.Bootstrap = bootstrapInfo{}
 			}
 			stFile = st
-			if st.Active.Trig.TrigPPS > 0 && !explicitFlags["trig-pps"] {
-				c.TrigPPS = st.Active.Trig.TrigPPS
-			}
-			if st.Active.Trig.TrigSyn > 0 && !explicitFlags["trig-syn"] {
-				c.TrigSyn = st.Active.Trig.TrigSyn
-			}
-			if st.Active.Trig.TrigScan > 0 && !explicitFlags["trig-scan"] {
-				c.TrigScan = st.Active.Trig.TrigScan
-			}
-			if st.Active.Trig.TrigBPS > 0 && !explicitFlags["trig-bps"] {
-				c.TrigBPS = st.Active.Trig.TrigBPS
-			}
+			c.applyPersistedTuningThresholds(st, explicitFlags)
 			updatedStr := "never"
 			if !st.Active.UpdatedAt.IsZero() {
 				updatedStr = st.Active.UpdatedAt.Format(time.RFC3339)
 			}
-			kliqLog.Printf("Loaded state: profile=%s rev=%d updated=%s trig{pps=%.1f syn=%.1f scan=%.1f bps=%.0f}",
-				st.Active.Profile, st.Active.Revision, updatedStr,
-				c.TrigPPS, c.TrigSyn, c.TrigScan, c.TrigBPS)
+			kliqLog.Printf("Loaded state: profile=%s rev=%d updated=%s %s",
+				st.Active.Profile, st.Active.Revision, updatedStr, c.tuningThresholds().Summary())
 		} else {
 			kliqLog.Printf("No usable state loaded (%s): %v", c.StatePath, err)
 		}
@@ -450,18 +388,7 @@ func main() {
 			if c.StatePath != "" {
 				if stFile == nil {
 					stFile = &stateFile{Version: 2}
-					stFile.Active = stateActive{
-						Profile:     p.Name,
-						Revision:    0,
-						UpdatedAt:   time.Time{},
-						Trig:        trigState{TrigPPS: c.TrigPPS, TrigSyn: c.TrigSyn, TrigScan: c.TrigScan, TrigBPS: c.TrigBPS},
-						Tune:        tuneMeta{Method: "median_mad", Window: "reservoir", K: c.AutoK, SigmaFactor: 1.4826},
-						Bootstrap:   bs,
-						ConfigHash:  cfgHash,
-						SampleCount: 0,
-						CleanRatio:  1.0,
-						Notes:       "bootstrap initialized",
-					}
+					stFile.Active = newBootstrapStateActive(p.Name, c, bs, cfgHash)
 					stFile.History = []stateHistory{}
 				} else {
 					stFile.Active.Bootstrap = bs
@@ -479,49 +406,32 @@ func main() {
 	}
 
 	// Whitelist + Feedback
-	wl := newWhitelist(c.WhitelistPath)
-	fb := newFeedbackManager(c.FeedbackPath)
+	wl := sourcefilters.NewWhitelist(c.WhitelistPath)
+	fb := sourcefilters.NewFeedback(c.FeedbackPath)
 
 	if c.WhitelistPath != "" {
-		if err := wl.load(); err == nil {
-			if fi, err := os.Stat(c.WhitelistPath); err == nil {
-				wl.modTime = fi.ModTime()
-			}
-			kliqLog.Printf("Whitelist loaded: %s entries4=%d cidrs4=%d entries6=%d cidrs6=%d",
-				c.WhitelistPath, len(wl.exact4), len(wl.cidrs4), len(wl.exact6), len(wl.cidrs6))
+		if err := wl.Load(); err == nil {
+			wl.MarkLoaded()
+			stats := wl.Stats()
+			kliqLog.Printf("Whitelist loaded: %s subjects=%d entries=%d ranges=%d",
+				c.WhitelistPath, stats.Subjects, stats.Entries(), stats.Ranges())
 		} else {
 			kliqLog.Printf("Whitelist not loaded (%s): %v", c.WhitelistPath, err)
 		}
 	}
 
 	if c.FeedbackPath != "" {
-		if err := fb.load(time.Now()); err == nil {
-			if fi, err := os.Stat(c.FeedbackPath); err == nil {
-				fb.modTime = fi.ModTime()
-			}
-			kliqLog.Printf("Feedback loaded: %s entries4=%d cidrs4=%d entries6=%d cidrs6=%d",
-				c.FeedbackPath, len(fb.exact4), len(fb.cidrs4), len(fb.exact6), len(fb.cidrs6))
+		if err := fb.Load(time.Now()); err == nil {
+			fb.MarkLoaded()
+			stats := fb.Stats()
+			kliqLog.Printf("Feedback loaded: %s subjects=%d entries=%d ranges=%d",
+				c.FeedbackPath, stats.Subjects, stats.Entries(), stats.Ranges())
 		} else {
 			kliqLog.Printf("Feedback not loaded (%s): %v", c.FeedbackPath, err)
 		}
 	}
 
 	// ── §4 Adapter init ─────────────────────────────────────────────────────
-	// Open Shield eBPF maps — only when klshield is in the adapter list.
-	// kliq runs without klshield when netfilter-only or observation-only.
-	var maps *shieldclient.Maps
-	if c.WantsKLShield() {
-		m, merr := shieldclient.Open(c.BPFfsRoot, c.DryRun)
-		if merr != nil {
-			kliqLog.Printf("WARNING: klshield maps not available (%v) — XDP enforcement inactive", merr)
-		} else {
-			maps = m
-			defer maps.Close()
-		}
-	} else {
-		kliqLog.Printf("klshield not in --adapter list — skipping XDP maps")
-	}
-
 	// Resolve node ID (shared by heuristic engine and graph learner).
 	nodeID := c.GraphNodeID
 	if nodeID == "" {
@@ -532,15 +442,70 @@ func main() {
 		}
 	}
 
-	// Create the Shield PEP adapter — nil maps = no-op enforcement (all BPF
-	// writes are skipped, state transitions still recorded in memory).
-	var pep *shieldpep.Adapter
-	if maps != nil {
-		pep = shieldpep.New(maps, c.DryRun)
-		if err := pep.Init(context.Background(), nil); err != nil {
-			kliqLog.Printf("WARNING: shield pep init failed: %v — continuing without XDP enforcement", err)
-			pep = nil
+	type adapterBinding struct {
+		id      string
+		binding *catalog.Binding
+	}
+	var adapterBindings []adapterBinding
+	type sourcePEPBinding struct {
+		id  string
+		pep adapterruntime.SourcePEP
+	}
+	var sourcePEPSidecars []sourcePEPBinding
+	var sourcePEP adapterruntime.SourcePEP
+	var relationshipPEP adapterruntime.RelationshipPEP
+	relationshipPEPs := &relationshipPEPGroup{}
+	bindingAdapterNames := c.bindingAdapterNames()
+	if len(bindingAdapterNames) > 0 {
+		kliqLog.Printf("Adapter bindings requested: %v", bindingAdapterNames)
+	}
+	for _, adapterID := range bindingAdapterNames {
+		binding, berr := catalog.OpenBinding(context.Background(), catalog.BindingConfig{
+			AdapterID: adapterID,
+			NodeID:    nodeID,
+			BPFfsRoot: c.BPFfsRoot,
+			Interval:  c.Interval,
+			PrevTTL:   c.PrevTTL,
+			DryRun:    c.DryRun,
+		})
+		if berr != nil {
+			kliqLog.Printf("WARNING: adapter %s unavailable (%v) — enforcement/telemetry may be inactive", adapterID, berr)
 		}
+		if binding == nil {
+			continue
+		}
+		bindingID := adapterID
+		if catalog.IsBindingAdapter(bindingID) {
+			bindingID = catalog.CanonicalAdapterID(bindingID)
+		}
+		adapterBindings = append(adapterBindings, adapterBinding{id: bindingID, binding: binding})
+		if binding.Close != nil {
+			defer binding.Close()
+		}
+		if binding.SourcePEP != nil {
+			if sourcePEP == nil {
+				sourcePEP = binding.SourcePEP
+			} else {
+				sourcePEPSidecars = append(sourcePEPSidecars, sourcePEPBinding{
+					id:  bindingID,
+					pep: binding.SourcePEP,
+				})
+			}
+		}
+		if binding.RelationshipPEP != nil {
+			binding := binding
+			relationshipPEPs.Add(bindingID, binding.RelationshipPEP, func() {
+				if binding.TryOpenRelations != nil {
+					binding.TryOpenRelations(c.BPFfsRoot)
+				}
+			})
+		}
+	}
+	if relationshipPEPs.Len() > 0 {
+		relationshipPEP = relationshipPEPs
+	}
+	if len(bindingAdapterNames) == 0 {
+		kliqLog.Printf("no catalog runtime adapter in --adapter list — skipping catalog adapter binding")
 	}
 
 	// ── §3 State store + graph ──────────────────────────────────────────────
@@ -556,10 +521,10 @@ func main() {
 	defer stateStore.Close()
 
 	// Central enforcement pipeline: resolver is the policy gate; executor is the
-	// only component authorized to call TransitionV4/V6, through the action broker
+	// only component authorized to call the source PEP, through the action broker
 	// for TTL-bounded actions.
 	resolver := c.buildPolicyResolver()
-	legacyExecutor := buildExecutor(pep)
+	legacyExecutor := buildExecutor(sourcePEP)
 	brokerPEP := newBrokeredFSMPEP(legacyExecutor)
 	actionBroker, abErr := actionbroker.New(actionbroker.Config{
 		NodeID: nodeID,
@@ -571,6 +536,17 @@ func main() {
 		log.Fatalf("action broker init: %v", abErr)
 	}
 	executor := newBrokeredActionExecutor(legacyExecutor, actionBroker, brokerPEP, stateStore, nodeID)
+	for _, sidecar := range sourcePEPSidecars {
+		sidecar := sidecar
+		executor.AddSidecar(sourcePEPSidecar{
+			id:  sidecar.id,
+			pep: sidecar.pep,
+			params: func() adapterruntime.EnforcementParams {
+				return c.toPEPParams()
+			},
+		})
+		kliqLog.Printf("Source PEP sidecar active: adapter=%s", sidecar.id)
+	}
 	if receipts, err := actionBroker.ReconcilePending(context.Background()); err != nil {
 		kliqLog.Printf("WARNING: action broker pending lease reconciliation failed: %v", err)
 	} else if len(receipts) > 0 {
@@ -582,10 +558,13 @@ func main() {
 
 	// Netfilter adapter — active when "netfilter" is in --adapter list.
 	// Registered as a sidecar so every enforcement decision is also mirrored
-	// into iptables/nftables rules. Works with or without klshield.
-	var nfAdapter *netfilteradapter.Adapter
+	// into iptables/nftables rules. Works with or without catalog adapters.
+	var nfAdapter *netfilterruntime.Adapter
 	if c.WantsNetfilter() {
-		nfAdapter = initNetfilterAdapter(context.Background(), c)
+		nfAdapter = netfilterruntime.InitAdapter(context.Background(), netfilterruntime.SetupConfig{
+			DryRun:    c.DryRun,
+			PDPConfig: c.PDPConfig,
+		}, kliqLog)
 		if nfAdapter != nil {
 			executor.AddSidecar(nfAdapter)
 			kliqLog.Printf("Netfilter adapter active: backend=%s dry_run=%v", nfAdapter.SelectedBackend(), c.DryRun)
@@ -640,9 +619,9 @@ func main() {
 	var bundleUpdateCh <-chan []byte = make(chan []byte, 1)
 
 	// ── Shadow metric pipeline ──────────────────────────────────────────────────
-	// Disabled by default (metric_pipeline.enabled=false). When enabled in shadow
-	// mode, KLShield telemetry is mirrored into the generic metric baseline engine
-	// alongside the existing shieldheuristic+FSM path (no enforcement change).
+	// Disabled by default (metric_pipeline.enabled=false). Adapter-specific
+	// metric conversion belongs in runtime adapters; the orchestrator only owns
+	// the lifecycle of the generic pipeline.
 	shadowPipelineCfg := pipeline.DefaultConfig()
 	// TODO: read from KliqComponentConfig.Analyzers.MetricPipeline when available
 	// For now: check environment variable for easy testing
@@ -650,13 +629,9 @@ func main() {
 		shadowPipelineCfg.Enabled = true
 		shadowPipelineCfg.Mode = pipeline.ModeShadow
 	}
-	guardCfg := klshieldguard.DefaultConfig()
 	shadowPipeline := pipeline.New(pipeline.Options{
 		Config: shadowPipelineCfg,
-		Guards: []adapterruntime.LearningGuard{klshieldguard.New(guardCfg)},
 	})
-	// shadowSamples accumulates per-source samples during the tick for batch submission.
-	var shadowSamples []klshieldshadow.TelemetrySample
 
 	// Apply last-known-good bundle on startup (fail_static).
 	if lkg := loadLastKnownGoodBundle(c.StatePath); lkg != nil {
@@ -672,10 +647,34 @@ func main() {
 
 	// Runtime inventory and config-asset report — built after LKG bundle apply
 	// so that HasPolicyPack and ProfileName reflect the restored state.
-	report := buildConfigAssetReport(c, nodeID, features, maps != nil)
+	activeAdapters := make(map[string]bool)
+	primaryActive := false
+	for _, adapterBinding := range adapterBindings {
+		binding := adapterBinding.binding
+		if binding == nil {
+			continue
+		}
+		id := adapterBinding.id
+		if binding.Active {
+			activeAdapters[id] = true
+			primaryActive = true
+		} else if _, ok := activeAdapters[id]; !ok {
+			activeAdapters[id] = false
+		}
+	}
+	if nfAdapter != nil {
+		activeAdapters["netfilter"] = true
+	} else if c.WantsNetfilter() {
+		activeAdapters["netfilter"] = false
+	}
+	report := buildConfigAssetReport(c, nodeID, features, activeAdapters)
 	inv := buildEmptyInventory(nodeID)
-	if pep != nil {
-		inv = pep.BuildInventory(nodeID)
+	for _, adapterBinding := range adapterBindings {
+		binding := adapterBinding.binding
+		if binding != nil && binding.Inventory.Metadata.ID != "" {
+			inv = binding.Inventory
+			break
+		}
 	}
 	logInventoryAndReport(inv, report, c.StatePath)
 
@@ -781,28 +780,31 @@ func main() {
 		bundleUpdateCh = forgeAgent.BundleUpdates()
 	}
 
-	// Tuple enforcement: activate XDP edge maps when the feature is enabled.
-	// Try to open any nil edge map handles first in case klshield was reloaded
-	// after kliq started (or tuple support was activated post-startup).
-	// If maps are still unavailable, degrade gracefully to graph-learning behavior
-	// (graph learning + baselines still work; only XDP tuple drops are skipped).
-	if features.TupleEnforcement && pep != nil {
-		if !pep.TupleAvailable() && maps != nil {
-			maps.TryOpenEdgeMaps(c.BPFfsRoot)
+	// Tuple enforcement: activate relationship enforcement when the feature is enabled.
+	// Try to refresh relationship enforcement handles first in case an adapter
+	// was reloaded after kliq started (or tuple support was activated
+	// post-startup). If unavailable, degrade gracefully to graph-learning behavior.
+	if features.TupleEnforcement && relationshipPEP != nil {
+		if !relationshipPEP.RelationshipAvailable() {
+			relationshipPEPs.RefreshUnavailable()
 		}
-		if pep.TupleAvailable() {
-			if err := pep.SetTupleEnforce(true); err != nil {
+		if relationshipPEP.RelationshipAvailable() {
+			if err := relationshipPEP.SetRelationshipEnforcement(true); err != nil {
 				kliqLog.Printf("WARNING: tuple enforce activate failed: %v", err)
 			} else {
 				tupleActive = true
-				kliqLog.Printf("Tuple enforcement: XDP edge maps active (deny-mode)")
+				kliqLog.Printf("Tuple enforcement: relationship PEP active (deny-mode)")
 			}
 		} else {
 			features.TupleEnforcement = false
-			kliqLog.Printf("DEGRADED: feature-profile=graph-enforce but XDP tuple maps not available — " +
-				"running as graph-learning until klshield is reloaded (klshield attach-xdp --force). " +
+			kliqLog.Printf("DEGRADED: feature-profile=graph-enforce but relationship enforcement is not available — " +
+				"running as graph-learning until a configured adapter exposes relationship enforcement. " +
 				"Graph learning and baselines are active.")
 		}
+	} else if features.TupleEnforcement {
+		features.TupleEnforcement = false
+		kliqLog.Printf("DEGRADED: feature-profile=graph-enforce but no relationship PEP is configured — " +
+			"running as graph-learning. Graph learning and baselines are active.")
 	}
 
 	// ── §5 Decision pipeline ────────────────────────────────────────────────
@@ -826,24 +828,27 @@ func main() {
 	}
 	decisionEng := decisionengine.New(decPolicy)
 
-	// Heuristic signal engine: converts per-source metrics → Signals + fsm.Metrics.
-	// Replaces inline fsm.CalcSeverity calls throughout the main loop.
-	engine := shieldheuristic.New(shieldheuristic.Config{
-		NodeID:    nodeID,
-		TrigPPS:   c.TrigPPS,
-		TrigSyn:   c.TrigSyn,
-		TrigScan:  c.TrigScan,
-		TrigBPS:   c.TrigBPS,
-		WPPS:      c.WPPS,
-		WSyn:      c.WSyn,
-		WScan:     c.WScan,
-		WBps:      c.WBps,
-		SevCap:    c.SevCap,
-		SignalTTL: 2 * time.Minute,
-	})
-
-	// Main signal bus — shared by heuristic engine, graph learner and future adapters.
+	// Main signal bus — shared by runtime adapters, graph learner and future adapters.
 	mainBus := adapterruntime.NewBus(512)
+
+	var runtimeAdapters []adapterruntime.ObservingAdapter
+	for _, adapterBinding := range adapterBindings {
+		binding := adapterBinding.binding
+		if binding == nil || binding.TelemetryHandle == nil || binding.RuntimeFactory == nil {
+			continue
+		}
+		runtimeAdapter, err := startRuntimeAdapter(
+			context.Background(),
+			binding.RuntimeFactory,
+			runtimeAdapterSpec(binding.RuntimeAdapterID, nodeID, c, binding.TelemetryHandle, sourceBaseline),
+			mainBus,
+		)
+		if err != nil {
+			log.Fatalf("start runtime adapter %s: %v", binding.RuntimeAdapterID, err)
+		}
+		runtimeAdapters = append(runtimeAdapters, runtimeAdapter)
+		defer runtimeAdapter.Stop(context.Background())
+	}
 
 	// Start the netfilter adapter on the bus (launches the TTL GC goroutine).
 	if nfAdapter != nil {
@@ -854,21 +859,10 @@ func main() {
 		}
 	}
 
-	// Conntrack observer — topology-only graph learning when klshield is absent.
-	// Observations have pps=0/bps=0 so the GraphLearner skips EWMA baseline
-	// updates (pps < BaselineMinUpdatePPS) but still upserts edges for topology.
-	// Only runs when: klshield maps unavailable AND graph learning is enabled.
-	if maps == nil && c.GraphEnabled {
-		nfCfg := netfilteradapter.DefaultConfig()
-		if nfAdapter != nil {
-			nfCfg = nfAdapter.Config()
-		}
-		startConntrackObserver(context.Background(), mainBus, nodeID, nfCfg)
-	}
+	netfilterruntime.StartTopologyFallbackObserver(context.Background(), mainBus, nodeID, c.GraphEnabled, primaryActive, nfAdapter, kliqLog)
 
-	// graphStrikeCh bridges graph.new_edge_after_freeze signals to the main tick loop.
-	// The signal consumer goroutine writes credits; the tick loop drains and applies them
-	// to state4/state6 so the FSM is the single enforcement authority.
+	// graphStrikeCh bridges graph.new_edge_after_freeze signals to the source
+	// FSM boundary so it remains the single enforcement authority.
 	graphStrikeCh := make(chan graphStrikeMsg, 512)
 
 	// RuntimePDP path: shadow (observe only) or active (enforce via action broker).
@@ -876,7 +870,7 @@ func main() {
 	shadowRunner := newShadowPDPRunner(nodeID, log.New(os.Stderr, "[runtime-pdp] ", log.LstdFlags))
 	if c.RuntimePDPMode == string(PDPModeActive) {
 		// In active mode the RuntimePDP emits proposals via a channel.
-		// A goroutine drains them → resolver → executor (KLShield IPv4 path).
+		// A goroutine drains them through the resolver and generic executor.
 		rpdpProposalCh := make(chan actions.ActionProposal, 256)
 		shadowRunner.SetMode(PDPModeActive, rpdpProposalCh)
 		go func() {
@@ -887,8 +881,8 @@ func main() {
 					kliqLog.Printf("[runtime-pdp:active] proposal denied: %s", res.DenyReason)
 					continue
 				}
-				if ip := parseIPv4String(res.Target.Value); ip != [4]byte{} {
-					executor.Apply4(ip, fsm.State{}, res, pepParams, time.Now())
+				if !applyResolvedSourceAction(res, executor, pepParams, time.Now()) {
+					kliqLog.Printf("[runtime-pdp:active] proposal skipped: unsupported source target %q", res.Target.Value)
 				}
 			}
 		}()
@@ -940,64 +934,44 @@ func main() {
 				// Graph freeze violation: source is actively sending → add to cands
 				// so the FSM is processed this tick with real metrics.
 				if sig.Type == signal.SignalGraphNewEdgeAfterFreeze && sig.Subject.ID != "" {
-					sendStrike(graphStrikeCh, sig.Subject.ID, graphStrikesFromScore(sig.Score), sig.Score >= 90, true)
+					sendStrike(graphStrikeCh, sig.Subject.ID, graphStrikesFromScore(sig.Score), sig.Score >= 90, true, sig.Score)
 
 					// Tuple enforcement (graph-enforce profile): deny the specific
-					// (src, dst_port, proto) tuple via the ActionResolver instead of
-					// calling pep.DenyEdge4 directly.
-					if features.TupleEnforcement && sig.Score >= 90 && pep != nil && pep.TupleAvailable() {
-						portStr := sig.Attributes["destination_port"]
-						proto := sig.Attributes["protocol"]
-						var port uint64
-						if portStr != "" {
-							fmt.Sscanf(portStr, "%d", &port)
-						}
-						if port > 0 && proto != "" {
-							if ekey, ok := shieldclient.NewEdge4Key(sig.Subject.ID, uint16(port), proto); ok {
-								proposal := actions.ActionProposal{
-									Source:        "graph",
-									Reason:        "graph_new_edge_after_freeze",
-									DesiredAction: "enforce.access.deny",
-									DesiredLevel:  "block",
-									Target: actions.ActionTarget{
-										Granularity: "tuple_src_dst_port",
-										Value:       sig.Subject.ID,
-										Attributes: map[string]string{
-											"src_ip":   sig.Subject.ID,
-											"dst_port": portStr,
-											"protocol": proto,
-										},
-									},
-									Confidence: float64(sig.Confidence) / 100.0,
-									CreatedAt:  time.Now(),
-								}
-								res := resolver.Resolve(proposal)
-								if res.DenyReason != "" {
-									kliqLog.Printf("ACTION-RESOLVER tuple %s:%s/%s %s→%s reason=%q",
-										sig.Subject.ID, portStr, proto,
-										proposal.DesiredLevel, res.ExecutableLevel, res.DenyReason)
-								}
-								result := executor.ApplyTuple4(ekey, res, time.Now())
-								switch result.Status {
-								case "applied":
-									kliqLog.Printf("TUPLE deny edge: %s port=%s proto=%s (freeze violation)", sig.Subject.ID, portStr, proto)
-								case "failed":
-									kliqLog.Printf("TUPLE deny edge %s:%s/%s failed: %s", sig.Subject.ID, portStr, proto, result.Reason)
-								}
+					// relationship tuple via the ActionResolver.
+					if features.TupleEnforcement && sig.Score >= 90 && relationshipPEP != nil && relationshipPEP.RelationshipAvailable() {
+						if relTarget, ok := relationshipActionTargetFromSignal(sig); ok {
+							proposal := actions.ActionProposal{
+								Source:        "graph",
+								Reason:        "graph_new_edge_after_freeze",
+								DesiredAction: "enforce.access.deny",
+								DesiredLevel:  "block",
+								Target:        relTarget.Proposal,
+								Confidence:    float64(sig.Confidence) / 100.0,
+								CreatedAt:     time.Now(),
+							}
+							res := resolver.Resolve(proposal)
+							if res.DenyReason != "" {
+								kliqLog.Printf("ACTION-RESOLVER relationship %s %s→%s reason=%q",
+									relTarget.Label,
+									proposal.DesiredLevel, res.ExecutableLevel, res.DenyReason)
+							}
+							result := executor.ApplyRelationship(relationshipPEP, relTarget.PEP, res, time.Now())
+							switch result.Status {
+							case "applied":
+								kliqLog.Printf("RELATIONSHIP deny edge: %s (freeze violation)", relTarget.Label)
+							case "failed":
+								kliqLog.Printf("RELATIONSHIP deny edge %s failed: %s", relTarget.Label, result.Reason)
 							}
 						}
 					}
 				}
 
 				// Edge baseline deviation (EWMA) and peak-exceeded signals:
-				// strikes accumulate but IP is NOT added to cands, so the FSM
-				// processes it with real metrics on the next natural telemetry tick.
-				if (sig.Type == signal.SignalGraphEdgeBaselinePPSDeviation ||
-					sig.Type == signal.SignalGraphEdgeBaselineBytesDeviation ||
-					sig.Type == signal.SignalGraphEdgeBaselinePPSPeakExceeded ||
-					sig.Type == signal.SignalGraphEdgeBaselineBPSPeakExceeded) &&
-					sig.Subject.ID != "" {
-					sendStrike(graphStrikeCh, sig.Subject.ID, graphStrikesFromScore(sig.Score), false, false)
+				// process the source through the FSM as a graph-derived high-severity
+				// candidate. This keeps graph anomalies visible in the normal
+				// progressive source enforcement logs.
+				if isGraphBaselineSignal(sig.Type) && sig.Subject.ID != "" {
+					sendStrike(graphStrikeCh, sig.Subject.ID, 0, false, true, sig.Score)
 				}
 			}
 		}
@@ -1010,15 +984,6 @@ func main() {
 	if c.GraphEnabled {
 		ss := stateStore
 		gpStateStore = stateStore
-
-		// Shield telemetry adapter publishes flow observations onto the shared mainBus.
-		// Only created when klshield maps are available — when running netfilter-only,
-		// the conntrack observer feeds the bus instead.
-		telAdapter := shieldtelemetry.NewFromMaps(shieldtelemetry.Config{
-			Interval: c.Interval,
-			NodeID:   nodeID,
-			PrevTTL:  c.PrevTTL,
-		}, maps)
 
 		gpMode := graphpipeline.ModeLearn
 		switch c.GraphMode {
@@ -1038,7 +1003,7 @@ func main() {
 			log.Fatalf("unknown --graph-mode %q (valid: learn, frozen-observe, frozen-enforce)", c.GraphMode)
 		}
 
-		excludeCIDRs := parseGraphExcludeCIDRs(c.GraphExcludeSourceCIDR)
+		excludeCIDRs := graphpipeline.ParseExcludeSourceCIDRs(c.GraphExcludeSourceCIDR)
 		if len(excludeCIDRs) > 0 {
 			kliqLog.Printf("Graph: excluding source CIDRs from learning: %s", c.GraphExcludeSourceCIDR)
 		}
@@ -1061,7 +1026,7 @@ func main() {
 			kliqLog.Printf("WARN: load relationships from store: %v", loadErr)
 		}
 
-		gpAdapter = graphpipeline.New(graphpipeline.Config{
+		gpConfig := graphpipeline.Config{
 			NodeID:                     nodeID,
 			Mode:                       gpMode,
 			Promotion:                  rlCfg.Promotion,
@@ -1069,17 +1034,15 @@ func main() {
 			BaselineAlphaBootstrap:     c.BaselineAlphaBootstrap,
 			BaselineMinObservations:    c.BaselineMinObservations,
 			BaselineDeviationThreshold: c.BaselineDeviationThreshold,
-			BaselineMinUpdatePPS:       c.BaselineMinUpdatePPS,
-			BaselineMinUpdateBPS:       c.BaselineMinUpdateBPS,
+			BaselineMinUpdates:         graphBaselineMinUpdates(c),
 			BaselinePeakTolerance:      c.BaselinePeakTolerance,
-			BaselineTrigPPS:            c.TrigPPS,
-			BaselineTrigBPS:            c.TrigBPS,
-			MinPacketsPerTick:          c.GraphMinPackets,
-			MinBytesPerTick:            c.GraphMinBytes,
+			ObservationMinValues:       graphObservationMinValues(c),
 			ExcludeBroadcast:           c.GraphExcludeBcast,
 			ExcludeLoopback:            c.GraphExcludeLoopback,
 			ExcludeSourceCIDRs:         excludeCIDRs,
-		}, rlLearner, guard)
+		}
+		applyGraphRuntimeValuesFromAdapters(&gpConfig, runtimeAdapters)
+		gpAdapter = graphpipeline.New(gpConfig, rlLearner, guard)
 
 		// Periodic flush of dirty relationships + state store GC.
 		go func() {
@@ -1108,14 +1071,22 @@ func main() {
 
 		gctx, gcancel := context.WithCancel(context.Background())
 
-		if maps != nil && maps.Src4 != nil {
+		startedFlowTelemetry := 0
+		for _, adapterBinding := range adapterBindings {
+			binding := adapterBinding.binding
+			if binding == nil || binding.FlowTelemetry == nil {
+				continue
+			}
+			telAdapter := binding.FlowTelemetry
 			if err := telAdapter.Start(gctx, mainBus); err != nil {
 				gcancel()
-				log.Fatalf("start graph telemetry adapter: %v", err)
+				log.Fatalf("start graph telemetry adapter %s: %v", telAdapter.ID(), err)
 			}
 			defer telAdapter.Stop(context.Background())
-		} else {
-			kliqLog.Printf("Graph: klshield maps unavailable — graph observations via conntrack only")
+			startedFlowTelemetry++
+		}
+		if startedFlowTelemetry == 0 {
+			kliqLog.Printf("Graph: adapter flow telemetry unavailable — using topology fallback observations")
 		}
 
 		if err := gpAdapter.Start(gctx, mainBus); err != nil {
@@ -1130,59 +1101,26 @@ func main() {
 		kliqLog.Printf("Graph pipeline started: mode=%s state-db=%s node=%s", gpMode, c.StateStorePath, nodeID)
 	}
 
-	// Per-tick previous-snapshot maps (live here in kliq; not in the adapter).
-	prev4 := make(map[[4]byte]prevV4, 64_000)
-	prev6 := make(map[[16]byte]prevV6, 64_000)
+	sources := newSourceStates()
 
-	// FSM state maps.
-	state4 := make(map[[4]byte]fsm.State, 64_000)
-	state6 := make(map[[16]byte]fsm.State, 64_000)
-
-	// KLShield-specific autotune: reservoir sampling + median/MAD threshold calculation.
-	// Config and thresholds live in pkg/adapters/klshield/autotuner — out of this orchestrator.
-	klshieldAt := klshieldautotuner.New(
-		klshieldautotuner.Thresholds{
-			TrigPPS: c.TrigPPS, TrigSyn: c.TrigSyn, TrigScan: c.TrigScan, TrigBPS: c.TrigBPS,
-		},
-		klshieldautotuner.Config{
-			MinSamples:                c.AutoMinSamples,
-			FloorPPS:                  c.AutoFloorPPS,
-			FloorSyn:                  c.AutoFloorSyn,
-			FloorScan:                 c.AutoFloorScan,
-			FloorBPS:                  c.AutoFloorBPS,
-			MinWindowsBeforeDownscale: c.BootstrapMinWindowsBeforeDownscale,
-			MinSourcesBeforeDownscale: c.BootstrapMinSourcesBeforeDownscale,
-		},
-		50_000,
-	)
+	tuner, tunerErr := catalog.NewTuner(catalog.DefaultAdapterID, c.tuningThresholds(), c.tuningConfig(), 50_000)
+	if tunerErr != nil {
+		log.Fatalf("tuner init: %v", tunerErr)
+	}
 
 	totalLearnTicks := 0
 	cleanLearnTicks := 0
 
-	// Note: autotuneSkipCount and bootstrapCompletedWindows are now owned by
-	// pkg/adapters/klshield/autotuner.Autotuner (klshieldAt).
-
-	// Baseline totals for drop-ratio gating.
-	var prevTotals shieldclient.Totals
-	var prevTotalsWall time.Time
-	if maps != nil && maps.Totals != nil {
-		if t, err := shieldclient.ReadTotalsSum(maps.Totals); err == nil {
-			prevTotals = t
-			prevTotalsWall = time.Now()
-		}
-	}
-
-	// syncEdge4Allow writes all frozen/approved network.connects_to relationships
-	// into edge4_allow so the XDP allowlist reflects the current frozen graph.
-	// Must be called before activating allow-mode (tuple-enforce allow). Also run
-	// periodically so newly approved edges are picked up without restarting KLIQ.
-	syncEdge4Allow := func() {
-		if gpStateStore == nil || pep == nil || !pep.TupleAvailable() {
+	// syncRelationshipAllowlist writes all frozen/approved network.connects_to
+	// relationships into the active adapter relationship PEP. Must be called
+	// before activating allow-mode and periodically after graph changes.
+	syncRelationshipAllowlist := func() {
+		if gpStateStore == nil || relationshipPEP == nil || !relationshipPEP.RelationshipAvailable() {
 			return
 		}
 		rels, err := gpStateStore.ListRelationships(context.Background(), nodeID, "network.connects_to", "")
 		if err != nil {
-			kliqLog.Printf("syncEdge4Allow: list relationships: %v", err)
+			kliqLog.Printf("relationship allowlist sync: list relationships: %v", err)
 			return
 		}
 		n := 0
@@ -1190,36 +1128,30 @@ func main() {
 			if r.State != relationship.StateFrozen && r.State != relationship.StateApproved {
 				continue
 			}
-			// Dimensions carry protocol + destination_port.
 			// SubjectEntityID is the stable entity ID hash, not a raw IP.
-			// For tuple enforcement we need the raw IP: read it from the entity table.
+			// For relationship enforcement we need the adapter-facing source ID.
 			srcEntity, eErr := gpStateStore.GetEntityByStableID(context.Background(), r.SubjectEntityID)
 			if eErr != nil || srcEntity == nil {
 				continue
 			}
-			dport := uint16(0)
-			if p, err2 := strconv.ParseUint(r.Dimensions["destination_port"], 10, 16); err2 == nil {
-				dport = uint16(p)
-			}
-			proto := r.Dimensions["protocol"]
-			ekey, ok := shieldclient.NewEdge4Key(srcEntity.ID, dport, proto)
+			target, ok := relationshipActionTargetFromAttributes(srcEntity.ID, r.Dimensions)
 			if !ok {
 				continue
 			}
-			if err := pep.AllowEdge4(ekey); err != nil {
-				kliqLog.Printf("syncEdge4Allow: %s:%d/%s: %v", srcEntity.ID, dport, proto, err)
+			if err := relationshipPEP.AllowRelationship(target.PEP); err != nil {
+				kliqLog.Printf("relationship allowlist sync: %s: %v", target.Label, err)
 			} else {
 				n++
 			}
 		}
 		if n > 0 {
-			kliqLog.Printf("syncEdge4Allow: synced %d frozen/approved edges to XDP allowlist", n)
+			kliqLog.Printf("relationship allowlist sync: synced %d frozen/approved edges", n)
 		}
 	}
 
 	// Populate allowlist on startup (idempotent: LRU map, duplicate writes are fine).
 	if features.TupleEnforcement {
-		syncEdge4Allow()
+		syncRelationshipAllowlist()
 	}
 
 	// Start shadow pipeline (no-op when disabled).
@@ -1234,7 +1166,7 @@ func main() {
 	lastExpiredCleanup := time.Now()
 
 	// SIGUSR1: de-escalate all enforced IPs to OBSERVE so kliq state stays in
-	// sync after an external map reset (e.g. klshield reset).
+	// sync after an external enforcement reset.
 	resetCh := make(chan os.Signal, 1)
 	ossignal.Notify(resetCh, syscall.SIGUSR1)
 	defer ossignal.Stop(resetCh)
@@ -1249,14 +1181,34 @@ func main() {
 	if bs.Enabled && bs.Phase != "" {
 		bootstrapPhase = bs.Phase
 	}
-	kliqLog.Printf("Kernloom IQ started profile=%s bootstrap=%s interval=%s dry_run=%v top=%d trig{pps=%.1f bps=%s syn=%.1f scan=%.1f} weights{pps=%.2f bps=%.2f syn=%.2f scan=%.2f} cap=%.1f (klshield=%v ipv6=%v)",
-		p.Name, bootstrapPhase, c.Interval.String(), c.DryRun, c.TopN, c.TrigPPS, fmtBPS(c.TrigBPS), c.TrigSyn, c.TrigScan, c.WPPS, c.WBps, c.WSyn, c.WScan, c.SevCap, maps != nil, maps != nil && maps.Src6 != nil)
+	tuningSummary := "adapter-tuning=unavailable"
+	if len(runtimeAdapters) > 0 {
+		tuningSummary = runtimeAdaptersSummary(runtimeAdapters)
+	}
+	ipv6Active := false
+	for _, adapterBinding := range adapterBindings {
+		binding := adapterBinding.binding
+		if binding != nil && binding.IPv6Active {
+			ipv6Active = true
+			break
+		}
+	}
+	adapterSummary := fmt.Sprintf("adapter_active=%v", primaryActive)
+	if len(adapterBindings) > 0 {
+		ipv6Status := "inactive"
+		if ipv6Active {
+			ipv6Status = "active"
+		}
+		adapterSummary = fmt.Sprintf("%s adapter_ipv6=%s", adapterSummary, ipv6Status)
+	}
+	kliqLog.Printf("Kernloom IQ started profile=%s bootstrap=%s interval=%s dry_run=%v top=%d %s (%s)",
+		p.Name, bootstrapPhase, c.Interval.String(), c.DryRun, c.TopN, tuningSummary, adapterSummary)
 
 	// ── §8 Main tick loop ───────────────────────────────────────────────────
 	// This loop is the core of KLIQ. Each tick:
 	//   a) drains pending bundle/signal updates
 	//   b) reads eBPF map telemetry (v4+v6)
-	//   c) evaluates FSM per source (processCandidate4/6)
+	//   c) evaluates FSM per opaque source
 	//   d) runs autotune when due
 	// The loop runs on a single goroutine — no locking needed for shared state.
 	for {
@@ -1284,297 +1236,61 @@ func main() {
 		// Handle SIGUSR1: clear FSM state to sync with an external map reset.
 		select {
 		case <-resetCh:
-			n := 0
 			pepParams := c.toPEPParams()
-			for ip, st := range state4 {
-				if st.Level != fsm.LevelObserve {
-					st = executor.ApplyDeEnforce4(ip, st, pepParams, nowWall)
-					st.Strikes, st.UpStreak, st.DownStreak, st.NonCompTicks = 0, 0, 0, 0
-					state4[ip] = st
-					n++
-				}
-			}
-			for ip, st := range state6 {
-				if st.Level != fsm.LevelObserve {
-					st = executor.ApplyDeEnforce6(ip, st, pepParams, nowWall)
-					st.Strikes, st.UpStreak, st.DownStreak, st.NonCompTicks = 0, 0, 0, 0
-					state6[ip] = st
-					n++
-				}
-			}
-			kliqLog.Printf("RESET via SIGUSR1: de-escalated %d enforced IPs to OBSERVE", n)
+			n := sources.reset(nowWall, executor, pepParams)
+			kliqLog.Printf("RESET via SIGUSR1: de-escalated %d enforced sources to OBSERVE", n)
 		default:
 		}
 
-		wl.maybeReload(c.WhitelistReload)
-		fb.maybeReload(c.FeedbackReload)
+		wl.MaybeReload(c.WhitelistReload)
+		fb.MaybeReload(c.FeedbackReload)
 
-		if maps != nil {
-			fb.applyV4(nowWall, maps.Deny4, maps.RL4, state4, c.DryRun)
-			fb.applyV6(nowWall, maps.Deny6, maps.RL6, state6, c.DryRun)
-
-			if c.FeedbackCIDRDeenforce {
-				fb.applyCIDRsIfDue(nowWall, maps.Deny4, maps.RL4, state4, maps.Deny6, maps.RL6, state6, c.DryRun, c.FeedbackCIDREvery, c.FeedbackCIDRMax)
-			}
-		}
+		pepParams := c.toPEPParams()
+		sources.applyFeedback(nowWall, fb, executor, pepParams, c.FeedbackCIDRDeenforce, c.FeedbackCIDREvery, c.FeedbackCIDRMax)
 
 		// Compute drop ratio for learn gating.
 		dropRatio := 0.0
-		if maps != nil && maps.Totals != nil && !prevTotalsWall.IsZero() {
-			if t, err := shieldclient.ReadTotalsSum(maps.Totals); err == nil {
-				sec := nowWall.Sub(prevTotalsWall).Seconds()
-				if sec > 0 {
-					dPass := float64(t.Pass - prevTotals.Pass)
-					dDrop := float64((t.DropAllow + t.DropDeny + t.DropRL) - (prevTotals.DropAllow + prevTotals.DropDeny + prevTotals.DropRL))
-					if den := dPass + dDrop; den > 0 {
-						dropRatio = dDrop / den
-					}
-				}
-				prevTotals = t
-				prevTotalsWall = nowWall
-			}
-		}
 
 		cands := make([]metrics, 0, 4096)
 		seenForLearn := 0
 		highSevCount := 0
-		// celVarBuf is reused across all sources per tick to avoid per-source map allocation.
-		var celVarBuf map[string]any
-		if len(c.CELRules) > 0 {
-			celVarBuf = make(map[string]any, 8)
-		}
 
-		// ----- Iterate v4 sources (skipped when klshield unavailable) -----
-		if maps != nil && maps.Src4 != nil {
-			it4 := maps.Src4.Iterate()
-			var k4 [4]byte
-			var v4 shieldclient.SrcStatsV4
-
-			for it4.Next(&k4, &v4) {
-				pv, ok := prev4[k4]
-				if !ok {
-					prev4[k4] = prevV4{Pkts: v4.Pkts, Bytes: v4.Bytes, Syn: v4.Syn, Scan: v4.DportChanges, DropRL: v4.DropRL, LastWall: nowWall}
-					continue
-				}
-
-				sec := nowWall.Sub(pv.LastWall).Seconds()
-				if sec <= 0 {
-					sec = c.Interval.Seconds()
-					if sec <= 0 {
-						sec = 1
-					}
-				}
-
-				// Counter-reset guard: if any of the eBPF counters appears to have
-				// shrunk (e.g. after `klshield reset`), reseed prev and skip the tick.
-				// Without this, uint64 wraparound produces deltas ≈ 2^64 → instant BLOCK.
-				if v4.Pkts < pv.Pkts || v4.Bytes < pv.Bytes || v4.Syn < pv.Syn ||
-					v4.DportChanges < pv.Scan || v4.DropRL < pv.DropRL {
-					prev4[k4] = prevV4{Pkts: v4.Pkts, Bytes: v4.Bytes, Syn: v4.Syn, Scan: v4.DportChanges, DropRL: v4.DropRL, LastWall: nowWall}
-					continue
-				}
-
-				dPkts := v4.Pkts - pv.Pkts
-				dBytes := v4.Bytes - pv.Bytes
-				dSyn := v4.Syn - pv.Syn
-				dScan := v4.DportChanges - pv.Scan
-				dDropRL := v4.DropRL - pv.DropRL
-
-				pps := float64(dPkts) / sec
-				bps := float64(dBytes) / sec
-				synRate := float64(dSyn) / sec
-				scanRate := float64(dScan) / sec
-				dropRLRate := float64(dDropRL) / sec
-
-				subject4 := observation.EntityRef{Kind: observation.KindIP, ID: ip4String(k4)}
-
-				// Mirror telemetry into shadow metric pipeline (no enforcement effect).
-				if shadowPipeline.IsActive() {
-					shadowSamples = append(shadowSamples, klshieldshadow.TelemetrySample{
-						SourceIP: subject4.ID, PPS: pps, BPS: bps,
-						SYNRate: synRate, ScanRate: scanRate, DropRLRate: dropRLRate,
-						Window: c.Interval, Timestamp: nowWall,
-					})
-				}
-
-				// Source baseline update + per-source effective thresholds.
-				var fsmM4 fsm.Metrics
-				var sigs4 []signal.Signal
-				if srcBL != nil {
-					srcBL.Update(subject4.ID, pps, bps, synRate, scanRate, false, nowWall)
-					effPPS := srcBL.EffectiveTrigPPS(subject4.ID, c.TrigPPS)
-					effBPS := srcBL.EffectiveTrigBPS(subject4.ID, c.TrigBPS)
-					fsmM4, sigs4 = engine.EvaluateAt(subject4, pps, bps, synRate, scanRate, dropRLRate,
-						effPPS, c.TrigSyn, c.TrigScan, effBPS)
-				} else {
-					fsmM4, sigs4 = engine.Evaluate(subject4, pps, bps, synRate, scanRate, dropRLRate)
-				}
-				for _, sig := range sigs4 {
-					_ = mainBus.PublishSignal(context.Background(), sig)
-				}
-
-				// CEL rule evaluation (v1.2 packs): fire ActionProposals directly when
-				// the expression matches this source this tick. Runs independently of the
-				// FSM candidate path — CEL rules can fire even for low-PPS sources.
-				// celVarBuf is allocated once per source and reused across rules.
-				if len(c.CELRules) > 0 {
-					var blProfile sourcebaseline.Profile
-					var blOk bool
-					if srcBL != nil {
-						blProfile, blOk = srcBL.Get(subject4.ID)
-					}
-					sigs := &celeval.SourceSignals{
-						PPS: pps, BPS: bps, SynRate: synRate, ScanRate: scanRate,
-						HasBaseline:   blOk,
-						EWMAPPS:       blProfile.EWMAPPS,
-						EWMABPS:       blProfile.EWMABPS,
-						EWMASyn:       blProfile.EWMASyn,
-						Confidence:    blProfile.Confidence,
-						Promoted:      blProfile.Promoted,
-						GlobalTrigPPS: c.TrigPPS,
-						GlobalTrigBPS: c.TrigBPS,
-					}
-					st4 := state4[k4]
-					for _, rule := range c.CELRules {
-						if !rule.Evaluate(sigs, celVarBuf) {
-							continue
-						}
-						proposal := actions.ActionProposal{
-							Source:        "cel-policy",
-							Reason:        rule.Name,
-							DesiredAction: rule.Capability,
-							DesiredLevel:  rule.Level,
-							Target:        actions.ActionTarget{Granularity: "src_ip", Value: subject4.ID},
-							TTL:           c.ttlForLevelName(rule.Level),
-							CreatedAt:     nowWall,
-						}
-						res := resolver.Resolve(proposal)
-						st4, _ = executor.Apply4(k4, st4, res, c.toPEPParams(), nowWall)
-						if res.DenyReason == "" {
-							kliqLog.Printf("CEL rule=%q matched: %s action=%s", rule.Name, subject4.ID, res.ExecutableLevel)
-						}
-						break // first matching rule per source per tick
-					}
-					state4[k4] = st4
-				}
-
-				// Baseline update and deviation check happen in the cands loop below,
-				// after `clean` is computed — same timing as the global autotune.
-
-				if dPkts > 0 || dSyn > 0 || dScan > 0 {
-					seenForLearn++
-					if fsmM4.Severity >= c.LearnSevGT {
-						highSevCount++
-					}
-				}
-
-				prev4[k4] = prevV4{Pkts: v4.Pkts, Bytes: v4.Bytes, Syn: v4.Syn, Scan: v4.DportChanges, DropRL: v4.DropRL, LastWall: nowWall}
-
-				// MinSev=0 means "no severity override" — only PPS decides.
-				// MinSev>0 lets a high-severity source bypass the PPS floor.
-				sevOverride := c.MinSev > 0 && fsmM4.Severity >= c.MinSev
-				if pps < c.MinPPS && !sevOverride && dropRLRate == 0 {
-					continue
-				}
-
-				cands = append(cands, metrics{
-					IPVer: 4, IP4: k4,
-					PPS: fsmM4.PPS, Bps: fsmM4.Bps, SynRate: fsmM4.SynRate, ScanRate: fsmM4.ScanRate, DropRLRate: fsmM4.DropRLRate, Severity: fsmM4.Severity,
-				})
-			}
-			if err := it4.Err(); err != nil {
-				kliqLog.Printf("iterate src4 map err: %v", err)
+		observedAny := false
+		observeFailed := false
+		for _, runtimeAdapter := range runtimeAdapters {
+			observed, stats, err := runtimeAdapter.Observe(context.Background(), adapterruntime.RuntimeTick{
+				Now:      nowWall,
+				Interval: c.Interval,
+			})
+			if err != nil {
+				observeFailed = true
+				kliqLog.Printf("observe adapter=%s err: %v", stats.AdapterID, err)
 				continue
 			}
-		} // end if maps.Src4 != nil
-
-		// ----- Iterate v6 sources -----
-		if maps != nil && maps.Src6 != nil {
-			it6 := maps.Src6.Iterate()
-			var k6 shieldclient.Src6Key
-			var v6 shieldclient.SrcStatsV6
-
-			for it6.Next(&k6, &v6) {
-				ip6 := k6.IP
-				pv, ok := prev6[ip6]
+			observedAny = true
+			for _, obs := range observed {
+				m, ok := metricsFromObservation(obs)
 				if !ok {
-					prev6[ip6] = prevV6{Pkts: v6.Pkts, Bytes: v6.Bytes, Syn: v6.Syn, Scan: v6.DportChanges, DropRL: v6.DropRL, LastWall: nowWall}
 					continue
 				}
-
-				sec := nowWall.Sub(pv.LastWall).Seconds()
-				if sec <= 0 {
-					sec = c.Interval.Seconds()
-					if sec <= 0 {
-						sec = 1
-					}
-				}
-
-				// Counter-reset guard (see IPv4 path above).
-				if v6.Pkts < pv.Pkts || v6.Bytes < pv.Bytes || v6.Syn < pv.Syn ||
-					v6.DportChanges < pv.Scan || v6.DropRL < pv.DropRL {
-					prev6[ip6] = prevV6{Pkts: v6.Pkts, Bytes: v6.Bytes, Syn: v6.Syn, Scan: v6.DportChanges, DropRL: v6.DropRL, LastWall: nowWall}
-					continue
-				}
-
-				dPkts := v6.Pkts - pv.Pkts
-				dBytes := v6.Bytes - pv.Bytes
-				dSyn := v6.Syn - pv.Syn
-				dScan := v6.DportChanges - pv.Scan
-				dDropRL := v6.DropRL - pv.DropRL
-
-				pps := float64(dPkts) / sec
-				bps := float64(dBytes) / sec
-				synRate := float64(dSyn) / sec
-				scanRate := float64(dScan) / sec
-				dropRLRate := float64(dDropRL) / sec
-
-				subject6 := observation.EntityRef{Kind: observation.KindIP, ID: ip6String(ip6)}
-
-				var fsmM6 fsm.Metrics
-				var sigs6 []signal.Signal
-				if srcBL != nil {
-					srcBL.Update(subject6.ID, pps, bps, synRate, scanRate, false, nowWall)
-					effPPS := srcBL.EffectiveTrigPPS(subject6.ID, c.TrigPPS)
-					effBPS := srcBL.EffectiveTrigBPS(subject6.ID, c.TrigBPS)
-					fsmM6, sigs6 = engine.EvaluateAt(subject6, pps, bps, synRate, scanRate, dropRLRate,
-						effPPS, c.TrigSyn, c.TrigScan, effBPS)
-				} else {
-					fsmM6, sigs6 = engine.Evaluate(subject6, pps, bps, synRate, scanRate, dropRLRate)
-				}
-				for _, sig := range sigs6 {
-					_ = mainBus.PublishSignal(context.Background(), sig)
-				}
-
-				if dPkts > 0 || dSyn > 0 || dScan > 0 {
+				if m.hasLearningSignal() {
 					seenForLearn++
-					if fsmM6.Severity >= c.LearnSevGT {
+					if m.score() >= c.LearnSevGT {
 						highSevCount++
 					}
 				}
-
-				prev6[ip6] = prevV6{Pkts: v6.Pkts, Bytes: v6.Bytes, Syn: v6.Syn, Scan: v6.DportChanges, DropRL: v6.DropRL, LastWall: nowWall}
-
-				sevOverride6 := c.MinSev > 0 && fsmM6.Severity >= c.MinSev
-				if pps < c.MinPPS && !sevOverride6 && dropRLRate == 0 {
-					continue
-				}
-
-				cands = append(cands, metrics{
-					IPVer: 6, IP6: ip6,
-					PPS: fsmM6.PPS, Bps: fsmM6.Bps, SynRate: fsmM6.SynRate, ScanRate: fsmM6.ScanRate, DropRLRate: fsmM6.DropRLRate, Severity: fsmM6.Severity,
-				})
+				cands = append(cands, m)
 			}
-			if err := it6.Err(); err != nil {
-				kliqLog.Printf("iterate src6 map err: %v", err)
-			}
+		}
+		if observeFailed && !observedAny {
+			continue
 		}
 
 		sort.Slice(cands, func(i, j int) bool {
-			if cands[i].Severity == cands[j].Severity {
-				return cands[i].PPS > cands[j].PPS
+			if cands[i].score() == cands[j].score() {
+				return cands[i].primarySortValue() > cands[j].primarySortValue()
 			}
-			return cands[i].Severity > cands[j].Severity
+			return cands[i].score() > cands[j].score()
 		})
 		if c.TopN < len(cands) {
 			cands = cands[:c.TopN]
@@ -1591,87 +1307,17 @@ func main() {
 		for {
 			select {
 			case gs := <-graphStrikeCh:
-				if gs.isV6 {
-					st := state6[gs.ip6]
-					if gs.forceBlock {
-						if needed := c.BlockAt + 1; st.Strikes < needed {
-							st.Strikes = needed
-						}
-						st.ForceBlock = true
-					} else {
-						st.Strikes += gs.n
-					}
-					if st.UpStreak < c.UpNeed {
-						st.UpStreak = c.UpNeed
-					}
-					if st.HighSevSince.IsZero() {
-						st.HighSevSince = nowWall
-					}
-					st.LastTrigger = nowWall
-					state6[gs.ip6] = st
-					if gs.addToCands {
-						alreadyIn := false
-						for _, m := range cands {
-							if m.IPVer == 6 && m.IP6 == gs.ip6 {
-								alreadyIn = true
-								break
-							}
-						}
-						if !alreadyIn {
-							cands = append(cands, metrics{IPVer: 6, IP6: gs.ip6})
-						}
-					}
-				} else {
-					st := state4[gs.ip4]
-					if gs.forceBlock {
-						if needed := c.BlockAt + 1; st.Strikes < needed {
-							st.Strikes = needed
-						}
-						st.ForceBlock = true
-					} else {
-						st.Strikes += gs.n
-					}
-					if st.UpStreak < c.UpNeed {
-						st.UpStreak = c.UpNeed
-					}
-					if st.HighSevSince.IsZero() {
-						st.HighSevSince = nowWall
-					}
-					st.LastTrigger = nowWall
-					state4[gs.ip4] = st
-					if gs.addToCands {
-						alreadyIn := false
-						for _, m := range cands {
-							if m.IPVer == 4 && m.IP4 == gs.ip4 {
-								alreadyIn = true
-								break
-							}
-						}
-						if !alreadyIn {
-							cands = append(cands, metrics{IPVer: 4, IP4: gs.ip4})
-						}
-					}
-				}
+				sources.applyGraphStrike(&cands, gs, nowWall, c)
 			default:
 				break drainGraphStrikes
 			}
 		}
 
 		// Count active blocks for clean-tick decision.
-		blocksActive := 0
-		for _, st := range state4 {
-			if st.Level == fsm.LevelBlock {
-				blocksActive++
-			}
-		}
-		for _, st := range state6 {
-			if st.Level == fsm.LevelBlock {
-				blocksActive++
-			}
-		}
+		blocksActive := sources.activeBlocks()
 
 		totalLearnTicks++
-		clean := true
+		clean := !observeFailed
 		if c.LearnSkipIfBlocks && blocksActive > 0 {
 			clean = false
 		}
@@ -1704,119 +1350,36 @@ func main() {
 			}
 		}
 
-		// Track which IPs were processed this tick so the sweep below can skip them.
-		inCands4 := make(map[[4]byte]bool, len(cands))
-		inCands6 := make(map[[16]byte]bool)
-		for _, m := range cands {
-			if m.IPVer == 4 {
-				state4[m.IP4] = processCandidate4(m, state4[m.IP4], nowWall, c, wl, fb, resolver, executor, klshieldAt, clean)
-				inCands4[m.IP4] = true
-			} else {
-				state6[m.IP6] = processCandidate6(m, state6[m.IP6], nowWall, c, wl, fb, resolver, executor, klshieldAt, clean)
-				inCands6[m.IP6] = true
-			}
-		}
+		processed := sources.processCandidates(cands, nowWall, c, wl, fb, resolver, executor, tuner, clean)
 
-		// Maintenance sweep: advance FSM for non-OBSERVE sources that had no traffic
-		// this tick (fell below MinPPS or disappeared from the Shield map entirely).
+		// Maintenance sweep: advance FSM for non-OBSERVE sources that had no
+		// qualifying observation this tick.
 		// Without this, a source that goes quiet after being rate-limited stays in
-		// RATE_HARD/BLOCK forever because fsm.Advance() is never called for it and
+		// RATE_HARD/BLOCK forever because the FSM is never advanced for it and
 		// TTL-based de-escalation never fires.
-		pepParams := c.toPEPParams()
-		zeroM := fsm.Metrics{}
-		for ip4, st := range state4 {
-			if st.Level == fsm.LevelObserve || inCands4[ip4] {
-				continue
-			}
-			ip := ip4 // capture
-			doT := func(s fsm.State, target fsm.Level) fsm.State {
-				proposal := actions.ActionProposal{
-					Source:        "housekeeping",
-					Reason:        "fsm_downscale",
-					DesiredAction: actions.FsmLevelToCapability(target),
-					DesiredLevel:  actions.FsmLevelName(target),
-					Target:        actions.ActionTarget{Granularity: "src_ip", Value: ip4String(ip)},
-					TTL:           c.ttlForFSMLevel(target),
-					CreatedAt:     nowWall,
-				}
-				res := resolver.Resolve(proposal)
-				if res.DenyReason != "" {
-					kliqLog.Printf("ACTION-RESOLVER housekeeping %s %s→%s reason=%q",
-						ip4String(ip), proposal.DesiredLevel, res.ExecutableLevel, res.DenyReason)
-				}
-				newSt, _ := executor.Apply4(ip, s, res, pepParams, nowWall)
-				return newSt
-			}
-			state4[ip4], _ = fsm.Advance(zeroM, st, nowWall, c.toFSMConfig(), doT)
-		}
-		for ip6, st := range state6 {
-			if st.Level == fsm.LevelObserve || inCands6[ip6] {
-				continue
-			}
-			ip := ip6 // capture
-			doT := func(s fsm.State, target fsm.Level) fsm.State {
-				proposal := actions.ActionProposal{
-					Source:        "housekeeping",
-					Reason:        "fsm_downscale",
-					DesiredAction: actions.FsmLevelToCapability(target),
-					DesiredLevel:  actions.FsmLevelName(target),
-					Target:        actions.ActionTarget{Granularity: "src_ip", Value: ip6String(ip)},
-					TTL:           c.ttlForFSMLevel(target),
-					CreatedAt:     nowWall,
-				}
-				res := resolver.Resolve(proposal)
-				if res.DenyReason != "" {
-					kliqLog.Printf("ACTION-RESOLVER housekeeping %s %s→%s reason=%q",
-						ip6String(ip), proposal.DesiredLevel, res.ExecutableLevel, res.DenyReason)
-				}
-				newSt, _ := executor.Apply6(ip, s, res, pepParams, nowWall)
-				return newSt
-			}
-			state6[ip6], _ = fsm.Advance(zeroM, st, nowWall, c.toFSMConfig(), doT)
-		}
+		sources.sweepInactive(processed, nowWall, c, resolver, executor, pepParams)
 
 		tickN++
 		if tickN%30 == 1 {
-			softN, hardN, blockN := 0, 0, 0
-			for _, st := range state4 {
-				switch st.Level {
-				case fsm.LevelSoft:
-					softN++
-				case fsm.LevelHard:
-					hardN++
-				case fsm.LevelBlock:
-					blockN++
-				}
-			}
-			for _, st := range state6 {
-				switch st.Level {
-				case fsm.LevelSoft:
-					softN++
-				case fsm.LevelHard:
-					hardN++
-				case fsm.LevelBlock:
-					blockN++
-				}
-			}
+			softN, hardN, blockN := sources.levelCounts()
 			topSummary := "none"
 			if len(cands) > 0 {
 				top := cands[0]
-				topSummary = fmt.Sprintf("%s sev=%.2f", top.ipString(), top.Severity)
+				topSummary = fmt.Sprintf("%s score=%.2f", top.sourceID(), top.score())
 			}
-			t := klshieldAt.CurrentThresholds()
-			kliqLog.Printf("TICK#%d sources=%d cands=%d samples=%d clean=%v fsm{soft=%d hard=%d block=%d} thresholds{pps=%.0f bps=%s syn=%.0f scan=%.0f} top: %s",
-				tickN, seenForLearn, len(cands), klshieldAt.SampleCount(), clean, softN, hardN, blockN,
-				t.TrigPPS, fmtBPS(t.TrigBPS), t.TrigSyn, t.TrigScan, topSummary)
+			kliqLog.Printf("TICK#%d sources=%d cands=%d samples=%d clean=%v fsm{soft=%d hard=%d block=%d} %s top: %s",
+				tickN, seenForLearn, len(cands), tuner.SampleCount(), clean, softN, hardN, blockN,
+				tuner.CurrentThresholds().Summary(), topSummary)
 		}
 
 		// Housekeeping: bound memory.
-		if srcBL != nil && tickN%300 == 1 { // evict every ~5 min at 1s interval
-			srcBL.Evict(nowWall.Add(-24 * time.Hour))
+		if tickN%300 == 1 { // evict every ~5 min at 1s interval
+			evictRuntimeSourceBaseline(sourceBaseline, nowWall.Add(-24*time.Hour))
 		}
-		// Re-sync XDP allowlist every 5 min so newly approved/frozen edges
-		// are picked up without a restart.
+		// Re-sync relationship allowlist every 5 min so newly approved/frozen
+		// edges are picked up without a restart.
 		if features.TupleEnforcement && tickN%300 == 1 {
-			syncEdge4Allow()
+			syncRelationshipAllowlist()
 		}
 		// State store GC runs via the dedicated goroutine (every 5 min);
 		// reset the cleanup timestamp so the old guard doesn't fire.
@@ -1834,13 +1397,6 @@ func main() {
 			if err := writeStateAtomic(c.StatePath, stFile); err != nil {
 				kliqLog.Printf("bootstrap checkpoint failed: %v", err)
 			}
-		}
-
-		// Flush shadow metric pipeline samples collected during this tick.
-		if shadowPipeline.IsActive() && len(shadowSamples) > 0 {
-			batch := klshieldshadow.BatchSamplesToMetrics(shadowSamples)
-			_ = batch // submitted directly; future extractor path for Track D
-			shadowSamples = shadowSamples[:0]
 		}
 
 		// Managed graph lifecycle tick (advance phase state machine).
@@ -1868,28 +1424,9 @@ func main() {
 				}
 			}
 		}
-		for ip, pv := range prev4 {
-			if nowWall.Sub(pv.LastWall) > c.PrevTTL {
-				delete(prev4, ip)
-			}
-		}
-		for ip, pv := range prev6 {
-			if nowWall.Sub(pv.LastWall) > c.PrevTTL {
-				delete(prev6, ip)
-			}
-		}
-		for ip, st := range state4 {
-			if st.Level == fsm.LevelObserve && st.Strikes == 0 && !st.LastSeenWallTime.IsZero() && nowWall.Sub(st.LastSeenWallTime) > c.StateTTL {
-				delete(state4, ip)
-			}
-		}
-		for ip, st := range state6 {
-			if st.Level == fsm.LevelObserve && st.Strikes == 0 && !st.LastSeenWallTime.IsZero() && nowWall.Sub(st.LastSeenWallTime) > c.StateTTL {
-				delete(state6, ip)
-			}
-		}
+		sources.evictIdle(nowWall, c.StateTTL)
 
-		// Autotune — policy is computed here; threshold math lives in the KLShield adapter.
+		// Autotune — policy is computed here; threshold math lives in the active adapter.
 		steadyEveryEff := c.AutoEvery
 		if c.Bootstrap {
 			steadyEveryEff = c.SteadyEvery
@@ -1917,7 +1454,7 @@ func main() {
 			if totalLearnTicks > 0 {
 				cleanRatio = float64(cleanLearnTicks) / float64(totalLearnTicks)
 			}
-			atPol := klshieldautotuner.Policy{
+			atPol := adapterruntime.TuningPolicy{
 				Active:  pol.Active,
 				Every:   pol.Every,
 				K:       pol.K,
@@ -1927,65 +1464,24 @@ func main() {
 				Phase:   pol.Phase,
 			}
 
-			if r, ok := klshieldAt.Tick(nowWall, atPol, cleanRatio); ok {
-				t := r.NewThresholds
-				c.TrigPPS, c.TrigSyn, c.TrigScan, c.TrigBPS = t.TrigPPS, t.TrigSyn, t.TrigScan, t.TrigBPS
-
-				engine.UpdateConfig(shieldheuristic.Config{
-					NodeID:  nodeID,
-					TrigPPS: c.TrigPPS, TrigSyn: c.TrigSyn, TrigScan: c.TrigScan, TrigBPS: c.TrigBPS,
-					WPPS: c.WPPS, WSyn: c.WSyn, WScan: c.WScan, WBps: c.WBps,
-					SevCap: c.SevCap,
-				})
+			if r, ok := tuner.Tick(nowWall, atPol, cleanRatio); ok {
+				c.applyTuningThresholds(r.NewThresholds)
+				applyAutotuneRuntimeUpdateToAdapters(context.Background(), runtimeAdapters, r)
 				if gpAdapter != nil {
-					gpAdapter.UpdateTriggers(c.TrigPPS, c.TrigBPS)
+					if values, ok := graphRuntimeValuesFromAdapters(runtimeAdapters); ok {
+						gpAdapter.UpdateBaselineTriggers(values)
+					}
 				}
 
-				kliqLog.Printf("AUTOTUNE applied: trig_pps %.1f->%.1f trig_syn %.1f->%.1f trig_scan %.1f->%.1f trig_bps %.0f->%.0f (median+MAD k=%.2f) samples=%d cleanRatio=%.4f clean=%v dropRatio=%.4f phase=%s",
-					r.OldThresholds.TrigPPS, c.TrigPPS,
-					r.OldThresholds.TrigSyn, c.TrigSyn,
-					r.OldThresholds.TrigScan, c.TrigScan,
-					r.OldThresholds.TrigBPS, c.TrigBPS,
-					pol.K, r.SampleCount, r.CleanRatio, clean, dropRatio, r.Phase)
+				tuner.LogResult(kliqLog, r, pol.K, dropRatio, clean)
 
 				if c.StatePath != "" {
-					st := stFile
-					if st == nil {
-						st = &stateFile{Version: 1}
-					}
-					rev := st.Active.Revision + 1
-					st.History = append(st.History, stateHistory{
-						Revision:    rev,
-						At:          time.Now(),
-						Trig:        trigState{TrigPPS: c.TrigPPS, TrigSyn: c.TrigSyn, TrigScan: c.TrigScan, TrigBPS: c.TrigBPS},
-						MedianPPS:   r.MedianPPS, MadPPS: r.MadPPS,
-						MedianSyn:   r.MedianSyn, MadSyn: r.MadSyn,
-						MedianScan:  r.MedianScan, MadScan: r.MadScan,
-						MedianBPS:   r.MedianBPS, MadBPS: r.MadBPS,
-						SampleCount: r.SampleCount,
-						CleanRatio:  r.CleanRatio,
-						Notes:       fmt.Sprintf("autotune median+mad dropRatio=%.4f phase=%s", dropRatio, r.Phase),
-					})
-					if len(st.History) > c.HistoryKeep && c.HistoryKeep > 0 {
-						st.History = st.History[len(st.History)-c.HistoryKeep:]
-					}
-					st.Active = stateActive{
-						Profile:     p.Name,
-						Revision:    rev,
-						UpdatedAt:   time.Now(),
-						Trig:        trigState{TrigPPS: c.TrigPPS, TrigSyn: c.TrigSyn, TrigScan: c.TrigScan, TrigBPS: c.TrigBPS},
-						Tune:        tuneMeta{Method: "median_mad", Window: "reservoir", K: pol.K, SigmaFactor: 1.4826},
-						Bootstrap:   bs,
-						ConfigHash:  cfgHash,
-						SampleCount: r.SampleCount,
-						CleanRatio:  r.CleanRatio,
-						Notes:       "autotune",
-					}
+					st := applyAutotuneStateUpdate(stFile, p.Name, bs, cfgHash, c.HistoryKeep, r, pol.K, dropRatio)
 					if err := writeStateAtomic(c.StatePath, st); err != nil {
 						kliqLog.Printf("AUTOTUNE state write failed: %v", err)
 					} else {
 						stFile = st
-						kliqLog.Printf("AUTOTUNE state saved: %s (rev=%d)", c.StatePath, rev)
+						kliqLog.Printf("AUTOTUNE state saved: %s (rev=%d)", c.StatePath, st.Active.Revision)
 					}
 				}
 			} else if r.Skipped {

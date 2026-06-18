@@ -28,16 +28,16 @@ const (
 // Only features listed as true are allowed to start their respective
 // goroutines, open databases or emit observations.
 type FeatureSet struct {
-	ShieldXDP        bool
-	UserspaceIQ      bool
-	SourceHeuristic  bool
-	GlobalAutotune   bool
-	SourceBaseline   bool
-	FlowTelemetry    bool
-	GraphLearning    bool
-	EdgeBaseline     bool
-	SQLite           bool
-	TupleEnforcement bool
+	PrimaryEnforcement bool
+	UserspaceIQ        bool
+	SourceHeuristic    bool
+	GlobalAutotune     bool
+	SourceBaseline     bool
+	FlowTelemetry      bool
+	GraphLearning      bool
+	EdgeBaseline       bool
+	SQLite             bool
+	TupleEnforcement   bool
 
 	// GenericBaseline enables UpdateWithBaselineKey in the metric baseline engine
 	// and persists baselines to the state store (statestore/sqlite).
@@ -58,26 +58,26 @@ func FeaturesFor(profile RuntimeProfile) FeatureSet {
 	switch profile {
 	case ProfileDOSLight:
 		return FeatureSet{
-			ShieldXDP:       true,
-			UserspaceIQ:     true,
-			SourceHeuristic: true,
-			GlobalAutotune:  true,
+			PrimaryEnforcement: true,
+			UserspaceIQ:        true,
+			SourceHeuristic:    true,
+			GlobalAutotune:     true,
 		}
 
 	case ProfileIQLearning:
 		return FeatureSet{
-			ShieldXDP:       true,
-			UserspaceIQ:     true,
-			SourceHeuristic: true,
-			GlobalAutotune:  true,
-			SourceBaseline:  true,
-			GenericBaseline: true,
-			StateStore:      true,
+			PrimaryEnforcement: true,
+			UserspaceIQ:        true,
+			SourceHeuristic:    true,
+			GlobalAutotune:     true,
+			SourceBaseline:     true,
+			GenericBaseline:    true,
+			StateStore:         true,
 		}
 
 	case ProfileGraphLearning:
 		return FeatureSet{
-			ShieldXDP:                  true,
+			PrimaryEnforcement:         true,
 			UserspaceIQ:                true,
 			SourceHeuristic:            true,
 			GlobalAutotune:             true,
@@ -93,7 +93,7 @@ func FeaturesFor(profile RuntimeProfile) FeatureSet {
 
 	case ProfileGraphEnforce:
 		return FeatureSet{
-			ShieldXDP:                  true,
+			PrimaryEnforcement:         true,
 			UserspaceIQ:                true,
 			SourceHeuristic:            true,
 			GlobalAutotune:             true,
@@ -110,7 +110,7 @@ func FeaturesFor(profile RuntimeProfile) FeatureSet {
 
 	case ProfileFullLearningExperimental:
 		return FeatureSet{
-			ShieldXDP:                  true,
+			PrimaryEnforcement:         true,
 			UserspaceIQ:                true,
 			SourceHeuristic:            true,
 			GlobalAutotune:             true,

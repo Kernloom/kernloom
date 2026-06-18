@@ -27,9 +27,9 @@ func TestHeuristicReasonCodes(t *testing.T) {
 
 func TestGraphReasonCodes(t *testing.T) {
 	codes := []string{
-		GraphNewEdgeAfterFreeze, GraphNewDestinationPort, GraphNewPeer,
-		GraphDirectionChange, GraphVolumeDeviation, GraphTimeWindowDeviation,
-		GraphEdgeCandidate, GraphEdgeLearned, GraphEdgeFrozen,
+		GraphNewEdgeAfterFreeze, GraphNewRelationshipDim, GraphNewPeer,
+		GraphDirectionChange, GraphMetricDeviation, GraphTimeWindowDeviation,
+		GraphEdgeCandidate, GraphEdgeLearned, GraphEdgeFrozen, GraphEdgeMetricPeakExceeds,
 	}
 
 	for _, code := range codes {
@@ -215,9 +215,9 @@ func TestReasonCodeUniqueness(t *testing.T) {
 		SYNRateHigh, SYNRateVeryHigh,
 		ScanRateHigh, PortScanSuspected,
 		RateLimitDropsSustained, RateLimitDropsResume,
-		GraphNewEdgeAfterFreeze, GraphNewDestinationPort, GraphNewPeer,
-		GraphDirectionChange, GraphVolumeDeviation, GraphTimeWindowDeviation,
-		GraphEdgeCandidate, GraphEdgeLearned, GraphEdgeFrozen,
+		GraphNewEdgeAfterFreeze, GraphNewRelationshipDim, GraphNewPeer,
+		GraphDirectionChange, GraphMetricDeviation, GraphTimeWindowDeviation,
+		GraphEdgeCandidate, GraphEdgeLearned, GraphEdgeFrozen, GraphEdgeMetricPeakExceeds,
 		TrustAttestationOK, TrustAttestationFailed,
 		TrustAssertionExpired, TrustAssertionFresh,
 		TrustIMAViolation, TrustPCRMismatch,

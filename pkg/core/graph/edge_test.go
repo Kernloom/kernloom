@@ -19,10 +19,14 @@ func dstRef(id string) observation.EntityRef {
 	return observation.EntityRef{Kind: observation.KindIP, ID: id}
 }
 
+func networkDims(port string) map[string]string {
+	return map[string]string{"protocol": "tcp", "destination_port": port}
+}
+
 func TestNewEdge_InitialState(t *testing.T) {
 	now := time.Now()
 	e := graph.NewEdge("node-1", srcRef("1.2.3.4"), dstRef("10.0.0.1"),
-		"tcp", 443, graph.DirectionEgress, now)
+		"network.connects_to", networkDims("443"), graph.DirectionEgress, now)
 
 	if e.State != graph.EdgeCandidate {
 		t.Errorf("expected candidate, got %s", e.State)
@@ -40,16 +44,16 @@ func TestNewEdge_InitialState(t *testing.T) {
 
 func TestEdge_Key_Deduplication(t *testing.T) {
 	now := time.Now()
-	e1 := graph.NewEdge("node-1", srcRef("1.2.3.4"), dstRef("10.0.0.1"), "tcp", 443, graph.DirectionEgress, now)
-	e2 := graph.NewEdge("node-1", srcRef("1.2.3.4"), dstRef("10.0.0.1"), "tcp", 443, graph.DirectionEgress, now)
+	e1 := graph.NewEdge("node-1", srcRef("1.2.3.4"), dstRef("10.0.0.1"), "network.connects_to", networkDims("443"), graph.DirectionEgress, now)
+	e2 := graph.NewEdge("node-1", srcRef("1.2.3.4"), dstRef("10.0.0.1"), "network.connects_to", networkDims("443"), graph.DirectionEgress, now)
 
 	if e1.Key() != e2.Key() {
 		t.Error("same flow should produce equal EdgeKey")
 	}
 
-	e3 := graph.NewEdge("node-1", srcRef("1.2.3.4"), dstRef("10.0.0.1"), "tcp", 80, graph.DirectionEgress, now)
+	e3 := graph.NewEdge("node-1", srcRef("1.2.3.4"), dstRef("10.0.0.1"), "network.connects_to", networkDims("80"), graph.DirectionEgress, now)
 	if e1.Key() == e3.Key() {
-		t.Error("different port should produce different EdgeKey")
+		t.Error("different dimensions should produce different EdgeKey")
 	}
 }
 
@@ -63,7 +67,7 @@ func TestEdge_ShouldPromote(t *testing.T) {
 	old := now.Add(-15 * time.Minute)
 
 	t.Run("not enough seen count", func(t *testing.T) {
-		e := graph.NewEdge("node-1", srcRef("1.2.3.4"), dstRef("10.0.0.1"), "tcp", 443, graph.DirectionEgress, old)
+		e := graph.NewEdge("node-1", srcRef("1.2.3.4"), dstRef("10.0.0.1"), "network.connects_to", networkDims("443"), graph.DirectionEgress, old)
 		e.SeenCount = 3
 		e.DistinctWindows = 5
 		if e.ShouldPromote(cfg, now) {
@@ -72,7 +76,7 @@ func TestEdge_ShouldPromote(t *testing.T) {
 	})
 
 	t.Run("not enough distinct windows", func(t *testing.T) {
-		e := graph.NewEdge("node-1", srcRef("1.2.3.4"), dstRef("10.0.0.1"), "tcp", 443, graph.DirectionEgress, old)
+		e := graph.NewEdge("node-1", srcRef("1.2.3.4"), dstRef("10.0.0.1"), "network.connects_to", networkDims("443"), graph.DirectionEgress, old)
 		e.SeenCount = 10
 		e.DistinctWindows = 2
 		if e.ShouldPromote(cfg, now) {
@@ -81,7 +85,7 @@ func TestEdge_ShouldPromote(t *testing.T) {
 	})
 
 	t.Run("too young", func(t *testing.T) {
-		e := graph.NewEdge("node-1", srcRef("1.2.3.4"), dstRef("10.0.0.1"), "tcp", 443, graph.DirectionEgress, now)
+		e := graph.NewEdge("node-1", srcRef("1.2.3.4"), dstRef("10.0.0.1"), "network.connects_to", networkDims("443"), graph.DirectionEgress, now)
 		e.SeenCount = 10
 		e.DistinctWindows = 5
 		if e.ShouldPromote(cfg, now) {
@@ -90,7 +94,7 @@ func TestEdge_ShouldPromote(t *testing.T) {
 	})
 
 	t.Run("ready to promote", func(t *testing.T) {
-		e := graph.NewEdge("node-1", srcRef("1.2.3.4"), dstRef("10.0.0.1"), "tcp", 443, graph.DirectionEgress, old)
+		e := graph.NewEdge("node-1", srcRef("1.2.3.4"), dstRef("10.0.0.1"), "network.connects_to", networkDims("443"), graph.DirectionEgress, old)
 		e.SeenCount = 10
 		e.DistinctWindows = 5
 		if !e.ShouldPromote(cfg, now) {
@@ -99,7 +103,7 @@ func TestEdge_ShouldPromote(t *testing.T) {
 	})
 
 	t.Run("only candidate edges are promoted", func(t *testing.T) {
-		e := graph.NewEdge("node-1", srcRef("1.2.3.4"), dstRef("10.0.0.1"), "tcp", 443, graph.DirectionEgress, old)
+		e := graph.NewEdge("node-1", srcRef("1.2.3.4"), dstRef("10.0.0.1"), "network.connects_to", networkDims("443"), graph.DirectionEgress, old)
 		e.SeenCount = 10
 		e.DistinctWindows = 5
 		e.State = graph.EdgeLearned

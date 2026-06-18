@@ -50,3 +50,45 @@ func PDPAdapterConfigFrom(adapters pdp.AdaptersSpec) (PDPAdapterConfig, bool, er
 	}
 	return cfg, found, nil
 }
+
+// CapabilityParamsFromPDP extracts and merges Shield PEP capability parameters
+// from the adapters section of a PDPConfig. Returns defaults when not present.
+func CapabilityParamsFromPDP(c *pdp.Config) (CapabilityParams, error) {
+	p := DefaultCapabilityParams()
+	a, found, err := PDPAdapterConfigFrom(c.Spec.Adapters)
+	if err != nil {
+		return p, err
+	}
+	if !found {
+		return p, nil
+	}
+	if a.SoftRatePPS > 0 {
+		p.SoftRatePPS = a.SoftRatePPS
+	}
+	if a.SoftBurst > 0 {
+		p.SoftBurst = a.SoftBurst
+	}
+	if a.HardRatePPS > 0 {
+		p.HardRatePPS = a.HardRatePPS
+	}
+	if a.HardBurst > 0 {
+		p.HardBurst = a.HardBurst
+	}
+	if a.Cooldown.D > 0 {
+		p.Cooldown = a.Cooldown.D
+	}
+	return p, nil
+}
+
+// AdaptiveRateFactorsFromPDP reads the soft/hard rate scaling factors from
+// PDPConfig. Zero return values mean "not configured; keep caller default".
+func AdaptiveRateFactorsFromPDP(c *pdp.Config) (softFactor, hardFactor float64, err error) {
+	a, found, aerr := PDPAdapterConfigFrom(c.Spec.Adapters)
+	if aerr != nil {
+		return 0, 0, aerr
+	}
+	if !found {
+		return 0, 0, nil
+	}
+	return a.SoftRateFactor, a.HardRateFactor, nil
+}

@@ -12,6 +12,7 @@ import (
 	"log"
 	"net"
 	"os"
+	"strconv"
 	"sync/atomic"
 	"time"
 
@@ -26,22 +27,11 @@ var logger = log.New(os.Stderr, "[shield-pep] ", log.LstdFlags)
 
 // EnforcementParams carries the per-level rate-limit and timing configuration
 // needed by the PEP adapter when transitioning a source to a new level.
-type EnforcementParams struct {
-	SoftRate  uint64
-	SoftBurst uint64
-	SoftTTL   time.Duration
-
-	HardRate  uint64
-	HardBurst uint64
-	HardTTL   time.Duration
-
-	BlockTTL time.Duration
-	Cooldown time.Duration
-}
+type EnforcementParams = adapterruntime.EnforcementParams
 
 // Adapter is the Shield PEP adapter.
 // It is intentionally synchronous: enforcement calls are made inline from the
-// KLIQ tick loop (via TransitionV4/TransitionV6), not via the event bus.
+// generic source PEP boundary, not via the event bus.
 type Adapter struct {
 	maps   *shieldclient.Maps
 	dryRun bool
@@ -98,10 +88,38 @@ func (a *Adapter) Stop(_ context.Context) error {
 
 /* ---------------- Enforcement transitions --------------------------------- */
 
-// TransitionV4 applies the enforcement action for an IPv4 source.
+// TransitionSource applies the enforcement action for an adapter-owned source.
+// KLShield treats SourceID as an IP address; that interpretation stays here
+// rather than leaking into the generic orchestrator.
+func (a *Adapter) TransitionSource(
+	target adapterruntime.SourceTarget, st fsm.State, level fsm.Level,
+	now time.Time, p EnforcementParams,
+) (fsm.State, error) {
+	id := target.SourceID
+	if id == "" {
+		id = target.Subject.ID
+	}
+	ip := net.ParseIP(id)
+	if ip == nil {
+		return st, fmt.Errorf("klshield source target %q is not an IP address", id)
+	}
+	if v4 := ip.To4(); v4 != nil {
+		var key [4]byte
+		copy(key[:], v4)
+		return a.transitionV4(key, st, level, now, p), nil
+	}
+	if v6 := ip.To16(); v6 != nil {
+		var key [16]byte
+		copy(key[:], v6)
+		return a.transitionV6(key, st, level, now, p), nil
+	}
+	return st, fmt.Errorf("klshield source target %q has unsupported IP representation", id)
+}
+
+// transitionV4 applies the enforcement action for an IPv4 source.
 // It writes into the Shield deny / rl-policy maps (unless dryRun is set) and
 // returns the updated fsm.State with Level, ExpiresAt and CooldownUntil set.
-func (a *Adapter) TransitionV4(
+func (a *Adapter) transitionV4(
 	ip [4]byte, st fsm.State, target fsm.Level,
 	now time.Time, p EnforcementParams,
 ) fsm.State {
@@ -145,8 +163,8 @@ func (a *Adapter) TransitionV4(
 	return applyStateFields(st, target, now, p)
 }
 
-// TransitionV6 applies the enforcement action for an IPv6 source.
-func (a *Adapter) TransitionV6(
+// transitionV6 applies the enforcement action for an IPv6 source.
+func (a *Adapter) transitionV6(
 	ip [16]byte, st fsm.State, target fsm.Level,
 	now time.Time, p EnforcementParams,
 ) fsm.State {
@@ -285,6 +303,61 @@ func (a *Adapter) RevokeEdgeAllow4(key shieldclient.Edge4Key) error {
 // with XDP tuple support).
 func (a *Adapter) TupleAvailable() bool {
 	return a.maps.Edge4Deny != nil && a.maps.Edge4RL != nil
+}
+
+// RelationshipAvailable reports whether relationship enforcement maps are present.
+func (a *Adapter) RelationshipAvailable() bool {
+	return a.TupleAvailable()
+}
+
+// SetRelationshipEnforcement enables or disables relationship enforcement.
+func (a *Adapter) SetRelationshipEnforcement(on bool) error {
+	return a.SetTupleEnforce(on)
+}
+
+// DenyRelationship denies an adapter-neutral relationship target.
+func (a *Adapter) DenyRelationship(target adapterruntime.RelationshipTarget) error {
+	port, proto, ok := klshieldRelationshipDimension(target)
+	if !ok {
+		return fmt.Errorf("invalid klshield relationship target %s", target.Canonical())
+	}
+	key, ok := shieldclient.NewEdge4Key(target.SubjectID, port, proto)
+	if !ok {
+		return fmt.Errorf("invalid klshield relationship target %s", target.Canonical())
+	}
+	return a.DenyEdge4(key)
+}
+
+// AllowRelationship allowlists an adapter-neutral relationship target.
+func (a *Adapter) AllowRelationship(target adapterruntime.RelationshipTarget) error {
+	port, proto, ok := klshieldRelationshipDimension(target)
+	if !ok {
+		return fmt.Errorf("invalid klshield relationship target %s", target.Canonical())
+	}
+	key, ok := shieldclient.NewEdge4Key(target.SubjectID, port, proto)
+	if !ok {
+		return fmt.Errorf("invalid klshield relationship target %s", target.Canonical())
+	}
+	return a.AllowEdge4(key)
+}
+
+func klshieldRelationshipDimension(target adapterruntime.RelationshipTarget) (uint16, string, bool) {
+	rawPort := target.Dimension["port"]
+	if rawPort == "" {
+		rawPort = target.Dimension["destination_port"]
+	}
+	proto := target.Dimension["proto"]
+	if proto == "" {
+		proto = target.Dimension["protocol"]
+	}
+	if rawPort == "" || proto == "" {
+		return 0, "", false
+	}
+	port, err := strconv.ParseUint(rawPort, 10, 16)
+	if err != nil || port == 0 {
+		return 0, "", false
+	}
+	return uint16(port), proto, true
 }
 
 // ErrTupleUnavailable is returned when edge maps are not present.

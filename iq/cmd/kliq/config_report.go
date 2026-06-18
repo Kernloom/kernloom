@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"time"
 
+	"github.com/kernloom/kernloom/pkg/adapters/catalog"
 	"github.com/kernloom/kernloom/pkg/componentinventory"
 	"github.com/kernloom/kernloom/pkg/core/featureset"
 	"github.com/kernloom/kernloom/pkg/core/policy"
@@ -20,7 +21,7 @@ import (
 //
 // No secret values are included — enrollment keys and certificate paths belong
 // in the deployment config, not in a report that may be logged or transmitted.
-func buildConfigAssetReport(c cfg, nodeID string, features featureset.FeatureSet, klshieldActive bool) componentinventory.KliqConfigAssetReport {
+func buildConfigAssetReport(c cfg, nodeID string, features featureset.FeatureSet, activeAdapters map[string]bool) componentinventory.KliqConfigAssetReport {
 	r := componentinventory.KliqConfigAssetReport{
 		APIVersion: "kernloom.io/v1alpha1",
 		Kind:       "KliqConfigAssetReport",
@@ -48,10 +49,7 @@ func buildConfigAssetReport(c cfg, nodeID string, features featureset.FeatureSet
 		r.AllowedCapabilities = append(r.AllowedCapabilities, cap)
 	}
 
-	// KLShield is the only adapter for now.
-	r.Adapters = []componentinventory.AdapterSummary{
-		{ID: "klshield-" + nodeID, Plugin: "builtin-klshield", Enabled: klshieldActive},
-	}
+	r.Adapters = adapterSummaries(c, nodeID, activeAdapters)
 
 	// Analyzers active based on feature profile.
 	if features.SourceBaseline {
@@ -86,6 +84,25 @@ func buildConfigAssetReport(c cfg, nodeID string, features featureset.FeatureSet
 	r.EffectiveHardRatePPS = pepParams.HardRate
 
 	return r
+}
+
+func adapterSummaries(c cfg, nodeID string, activeAdapters map[string]bool) []componentinventory.AdapterSummary {
+	var out []componentinventory.AdapterSummary
+	for _, name := range c.adapterNames() {
+		if name == "none" {
+			continue
+		}
+		id := name
+		if catalog.IsBindingAdapter(name) {
+			id = catalog.CanonicalAdapterID(name)
+		}
+		out = append(out, componentinventory.AdapterSummary{
+			ID:      id + "-" + nodeID,
+			Plugin:  "builtin-" + id,
+			Enabled: activeAdapters[id],
+		})
+	}
+	return out
 }
 
 // reportSidecarPath returns the path of the runtime-report sidecar file,
@@ -127,7 +144,7 @@ func updateSidecarPack(statePath, packName, maxAction string) {
 }
 
 // buildEmptyInventory returns a minimal ComponentRuntimeInventory for nodes
-// that start without klshield (netfilter-only or observation-only deployments).
+// that start without a catalog adapter inventory (netfilter-only or observation-only deployments).
 func buildEmptyInventory(nodeID string) componentinventory.ComponentRuntimeInventory {
 	var inv componentinventory.ComponentRuntimeInventory
 	inv.Metadata.ID = nodeID

@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/kernloom/kernloom/pkg/adapterruntime"
 	"github.com/kernloom/kernloom/pkg/core/fsm"
 )
 
@@ -42,7 +43,7 @@ func TestBuildPlanAppliesRulesToConfiguredDirections(t *testing.T) {
 		t.Fatalf("init adapter: %v", err)
 	}
 
-	adapter.NotifyTransition4([4]byte{10, 0, 0, 1}, fsm.LevelObserve, fsm.LevelSoft, 0)
+	adapter.NotifySourceTransition(adapterruntime.SourceTarget{SourceID: "10.0.0.1"}, fsm.LevelObserve, fsm.LevelSoft, 0)
 	if len(backend.plans) != 1 {
 		t.Fatalf("expected one applied plan, got %d", len(backend.plans))
 	}

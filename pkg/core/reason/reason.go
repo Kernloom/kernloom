@@ -43,15 +43,16 @@ const (
 // ===== Graph learning reasons =====
 
 const (
-	GraphNewEdgeAfterFreeze  = "graph_new_edge_after_freeze" // Edge appears post-freeze
-	GraphNewDestinationPort  = "graph_new_destination_port"  // Known peer, new port
-	GraphNewPeer             = "graph_new_peer"              // Completely new peer
-	GraphDirectionChange     = "graph_direction_change"      // Traffic direction reversed
-	GraphVolumeDeviation     = "graph_volume_deviation"      // Unusual volume for known edge
-	GraphTimeWindowDeviation = "graph_time_window_deviation" // Off-hours traffic
-	GraphEdgeCandidate       = "graph_edge_candidate"        // First observation of edge
-	GraphEdgeLearned         = "graph_edge_learned"          // Edge promoted to learned
-	GraphEdgeFrozen          = "graph_edge_frozen"           // Edge included in frozen baseline
+	GraphNewEdgeAfterFreeze    = "graph_new_edge_after_freeze"    // Edge appears post-freeze
+	GraphNewRelationshipDim    = "graph_new_relationship_dim"     // Known subject/object, new dimension
+	GraphNewPeer               = "graph_new_peer"                 // Completely new peer
+	GraphDirectionChange       = "graph_direction_change"         // Relationship direction changed
+	GraphMetricDeviation       = "graph_metric_deviation"         // Unusual metric for known edge
+	GraphTimeWindowDeviation   = "graph_time_window_deviation"    // Off-hours relationship
+	GraphEdgeCandidate         = "graph_edge_candidate"           // First observation of edge
+	GraphEdgeLearned           = "graph_edge_learned"             // Edge promoted to learned
+	GraphEdgeFrozen            = "graph_edge_frozen"              // Edge included in frozen baseline
+	GraphEdgeMetricPeakExceeds = "graph_edge_metric_peak_exceeds" // Metric exceeded learned peak
 )
 
 // ===== Trust/Integrity reasons =====

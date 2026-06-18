@@ -11,6 +11,7 @@
 package autotuner
 
 import (
+	"fmt"
 	"math"
 	"math/rand"
 	"sort"
@@ -19,12 +20,17 @@ import (
 
 // Thresholds holds the current enforcement trigger thresholds.
 // Written by the autotuner; read by the KLShield signal engine
-// and processCandidate4/6.
+// and the generic source FSM.
 type Thresholds struct {
 	TrigPPS  float64
 	TrigSyn  float64
 	TrigScan float64
 	TrigBPS  float64
+}
+
+func (t Thresholds) Summary() string {
+	return fmt.Sprintf("thresholds{pps=%.0f bps=%.0f syn=%.0f scan=%.0f}",
+		t.TrigPPS, t.TrigBPS, t.TrigSyn, t.TrigScan)
 }
 
 // Policy is the autotune scheduling policy computed per tick by the caller
@@ -238,6 +244,50 @@ func (a *Autotuner) Tick(now time.Time, pol Policy, cleanRatio float64) (TickRes
 		CompletedWindows: a.completedWindows,
 		Phase:            pol.Phase,
 	}, true
+}
+
+// AdapterStats returns the median and MAD statistics from this tick as a
+// generic map so callers can persist them without referencing domain names.
+// Keys follow the pattern "<stat>_<signal>", e.g. "median_pps", "mad_syn".
+func (r TickResult) AdapterStats() map[string]float64 {
+	return map[string]float64{
+		"median_pps":  r.MedianPPS,
+		"mad_pps":     r.MadPPS,
+		"median_syn":  r.MedianSyn,
+		"mad_syn":     r.MadSyn,
+		"median_scan": r.MedianScan,
+		"mad_scan":    r.MadScan,
+		"median_bps":  r.MedianBPS,
+		"mad_bps":     r.MadBPS,
+		"k":           0, // filled by caller from pol.K
+	}
+}
+
+// Log emits a structured autotune log line to logger.
+// All KLShield-specific field names (trig_pps, trig_syn, etc.) stay here,
+// inside the adapter package — not in the generic KLIQ orchestrator.
+func (r TickResult) Log(logger interface{ Printf(string, ...any) }, dropRatio float64, clean bool) {
+	logger.Printf(
+		"AUTOTUNE applied: trig_pps %.1f->%.1f trig_syn %.1f->%.1f trig_scan %.1f->%.1f trig_bps %.0f->%.0f (median+MAD k=%.2f) samples=%d cleanRatio=%.4f clean=%v dropRatio=%.4f phase=%s",
+		r.OldThresholds.TrigPPS, r.NewThresholds.TrigPPS,
+		r.OldThresholds.TrigSyn, r.NewThresholds.TrigSyn,
+		r.OldThresholds.TrigScan, r.NewThresholds.TrigScan,
+		r.OldThresholds.TrigBPS, r.NewThresholds.TrigBPS,
+		0.0, // K is not stored in TickResult; caller may append it
+		r.SampleCount, r.CleanRatio, clean, dropRatio, r.Phase,
+	)
+}
+
+// LogWithK is like Log but includes the K factor from the policy.
+func (r TickResult) LogWithK(logger interface{ Printf(string, ...any) }, k, dropRatio float64, clean bool) {
+	logger.Printf(
+		"AUTOTUNE applied: trig_pps %.1f->%.1f trig_syn %.1f->%.1f trig_scan %.1f->%.1f trig_bps %.0f->%.0f (median+MAD k=%.2f) samples=%d cleanRatio=%.4f clean=%v dropRatio=%.4f phase=%s",
+		r.OldThresholds.TrigPPS, r.NewThresholds.TrigPPS,
+		r.OldThresholds.TrigSyn, r.NewThresholds.TrigSyn,
+		r.OldThresholds.TrigScan, r.NewThresholds.TrigScan,
+		r.OldThresholds.TrigBPS, r.NewThresholds.TrigBPS,
+		k, r.SampleCount, r.CleanRatio, clean, dropRatio, r.Phase,
+	)
 }
 
 // ── statistics ──────────────────────────────────────────────────────────────

@@ -10,6 +10,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/kernloom/kernloom/pkg/adapterruntime"
 	"github.com/kernloom/kernloom/pkg/core/entity"
 	"github.com/kernloom/kernloom/pkg/core/learning"
 	"github.com/kernloom/kernloom/pkg/core/relationship"
@@ -81,10 +82,10 @@ func DefaultConfig(nodeID string) Config {
 
 // cacheEntry is the in-memory copy of a relationship.
 type cacheEntry struct {
-	rel            relationship.Relationship
-	dirtyAt        time.Time // zero means clean
-	firstSeen      time.Time
-	lastSignalAt   time.Time // last time a freeze-violation signal was emitted
+	rel          relationship.Relationship
+	dirtyAt      time.Time // zero means clean
+	firstSeen    time.Time
+	lastSignalAt time.Time // last time a freeze-violation signal was emitted
 }
 
 // freezeSignalCooldown is the minimum interval between repeated freeze-violation
@@ -97,8 +98,8 @@ const freezeSignalCooldown = 5 * time.Minute
 // to a Store asynchronously.
 type Learner struct {
 	cfg   Config
-	guard learning.Guard // may be nil
-	store Store          // may be nil (in-memory only)
+	guard learning.Guard  // may be nil
+	store Store           // may be nil (in-memory only)
 	pub   SignalPublisher // may be nil
 
 	mu    sync.Mutex
@@ -241,10 +242,14 @@ func (l *Learner) emitFreezeSignal(ctx context.Context, r relationship.Relations
 	).
 		SetScore(score).
 		SetConfidence(80).
-		SetTTL(30 * time.Minute).
+		SetTTL(30*time.Minute).
 		AddReasonCode("relationship_new_after_freeze").
 		SetAttribute("predicate", r.Predicate).
+		SetAttribute("target_id", r.ObjectEntityID).
 		SetAttribute("object_entity_id", r.ObjectEntityID)
+	for k, v := range r.Dimensions {
+		sig.SetAttribute(adapterruntime.RelationshipDimensionPrefix+k, v)
+	}
 	_ = l.pub.PublishSignal(ctx, *sig)
 }
 

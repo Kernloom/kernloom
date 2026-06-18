@@ -2,9 +2,9 @@
 // Copyright (c) 2026 Adrian Enderlin
 
 // Package suspicious provides a thread-safe registry for tracking suspicious
-// sources and edges during KLIQ's learning phase. It supports both source-level
-// (IP address) and edge-level (src→dst:port/proto) suspicious state with TTL
-// eviction and historical tracking for the pending-baseline-commit pattern.
+// subjects and relationship edges during KLIQ's learning phase. It supports
+// both subject-level and edge-level suspicious state with TTL eviction and
+// historical tracking for the pending-baseline-commit pattern.
 //
 // The registry is intentionally simple and cheap — it must not become a bottleneck
 // in the observation hot path.
@@ -17,10 +17,10 @@ import (
 
 // EdgeKey identifies a specific communication edge.
 type EdgeKey struct {
-	SourceID        string
-	DestinationID   string
-	Protocol        string
-	DestinationPort uint16
+	SourceID       string
+	DestinationID  string
+	Predicate      string
+	DimensionsHash string
 }
 
 type entry struct {

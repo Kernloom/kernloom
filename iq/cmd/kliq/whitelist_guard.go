@@ -11,25 +11,25 @@ import (
 )
 
 // whitelistAwareGuard wraps a learning.Guard and short-circuits to AllowLearning
-// for any entity whose IP string is on the whitelist.  Used when --whitelist-learn=true.
+// for any entity matched by the source whitelist.
 type whitelistAwareGuard struct {
 	inner learning.Guard
-	wl    *whitelist
+	wl    sourceMatcher
 }
 
-func newWhitelistAwareGuard(inner learning.Guard, wl *whitelist) learning.Guard {
+func newWhitelistAwareGuard(inner learning.Guard, wl sourceMatcher) learning.Guard {
 	return &whitelistAwareGuard{inner: inner, wl: wl}
 }
 
 func (g *whitelistAwareGuard) CheckMetric(ctx context.Context, m learning.MetricCheck) learning.CheckResult {
-	if g.wl.matchIPString(m.SubjectEntityID) {
+	if g.wl.MatchSource(m.SubjectEntityID) {
 		return learning.CheckResult{Decision: learning.AllowLearning}
 	}
 	return g.inner.CheckMetric(ctx, m)
 }
 
 func (g *whitelistAwareGuard) CheckRelationship(ctx context.Context, r learning.RelationshipCheck) learning.CheckResult {
-	if g.wl.matchIPString(r.Relationship.SubjectEntityID) {
+	if g.wl.MatchSource(r.Relationship.SubjectEntityID) {
 		return learning.CheckResult{Decision: learning.AllowLearning}
 	}
 	return g.inner.CheckRelationship(ctx, r)
@@ -44,7 +44,7 @@ func (g *whitelistAwareGuard) RevokeExclusion(ctx context.Context, id string) er
 }
 
 func (g *whitelistAwareGuard) IsExcluded(ctx context.Context, entityID string, dim learning.AppliesTo) bool {
-	if g.wl.matchIPString(entityID) {
+	if g.wl.MatchSource(entityID) {
 		return false
 	}
 	return g.inner.IsExcluded(ctx, entityID, dim)

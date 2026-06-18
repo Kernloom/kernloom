@@ -4,8 +4,10 @@
 package main
 
 import (
+	"time"
+
 	"github.com/kernloom/kernloom/iq/internal/actions"
-	"github.com/kernloom/kernloom/pkg/adapters/klshield/pep"
+	"github.com/kernloom/kernloom/pkg/adapterruntime"
 	"github.com/kernloom/kernloom/pkg/core/decision"
 	"github.com/kernloom/kernloom/pkg/core/fsm"
 	"github.com/kernloom/kernloom/pkg/core/policy"
@@ -22,11 +24,47 @@ func (c cfg) buildPolicyResolver() *actions.PolicyResolver {
 	}
 }
 
-// buildExecutor creates the ShieldActionExecutor — the only component allowed
-// to call shieldpep.TransitionV4/V6. Pass nil for adapter to run without Shield.
+// buildExecutor creates the source action executor. Pass nil for adapter to run
+// without a primary source PEP; sidecars may still mirror transitions.
 // Additional PEP sidecars (e.g. netfilter) can be registered via AddSidecar.
-func buildExecutor(adapter *shieldpep.Adapter) *actions.ShieldActionExecutor {
-	return actions.NewShieldActionExecutor(adapter)
+func buildExecutor(adapter adapterruntime.SourcePEP) *actions.SourceActionExecutor {
+	return actions.NewSourceActionExecutor(adapter)
+}
+
+type sourcePEPSidecar struct {
+	id     string
+	pep    adapterruntime.SourcePEP
+	params func() adapterruntime.EnforcementParams
+}
+
+func (s sourcePEPSidecar) NotifySourceTransition(target adapterruntime.SourceTarget, prev, next fsm.Level, ttl time.Duration) {
+	if s.pep == nil {
+		return
+	}
+	params := adapterruntime.EnforcementParams{}
+	if s.params != nil {
+		params = s.params()
+	}
+	params = paramsWithSidecarTTL(params, next, ttl)
+	if _, err := s.pep.TransitionSource(target, fsm.State{Level: prev}, next, time.Now(), params); err != nil {
+		kliqLog.Printf("source PEP sidecar %s transition %s->%s target=%s failed: %v",
+			s.id, prev, next, target.SourceID, err)
+	}
+}
+
+func paramsWithSidecarTTL(params adapterruntime.EnforcementParams, level fsm.Level, ttl time.Duration) adapterruntime.EnforcementParams {
+	if ttl <= 0 {
+		return params
+	}
+	switch level {
+	case fsm.LevelSoft:
+		params.SoftTTL = ttl
+	case fsm.LevelHard:
+		params.HardTTL = ttl
+	case fsm.LevelBlock:
+		params.BlockTTL = ttl
+	}
+	return params
 }
 
 // resolveLevel is a thin cfg-level wrapper around the PolicyResolver.

@@ -11,6 +11,8 @@ import (
 	"os"
 	"path/filepath"
 	"time"
+
+	"github.com/kernloom/kernloom/pkg/adapterruntime"
 )
 
 /* ---------------- Persistence (state.json) ---------------- */
@@ -96,20 +98,15 @@ type stateActive struct {
 }
 
 type stateHistory struct {
-	Revision    int       `json:"revision"`
-	At          time.Time `json:"at"`
-	Trig        trigState `json:"trig"`
-	MedianPPS   float64   `json:"median_pps"`
-	MadPPS      float64   `json:"mad_pps"`
-	MedianSyn   float64   `json:"median_syn"`
-	MadSyn      float64   `json:"mad_syn"`
-	MedianScan  float64   `json:"median_scan"`
-	MadScan     float64   `json:"mad_scan"`
-	MedianBPS   float64   `json:"median_bps,omitempty"`
-	MadBPS      float64   `json:"mad_bps,omitempty"`
-	SampleCount int       `json:"sample_count"`
-	CleanRatio  float64   `json:"clean_ratio"`
-	Notes       string    `json:"notes,omitempty"`
+	Revision int       `json:"revision"`
+	At       time.Time `json:"at"`
+	Trig     trigState `json:"trig"`
+	// AdapterStats holds adapter-specific statistics for this autotune window.
+	// Generic map keeps state.go free of adapter-domain field names.
+	AdapterStats map[string]float64 `json:"adapter_stats,omitempty"`
+	SampleCount  int                `json:"sample_count"`
+	CleanRatio   float64            `json:"clean_ratio"`
+	Notes        string             `json:"notes,omitempty"`
 }
 
 type integrity struct {
@@ -215,4 +212,76 @@ func loadState(path string, maxAge time.Duration) (*stateFile, error) {
 		}
 	}
 	return &st, nil
+}
+
+func applyAutotuneStateUpdate(
+	st *stateFile,
+	profileName string,
+	bs bootstrapInfo,
+	cfgHash string,
+	historyKeep int,
+	result adapterruntime.TuningResult,
+	k float64,
+	dropRatio float64,
+) *stateFile {
+	if st == nil {
+		st = &stateFile{Version: 1}
+	}
+	rev := st.Active.Revision + 1
+	stats := result.AdapterStats
+	if stats == nil {
+		stats = map[string]float64{}
+	}
+	stats["k"] = k
+	t := result.NewThresholds
+	st.History = append(st.History, stateHistory{
+		Revision:     rev,
+		At:           time.Now(),
+		Trig:         thresholdsToTrigState(t),
+		AdapterStats: stats,
+		SampleCount:  result.SampleCount,
+		CleanRatio:   result.CleanRatio,
+		Notes:        fmt.Sprintf("autotune dropRatio=%.4f phase=%s", dropRatio, result.Phase),
+	})
+	if len(st.History) > historyKeep && historyKeep > 0 {
+		st.History = st.History[len(st.History)-historyKeep:]
+	}
+	st.Active = stateActive{
+		Profile:     profileName,
+		Revision:    rev,
+		UpdatedAt:   time.Now(),
+		Trig:        thresholdsToTrigState(t),
+		Tune:        tuneMeta{Method: "median_mad", Window: "reservoir", K: k, SigmaFactor: 1.4826},
+		Bootstrap:   bs,
+		ConfigHash:  cfgHash,
+		SampleCount: result.SampleCount,
+		CleanRatio:  result.CleanRatio,
+		Notes:       "autotune",
+	}
+	return st
+}
+
+func newBootstrapStateActive(profileName string, c cfg, bs bootstrapInfo, cfgHash string) stateActive {
+	t := c.tuningThresholds()
+	return stateActive{
+		Profile:     profileName,
+		Revision:    0,
+		UpdatedAt:   time.Time{},
+		Trig:        thresholdsToTrigState(t),
+		Tune:        tuneMeta{Method: "median_mad", Window: "reservoir", K: c.AutoK, SigmaFactor: 1.4826},
+		Bootstrap:   bs,
+		ConfigHash:  cfgHash,
+		SampleCount: 0,
+		CleanRatio:  1.0,
+		Notes:       "bootstrap initialized",
+	}
+}
+
+func thresholdsToTrigState(t adapterruntime.TuningThresholds) trigState {
+	return trigState{
+		TrigPPS:  t.PacketsPerSecond,
+		TrigSyn:  t.SynRate,
+		TrigScan: t.DestinationPortChanges,
+		TrigBPS:  t.BytesPerSecond,
+	}
 }

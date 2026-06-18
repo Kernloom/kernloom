@@ -9,12 +9,10 @@ import (
 	"fmt"
 	"os"
 	"sort"
-	"strconv"
 	"strings"
 	"text/tabwriter"
 	"time"
 
-	"github.com/kernloom/kernloom/pkg/core/entity"
 	"github.com/kernloom/kernloom/pkg/core/relationship"
 	sstore "github.com/kernloom/kernloom/pkg/statestore/sqlite"
 	"gopkg.in/yaml.v3"
@@ -30,10 +28,10 @@ func openStateStoreForGraph(path string) *sstore.Store {
 	return s
 }
 
-// entityCache resolves stable_id → raw IP lazily for display purposes.
+// entityCache resolves stable_id to a human-readable entity label lazily.
 type entityCache struct {
 	store *sstore.Store
-	cache map[string]string // stable_id → display label
+	cache map[string]string
 }
 
 func newEntityCache(s *sstore.Store) *entityCache {
@@ -53,7 +51,7 @@ func (c *entityCache) label(stableID string) string {
 	return label
 }
 
-// runGraphStatus prints a summary of network.connects_to relationships.
+// runGraphStatus prints a summary of relationships.
 func runGraphStatus(storePath, nodeID string, showAll bool, sortBy string) {
 	s := openStateStoreForGraph(storePath)
 	defer s.Close()
@@ -64,14 +62,14 @@ func runGraphStatus(storePath, nodeID string, showAll bool, sortBy string) {
 		fmt.Fprintf(os.Stderr, "error: stats: %v\n", err)
 		os.Exit(1)
 	}
-	rels, err := s.ListRelationships(ctx, nodeID, "network.connects_to", "")
+	rels, err := s.ListRelationships(ctx, nodeID, "", "")
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: list relationships: %v\n", err)
 		os.Exit(1)
 	}
 
 	fmt.Printf("Graph status for node: %s\n\n", nodeID)
-	fmt.Println("Relationships (network.connects_to):")
+	fmt.Println("Relationships:")
 	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
 	fmt.Fprintln(w, "  STATE\tCOUNT")
 	for _, st := range []relationship.State{
@@ -97,11 +95,9 @@ func runGraphStatus(storePath, nodeID string, showAll bool, sortBy string) {
 		})
 	case "seen":
 		sort.Slice(rels, func(i, j int) bool { return rels[i].SeenCount > rels[j].SeenCount })
-	case "port":
+	case "dimension", "dimensions":
 		sort.Slice(rels, func(i, j int) bool {
-			pi, _ := strconv.Atoi(rels[i].Dimensions["destination_port"])
-			pj, _ := strconv.Atoi(rels[j].Dimensions["destination_port"])
-			return pi < pj
+			return dimensionsDisplay(rels[i].Dimensions) < dimensionsDisplay(rels[j].Dimensions)
 		})
 	default: // "last"
 		sort.Slice(rels, func(i, j int) bool { return rels[i].LastSeenAt.After(rels[j].LastSeenAt) })
@@ -110,7 +106,7 @@ func runGraphStatus(storePath, nodeID string, showAll bool, sortBy string) {
 	const defaultCap = 30
 	fmt.Printf("\nEdges (%d total):\n\n", len(rels))
 	w = tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
-	fmt.Fprintln(w, "STATE\tSRC\tPROTO\tPORT\tDIR\tSEEN\tLAST SEEN")
+	fmt.Fprintln(w, "STATE\tSUBJECT\tPREDICATE\tOBJECT\tDIMENSIONS\tSEEN\tLAST SEEN")
 	ec := newEntityCache(s)
 	shown := rels
 	if !showAll && len(shown) > defaultCap {
@@ -120,9 +116,9 @@ func runGraphStatus(storePath, nodeID string, showAll bool, sortBy string) {
 		fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%d\t%s\n",
 			r.State,
 			ec.label(r.SubjectEntityID),
-			r.Dimensions["protocol"],
-			r.Dimensions["destination_port"],
-			r.Dimensions["direction"],
+			r.Predicate,
+			ec.label(r.ObjectEntityID),
+			dimensionsDisplay(r.Dimensions),
 			r.SeenCount,
 			r.LastSeenAt.UTC().Format(time.RFC3339),
 		)
@@ -135,17 +131,18 @@ func runGraphStatus(storePath, nodeID string, showAll bool, sortBy string) {
 
 // graphProposalEdge is the YAML export format.
 type graphProposalEdge struct {
-	ID              string            `yaml:"id"`
-	State           string            `yaml:"state"`
-	Source          graphEntityRef    `yaml:"source"`
-	Destination     graphEntityRef    `yaml:"destination"`
-	Protocol        string            `yaml:"protocol"`
-	DestinationPort uint16            `yaml:"destination_port,omitempty"`
-	Direction       string            `yaml:"direction"`
-	FirstSeenAt     time.Time         `yaml:"first_seen_at"`
-	LastSeenAt      time.Time         `yaml:"last_seen_at"`
-	SeenCount       uint64            `yaml:"seen_count"`
-	Confidence      float64           `yaml:"confidence"`
+	ID          string            `yaml:"id"`
+	State       string            `yaml:"state"`
+	Source      graphEntityRef    `yaml:"source"`
+	Destination graphEntityRef    `yaml:"destination"`
+	Predicate   string            `yaml:"predicate"`
+	ScopeType   string            `yaml:"scope_type,omitempty"`
+	ScopeID     string            `yaml:"scope_id,omitempty"`
+	Dimensions  map[string]string `yaml:"dimensions,omitempty"`
+	FirstSeenAt time.Time         `yaml:"first_seen_at"`
+	LastSeenAt  time.Time         `yaml:"last_seen_at"`
+	SeenCount   uint64            `yaml:"seen_count"`
+	Confidence  float64           `yaml:"confidence"`
 }
 
 type graphEntityRef struct {
@@ -198,22 +195,19 @@ func buildProposal(nodeID string, rels []relationship.Relationship, stats map[st
 		if r.State == relationship.StateExpired {
 			continue
 		}
-		dport := uint16(0)
-		if p2, err := strconv.ParseUint(r.Dimensions["destination_port"], 10, 16); err == nil {
-			dport = uint16(p2)
-		}
 		p.Spec.Edges = append(p.Spec.Edges, graphProposalEdge{
-			ID:              r.ID,
-			State:           string(r.State),
-			Source:          graphEntityRef{Kind: "ip", ID: ec.label(r.SubjectEntityID)},
-			Destination:     graphEntityRef{Kind: "ip", ID: ec.label(r.ObjectEntityID)},
-			Protocol:        r.Dimensions["protocol"],
-			DestinationPort: dport,
-			Direction:       r.Dimensions["direction"],
-			FirstSeenAt:     r.FirstSeenAt,
-			LastSeenAt:      r.LastSeenAt,
-			SeenCount:       r.SeenCount,
-			Confidence:      r.Confidence,
+			ID:          r.ID,
+			State:       string(r.State),
+			Source:      graphEntityRef{Kind: "entity", ID: ec.label(r.SubjectEntityID)},
+			Destination: graphEntityRef{Kind: "entity", ID: ec.label(r.ObjectEntityID)},
+			Predicate:   r.Predicate,
+			ScopeType:   r.ScopeType,
+			ScopeID:     r.ScopeID,
+			Dimensions:  cloneDimensions(r.Dimensions),
+			FirstSeenAt: r.FirstSeenAt,
+			LastSeenAt:  r.LastSeenAt,
+			SeenCount:   r.SeenCount,
+			Confidence:  r.Confidence,
 		})
 	}
 	return p
@@ -224,7 +218,7 @@ func runGraphExport(storePath, nodeID, outputFormat string) {
 	s := openStateStoreForGraph(storePath)
 	defer s.Close()
 	ctx := context.Background()
-	rels, err := s.ListRelationships(ctx, nodeID, "network.connects_to", "")
+	rels, err := s.ListRelationships(ctx, nodeID, "", "")
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: list relationships: %v\n", err)
 		os.Exit(1)
@@ -305,7 +299,7 @@ func runGraphExportToFile(storePath, nodeID, path string) {
 	s := openStateStoreForGraph(storePath)
 	defer s.Close()
 	ctx := context.Background()
-	rels, _ := s.ListRelationships(ctx, nodeID, "network.connects_to", string(relationship.StateFrozen))
+	rels, _ := s.ListRelationships(ctx, nodeID, "", string(relationship.StateFrozen))
 	stats, _ := s.RelationshipStats(ctx, nodeID)
 	proposal := buildProposal(nodeID, rels, stats, newEntityCache(s))
 	out, _ := yaml.Marshal(proposal)
@@ -341,31 +335,28 @@ func runGraphReset(storePath, nodeID string, all bool) {
 	}
 }
 
-// runGraphApproveIP marks all relationships from sourceIP as approved.
-func runGraphApproveIP(sourceIP, storePath, nodeID string) {
-	runGraphSetIPState(sourceIP, storePath, nodeID, relationship.StateApproved, "approved")
+// runGraphApproveSource marks all relationships from a source entity as approved.
+func runGraphApproveSource(source, storePath, nodeID string) {
+	runGraphSetSourceState(source, storePath, nodeID, relationship.StateApproved, "approved")
 }
 
-func runGraphSetIPState(sourceIP, storePath, nodeID string, state relationship.State, label string) {
+func runGraphSetSourceState(source, storePath, nodeID string, state relationship.State, label string) {
 	s := openStateStoreForGraph(storePath)
 	defer s.Close()
 	ctx := context.Background()
 
-	// Resolve IP → stable_id
-	entity, err := s.GetEntity(ctx, entity.KindIP, sourceIP, "")
-	if err != nil || entity == nil {
-		fmt.Fprintf(os.Stderr, "entity not found for IP %s\n", sourceIP)
-		os.Exit(1)
-	}
-
-	rels, err := s.ListRelationships(ctx, nodeID, "network.connects_to", "")
+	rels, err := s.ListRelationships(ctx, nodeID, "", "")
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: list: %v\n", err)
 		os.Exit(1)
 	}
+	ec := newEntityCache(s)
 	n := 0
 	for _, r := range rels {
-		if r.SubjectEntityID != entity.StableID || r.State == state {
+		if r.State == state {
+			continue
+		}
+		if r.SubjectEntityID != source && ec.label(r.SubjectEntityID) != source {
 			continue
 		}
 		if err := s.SetRelationshipState(ctx, r.ID, state, r.Confidence); err != nil {
@@ -375,10 +366,37 @@ func runGraphSetIPState(sourceIP, storePath, nodeID string, state relationship.S
 		n++
 	}
 	if n == 0 {
-		fmt.Printf("No relationships found for source %s on node %s.\n", sourceIP, nodeID)
+		fmt.Printf("No relationships found for source %s on node %s.\n", source, nodeID)
 	} else {
-		fmt.Printf("Marked %d relationship(s) from %s as %s.\n", n, sourceIP, label)
+		fmt.Printf("Marked %d relationship(s) from %s as %s.\n", n, source, label)
 	}
+}
+
+func dimensionsDisplay(dims map[string]string) string {
+	if len(dims) == 0 {
+		return "-"
+	}
+	keys := make([]string, 0, len(dims))
+	for k := range dims {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	parts := make([]string, 0, len(keys))
+	for _, k := range keys {
+		parts = append(parts, k+"="+dims[k])
+	}
+	return strings.Join(parts, ",")
+}
+
+func cloneDimensions(dims map[string]string) map[string]string {
+	if len(dims) == 0 {
+		return nil
+	}
+	out := make(map[string]string, len(dims))
+	for k, v := range dims {
+		out[k] = v
+	}
+	return out
 }
 
 func relStateOrder(s relationship.State) int {
@@ -400,13 +418,13 @@ func relStateOrder(s relationship.State) int {
 
 const graphUsage = `usage: kliq graph <subcommand> [flags] [state-db] [node-id]
 
-  edges     [--all] [--sort=last|state|port|seen]   show graph relationships
+  edges     [--all] [--sort=last|state|dimension|seen] show graph relationships
   export    [--format=json]                          export graph as YAML/JSON
   freeze    [frozen-file]                            freeze learned relationships
   freeze    --dry-run                                show freeze readiness
   reset     [--all]                                  delete relationships (--all: incl. frozen)
-  approve-ip <ip>                                    mark all relationships from IP as approved
-  deny-ip   <ip>                                     mark all relationships from IP as denied`
+  approve-source <source>                            mark all relationships from source as approved
+  deny-source   <source>                             mark all relationships from source as denied`
 
 func handleGraphSubcommand(storePath, frozenPath, nodeID string) bool {
 	args := os.Args[1:]
@@ -470,18 +488,18 @@ func handleGraphSubcommand(storePath, frozenPath, nodeID string) bool {
 		} else {
 			runGraphFreeze(getArg(2, storePath), getArg(3, nodeID), getArg(4, frozenPath))
 		}
-	case "approve-ip":
+	case "approve-source":
 		if len(args) < 3 {
-			fmt.Fprintln(os.Stderr, "usage: kliq graph approve-ip <ip> [state-db] [node-id]")
+			fmt.Fprintln(os.Stderr, "usage: kliq graph approve-source <source> [state-db] [node-id]")
 			os.Exit(1)
 		}
-		runGraphApproveIP(args[2], getArg(3, storePath), getArg(4, nodeID))
-	case "deny-ip":
+		runGraphApproveSource(args[2], getArg(3, storePath), getArg(4, nodeID))
+	case "deny-source":
 		if len(args) < 3 {
-			fmt.Fprintln(os.Stderr, "usage: kliq graph deny-ip <ip> [state-db] [node-id]")
+			fmt.Fprintln(os.Stderr, "usage: kliq graph deny-source <source> [state-db] [node-id]")
 			os.Exit(1)
 		}
-		runGraphSetIPState(args[2], getArg(3, storePath), getArg(4, nodeID), relationship.StateDenied, "denied")
+		runGraphSetSourceState(args[2], getArg(3, storePath), getArg(4, nodeID), relationship.StateDenied, "denied")
 	case "reset":
 		runGraphReset(getArg(2, storePath), getArg(3, nodeID), showAll)
 	default:

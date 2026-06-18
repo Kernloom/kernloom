@@ -44,11 +44,11 @@ const (
 // shadowPDPRunner (renamed internally but kept as shadowPDPRunner for backward compat
 // in kliq.go wiring) manages the RuntimePDP lifecycle and evaluation.
 type shadowPDPRunner struct {
-	mu       sync.RWMutex
-	pdp      *runtimepdp.PDP
-	nodeID   string
-	mode     runtimePDPMode
-	logger   *log.Logger
+	mu        sync.RWMutex
+	pdp       *runtimepdp.PDP
+	nodeID    string
+	mode      runtimePDPMode
+	logger    *log.Logger
 	proposals chan<- actions.ActionProposal // non-nil in active mode
 }
 
@@ -174,7 +174,7 @@ func startShadowPDP(ctx context.Context, bus adapterruntime.EventBus, runner *sh
 								DesiredAction: "enforce.network.rate_limit",
 								DesiredLevel:  "soft",
 								Target: actions.ActionTarget{
-									Granularity: "src_ip",
+									Granularity: actions.TargetGranularitySource,
 									Value:       subjectID,
 								},
 								TTL:        ttl,

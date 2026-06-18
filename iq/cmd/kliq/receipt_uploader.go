@@ -25,9 +25,9 @@ import (
 )
 
 const (
-	receiptUploadBatchSize  = 50
-	receiptUploadInterval   = 30 * time.Second
-	receiptRetentionPeriod  = 7 * 24 * time.Hour // prune uploaded receipts after 7 days
+	receiptUploadBatchSize = 50
+	receiptUploadInterval  = 30 * time.Second
+	receiptRetentionPeriod = 7 * 24 * time.Hour // prune uploaded receipts after 7 days
 )
 
 // receiptUploadStore is the minimal store interface needed by the uploader.

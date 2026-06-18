@@ -11,8 +11,7 @@ import (
 
 	"github.com/kernloom/kernloom/iq/internal/actionbroker"
 	"github.com/kernloom/kernloom/iq/internal/actions"
-	shieldclient "github.com/kernloom/kernloom/pkg/adapters/klshield/client"
-	shieldpep "github.com/kernloom/kernloom/pkg/adapters/klshield/pep"
+	"github.com/kernloom/kernloom/pkg/adapterruntime"
 	"github.com/kernloom/kernloom/pkg/core/decision"
 	"github.com/kernloom/kernloom/pkg/core/fsm"
 	"github.com/kernloom/kernloom/pkg/statestore/sqlite"
@@ -25,15 +24,15 @@ type receiptStore interface {
 }
 
 type brokeredActionExecutor struct {
-	legacy  *actions.ShieldActionExecutor
-	broker  *actionbroker.Broker
-	pep     *brokeredFSMPEP
-	store   receiptStore // may be nil when running without a state store
-	nodeID  string
+	legacy *actions.SourceActionExecutor
+	broker *actionbroker.Broker
+	pep    *brokeredFSMPEP
+	store  receiptStore // may be nil when running without a state store
+	nodeID string
 }
 
 func newBrokeredActionExecutor(
-	legacy *actions.ShieldActionExecutor,
+	legacy *actions.SourceActionExecutor,
 	broker *actionbroker.Broker,
 	pep *brokeredFSMPEP,
 	store *sqlite.Store,
@@ -46,30 +45,19 @@ func (e *brokeredActionExecutor) AddSidecar(s actions.PEPSidecar) {
 	e.legacy.AddSidecar(s)
 }
 
-func (e *brokeredActionExecutor) Apply4(ip [4]byte, st fsm.State, r actions.ActionResolution, params shieldpep.EnforcementParams, now time.Time) (fsm.State, actions.ActionResult) {
+func (e *brokeredActionExecutor) ApplySource(target adapterruntime.SourceTarget, st fsm.State, r actions.ActionResolution, params adapterruntime.EnforcementParams, now time.Time) (fsm.State, actions.ActionResult) {
 	if !shouldBrokerLease(r) {
-		return e.legacy.Apply4(ip, st, r, params, now)
+		return e.legacy.ApplySource(target, st, r, params, now)
 	}
-	return e.applyBrokered(applyContext{family: 4, ip4: ip, state: st, resolution: r, params: params, now: now})
+	return e.applyBrokered(applyContext{target: target, state: st, resolution: r, params: params, now: now})
 }
 
-func (e *brokeredActionExecutor) Apply6(ip [16]byte, st fsm.State, r actions.ActionResolution, params shieldpep.EnforcementParams, now time.Time) (fsm.State, actions.ActionResult) {
-	if !shouldBrokerLease(r) {
-		return e.legacy.Apply6(ip, st, r, params, now)
-	}
-	return e.applyBrokered(applyContext{family: 6, ip6: ip, state: st, resolution: r, params: params, now: now})
+func (e *brokeredActionExecutor) ApplyDeEnforceSource(target adapterruntime.SourceTarget, st fsm.State, params adapterruntime.EnforcementParams, now time.Time) fsm.State {
+	return e.legacy.ApplyDeEnforceSource(target, st, params, now)
 }
 
-func (e *brokeredActionExecutor) ApplyDeEnforce4(ip [4]byte, st fsm.State, params shieldpep.EnforcementParams, now time.Time) fsm.State {
-	return e.legacy.ApplyDeEnforce4(ip, st, params, now)
-}
-
-func (e *brokeredActionExecutor) ApplyDeEnforce6(ip [16]byte, st fsm.State, params shieldpep.EnforcementParams, now time.Time) fsm.State {
-	return e.legacy.ApplyDeEnforce6(ip, st, params, now)
-}
-
-func (e *brokeredActionExecutor) ApplyTuple4(key shieldclient.Edge4Key, r actions.ActionResolution, now time.Time) actions.ActionResult {
-	return e.legacy.ApplyTuple4(key, r, now)
+func (e *brokeredActionExecutor) ApplyRelationship(pep adapterruntime.RelationshipPEP, target adapterruntime.RelationshipTarget, r actions.ActionResolution, now time.Time) actions.ActionResult {
+	return e.legacy.ApplyRelationship(pep, target, r, now)
 }
 
 func (e *brokeredActionExecutor) applyBrokered(ctx applyContext) (fsm.State, actions.ActionResult) {
@@ -112,12 +100,10 @@ func shouldBrokerLease(r actions.ActionResolution) bool {
 }
 
 type applyContext struct {
-	family     int
-	ip4        [4]byte
-	ip6        [16]byte
+	target     adapterruntime.SourceTarget
 	state      fsm.State
 	resolution actions.ActionResolution
-	params     shieldpep.EnforcementParams
+	params     adapterruntime.EnforcementParams
 	now        time.Time
 }
 
@@ -127,12 +113,12 @@ type applyOutcome struct {
 }
 
 type brokeredFSMPEP struct {
-	legacy *actions.ShieldActionExecutor
+	legacy *actions.SourceActionExecutor
 	active *applyContext
 	last   applyOutcome
 }
 
-func newBrokeredFSMPEP(legacy *actions.ShieldActionExecutor) *brokeredFSMPEP {
+func newBrokeredFSMPEP(legacy *actions.SourceActionExecutor) *brokeredFSMPEP {
 	return &brokeredFSMPEP{legacy: legacy}
 }
 
@@ -154,16 +140,8 @@ func (p *brokeredFSMPEP) Apply(_ context.Context, lease decision.ActionLease) (s
 	if p.active == nil {
 		return "", fmt.Errorf("brokered fsm pep apply without active transition context")
 	}
-	switch p.active.family {
-	case 4:
-		st, result := p.legacy.Apply4(p.active.ip4, p.active.state, p.active.resolution, p.active.params, p.active.now)
-		p.last = applyOutcome{state: st, result: result}
-	case 6:
-		st, result := p.legacy.Apply6(p.active.ip6, p.active.state, p.active.resolution, p.active.params, p.active.now)
-		p.last = applyOutcome{state: st, result: result}
-	default:
-		return "", fmt.Errorf("unsupported IP family %d", p.active.family)
-	}
+	st, result := p.legacy.ApplySource(p.active.target, p.active.state, p.active.resolution, p.active.params, p.active.now)
+	p.last = applyOutcome{state: st, result: result}
 	if p.last.result.Status == "failed" {
 		return "", fmt.Errorf("%s", p.last.result.Reason)
 	}

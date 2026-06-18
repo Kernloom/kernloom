@@ -63,23 +63,25 @@ type Config struct {
 	// Promotion controls when candidate relationships become learned.
 	Promotion relationshiplearner.PromotionConfig
 
-	// Baseline tuning — same semantics as old graphlearner.
+	// Baseline tuning.
 	BaselineAlpha              float64
 	BaselineAlphaBootstrap     float64
 	BaselineMinObservations    uint64
 	BaselineDeviationThreshold float64
-	BaselineMinUpdatePPS       float64
-	BaselineMinUpdateBPS       float64
 	BaselinePeakTolerance      float64
 
-	// BaselineTrigPPS/BPS: host-level trigger thresholds from autotune.
-	// Observations above these values are never learned as edge baselines.
-	BaselineTrigPPS float64
-	BaselineTrigBPS float64
+	// BaselineMinUpdates filters out very-low-traffic ticks from EWMA baseline
+	// learning. Keys are canonical adapterruntime metric IDs.
+	BaselineMinUpdates map[string]float64
 
-	// Network extractor filters (same semantics as old graphlearner).
-	MinPacketsPerTick  uint64
-	MinBytesPerTick    uint64
+	// BaselineTriggers are host-level thresholds from the active runtime adapter.
+	// Observations above these values are never learned as edge baselines.
+	BaselineTriggers map[string]float64
+
+	// ObservationMinValues filters out very small observations before
+	// relationship extraction. Keys are canonical adapterruntime metric IDs.
+	ObservationMinValues map[string]float64
+
 	ExcludeBroadcast   bool
 	ExcludeLoopback    bool
 	ExcludeSourceCIDRs []net.IPNet
@@ -133,8 +135,8 @@ func New(cfg Config, learner *relationshiplearner.Learner, guard learning.Guard)
 		ExcludeLoopback:        cfg.ExcludeLoopback,
 		ExcludeBroadcast:       cfg.ExcludeBroadcast,
 		ExcludeSourceCIDRs:     cfg.ExcludeSourceCIDRs,
-		MinPackets:             cfg.MinPacketsPerTick,
-		MinBytes:               cfg.MinBytesPerTick,
+		MinPackets:             uint64(metricValue(cfg.ObservationMinValues, adapterruntime.MetricNetworkFlowPackets)),
+		MinBytes:               uint64(metricValue(cfg.ObservationMinValues, adapterruntime.MetricNetworkFlowBytes)),
 		CollapseEphemeralPorts: true,
 	}
 
@@ -203,11 +205,11 @@ func (a *Adapter) BaselineEngine() *metricbaseline.Engine {
 	return a.engine
 }
 
-// UpdateTriggers updates the host-level trigger thresholds (called by autotune).
-func (a *Adapter) UpdateTriggers(trigPPS, trigBPS float64) {
+// UpdateBaselineTriggers updates host-level trigger thresholds by canonical
+// metric ID. Called by KLIQ after adapter-owned autotune changes.
+func (a *Adapter) UpdateBaselineTriggers(values map[string]float64) {
 	a.cfgMu.Lock()
-	a.cfg.BaselineTrigPPS = trigPPS
-	a.cfg.BaselineTrigBPS = trigBPS
+	a.cfg.BaselineTriggers = cloneFloatMap(values)
 	a.cfgMu.Unlock()
 }
 
@@ -233,8 +235,7 @@ func (a *Adapter) handleSignal(ctx context.Context, sig signal.Signal) {
 	// is not learned as normal baseline behaviour.
 	case signal.SignalPPSHigh, signal.SignalBPSHigh, signal.SignalSYNRateHigh,
 		signal.SignalScanSuspected, signal.SignalRateLimitDropsSustained,
-		signal.SignalGraphEdgeBaselinePPSDeviation, signal.SignalGraphEdgeBaselineBytesDeviation,
-		signal.SignalGraphEdgeBaselinePPSPeakExceeded, signal.SignalGraphEdgeBaselineBPSPeakExceeded:
+		signal.SignalGraphEdgeMetricDeviation, signal.SignalGraphEdgeMetricPeakExceeds:
 	// graph.new_edge_after_freeze is a topology notification, NOT an attack signal.
 	// It must NOT create a learning exclusion — doing so would permanently block
 	// learning from every source that communicates while the graph is frozen.
@@ -309,10 +310,10 @@ func (a *Adapter) handle(ctx context.Context, bus adapterruntime.EventBus, obs o
 	bps := obs.Metrics["bps"]
 
 	a.cfgMu.RLock()
-	trigPPS := a.cfg.BaselineTrigPPS
-	trigBPS := a.cfg.BaselineTrigBPS
-	minPPS := a.cfg.BaselineMinUpdatePPS
-	minBPS := a.cfg.BaselineMinUpdateBPS
+	trigPPS := metricValue(a.cfg.BaselineTriggers, adapterruntime.MetricNetworkPacketsPerSecond)
+	trigBPS := metricValue(a.cfg.BaselineTriggers, adapterruntime.MetricNetworkBytesPerSecond)
+	minPPS := metricValue(a.cfg.BaselineMinUpdates, adapterruntime.MetricNetworkPacketsPerSecond)
+	minBPS := metricValue(a.cfg.BaselineMinUpdates, adapterruntime.MetricNetworkBytesPerSecond)
 	thresh := a.cfg.BaselineDeviationThreshold
 	peakTol := a.cfg.BaselinePeakTolerance
 	a.cfgMu.RUnlock()
@@ -344,11 +345,14 @@ func (a *Adapter) handle(ctx context.Context, bus adapterruntime.EventBus, obs o
 		guardResult := a.guard.CheckMetric(ctx, check)
 		suspicious := guardResult.Decision != learning.AllowLearning
 
-		k := edgeBaselineKey(r, "network.xdp.edge.packets_per_second")
+		packetMetricID := "network.xdp.edge.packets_per_second"
+		byteMetricID := "network.xdp.edge.bytes_per_second"
+
+		k := edgeBaselineKey(r, packetMetricID)
 		opts := metricbaseline.UpdateOptions{Suspicious: suspicious || !baselineClean}
 		resultPPS := a.engine.UpdateWithBaselineKey(k, pps, opts)
 
-		kBps := edgeBaselineKey(r, "network.xdp.edge.bytes_per_second")
+		kBps := edgeBaselineKey(r, byteMetricID)
 		resultBPS := a.engine.UpdateWithBaselineKey(kBps, bps, opts)
 
 		if !resultPPS.Promoted && !resultBPS.Promoted {
@@ -358,10 +362,14 @@ func (a *Adapter) handle(ctx context.Context, bus adapterruntime.EventBus, obs o
 		// EWMA deviation signals.
 		if thresh > 0 && (resultPPS.DeviationScore > thresh || resultBPS.DeviationScore > thresh) {
 			factor := resultPPS.DeviationScore
-			sigType := signal.SignalGraphEdgeBaselinePPSDeviation
+			metricID := packetMetricID
+			secondaryMetricID := byteMetricID
+			secondaryFactor := resultBPS.DeviationScore
 			if resultBPS.DeviationScore > resultPPS.DeviationScore {
 				factor = resultBPS.DeviationScore
-				sigType = signal.SignalGraphEdgeBaselineBytesDeviation
+				metricID = byteMetricID
+				secondaryMetricID = packetMetricID
+				secondaryFactor = resultPPS.DeviationScore
 			}
 			score := 50 + int((factor-thresh)*10)
 			if score > 99 {
@@ -369,12 +377,14 @@ func (a *Adapter) handle(ctx context.Context, bus adapterruntime.EventBus, obs o
 			}
 			port := r.Dimensions["destination_port"]
 			proto := r.Dimensions["protocol"]
-			sig := signal.NewSignal(signal.ProducerKLIQ, signal.ScopeLocal, sigType, obs.Subject).
+			sig := signal.NewSignal(signal.ProducerKLIQ, signal.ScopeLocal, signal.SignalGraphEdgeMetricDeviation, obs.Subject).
 				SetScore(score).SetConfidence(80).SetTTL(2*time.Minute).
 				AddReasonCode("baseline_edge_deviation").
 				SetAttribute("edge", port+"/"+proto).
-				SetAttribute("deviation_pps", strconv.FormatFloat(resultPPS.DeviationScore, 'f', 1, 64)).
-				SetAttribute("deviation_bytes", strconv.FormatFloat(resultBPS.DeviationScore, 'f', 1, 64))
+				SetAttribute("metric_id", metricID).
+				SetAttribute("deviation_score", strconv.FormatFloat(factor, 'f', 1, 64)).
+				SetAttribute("secondary_metric_id", secondaryMetricID).
+				SetAttribute("secondary_deviation_score", strconv.FormatFloat(secondaryFactor, 'f', 1, 64))
 			_ = bus.PublishSignal(ctx, *sig)
 		}
 
@@ -384,20 +394,26 @@ func (a *Adapter) handle(ctx context.Context, bus adapterruntime.EventBus, obs o
 			peakFactorBPS := peakFactor(resultBPS)
 			if peakFactorPPS > peakTol || peakFactorBPS > peakTol {
 				factor := peakFactorPPS
-				sigType := signal.SignalGraphEdgeBaselinePPSPeakExceeded
+				metricID := packetMetricID
+				secondaryMetricID := byteMetricID
+				secondaryFactor := peakFactorBPS
 				if peakFactorBPS > peakFactorPPS {
 					factor = peakFactorBPS
-					sigType = signal.SignalGraphEdgeBaselineBPSPeakExceeded
+					metricID = byteMetricID
+					secondaryMetricID = packetMetricID
+					secondaryFactor = peakFactorPPS
 				}
 				score := 60 + int((factor-peakTol)*20)
 				if score > 99 {
 					score = 99
 				}
-				sig := signal.NewSignal(signal.ProducerKLIQ, signal.ScopeLocal, sigType, obs.Subject).
+				sig := signal.NewSignal(signal.ProducerKLIQ, signal.ScopeLocal, signal.SignalGraphEdgeMetricPeakExceeds, obs.Subject).
 					SetScore(score).SetConfidence(85).SetTTL(2*time.Minute).
 					AddReasonCode("baseline_edge_peak_exceeded").
-					SetAttribute("peak_factor_pps", strconv.FormatFloat(peakFactorPPS, 'f', 2, 64)).
-					SetAttribute("peak_factor_bps", strconv.FormatFloat(peakFactorBPS, 'f', 2, 64))
+					SetAttribute("metric_id", metricID).
+					SetAttribute("peak_factor", strconv.FormatFloat(factor, 'f', 2, 64)).
+					SetAttribute("secondary_metric_id", secondaryMetricID).
+					SetAttribute("secondary_peak_factor", strconv.FormatFloat(secondaryFactor, 'f', 2, 64))
 				_ = bus.PublishSignal(ctx, *sig)
 			}
 		}
@@ -435,4 +451,22 @@ func peakFactor(r metricbaseline.Result) float64 {
 		return 0
 	}
 	return r.Value / r.Peak
+}
+
+func metricValue(values map[string]float64, id string) float64 {
+	if values == nil {
+		return 0
+	}
+	return values[id]
+}
+
+func cloneFloatMap(values map[string]float64) map[string]float64 {
+	if len(values) == 0 {
+		return nil
+	}
+	out := make(map[string]float64, len(values))
+	for k, v := range values {
+		out[k] = v
+	}
+	return out
 }

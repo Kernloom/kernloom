@@ -4,7 +4,7 @@
 // Package decisionengine bridges signals and FSM state to auditable Decisions.
 // The engine is audit-only: it produces Decision records and logs them, but
 // performs no PEP enforcement. All enforcement is handled by the ActionResolver
-// → ShieldActionExecutor pipeline in iq/internal/actions.
+// → ActionExecutor pipeline in iq/internal/actions.
 package decisionengine
 
 import (
@@ -58,7 +58,7 @@ type LocalPolicy struct {
 
 // Engine is KLIQ's local decision engine.
 // It translates Signals and FSM transitions into auditable Decisions.
-// Enforcement is not performed here — the ActionResolver → ShieldActionExecutor
+// Enforcement is not performed here — the ActionResolver → ActionExecutor
 // pipeline in iq/internal/actions is the single enforcement authority.
 type Engine struct {
 	mu     sync.RWMutex
@@ -124,7 +124,7 @@ func (e *Engine) EvaluateSignal(_ context.Context, sig signal.Signal) (*decision
 }
 
 // RecordFSMTransition produces a Decision for audit purposes when the FSM changes level.
-// It does NOT call the PEP — the caller (processCandidate4/6) drives enforcement via
+// It does NOT call the PEP — the caller drives enforcement via
 // its existing doTransition callback. This method adds the audit trail only.
 func (e *Engine) RecordFSMTransition(
 	subject observation.EntityRef,

@@ -5,12 +5,10 @@ package main
 
 import (
 	"fmt"
-	"log"
-	"net"
-	"strings"
 	"time"
 
 	"github.com/kernloom/kernloom/pkg/core/observation"
+	"github.com/kernloom/kernloom/pkg/core/signal"
 )
 
 // formatSubject returns "kind:id" for log lines.
@@ -20,6 +18,16 @@ func formatSubject(s observation.EntityRef) string {
 		return s.ID
 	}
 	return string(s.Kind) + ":" + s.ID
+}
+
+func isGraphBaselineSignal(t signal.SignalType) bool {
+	switch t {
+	case signal.SignalGraphEdgeMetricDeviation,
+		signal.SignalGraphEdgeMetricPeakExceeds:
+		return true
+	default:
+		return false
+	}
 }
 
 /* ---------------- misc helpers ---------------- */
@@ -32,9 +40,6 @@ func fmtBPS(v float64) string {
 	}
 	return fmt.Sprintf("%.0f", v)
 }
-
-func ip4String(k [4]byte) string  { return net.IPv4(k[0], k[1], k[2], k[3]).String() }
-func ip6String(k [16]byte) string { return net.IP(k[:]).String() }
 
 func capChange(old, target, maxRel float64) float64 {
 	if maxRel <= 0 {
@@ -116,28 +121,6 @@ func bootstrapEffective(now time.Time, info bootstrapInfo, window, p1End, p2End 
 	return bootstrapPolicy{Active: false, Phase: "steady", Every: steadyEvery, K: steadyK, MaxUp: steadyUp, MaxDown: steadyDown, Alpha: steadyAlpha}
 }
 
-// parseGraphExcludeCIDRs parses a comma-separated list of CIDR strings.
-// Invalid entries are logged and skipped.
-func parseGraphExcludeCIDRs(s string) []net.IPNet {
-	if s == "" {
-		return nil
-	}
-	var out []net.IPNet
-	for _, raw := range strings.Split(s, ",") {
-		raw = strings.TrimSpace(raw)
-		if raw == "" {
-			continue
-		}
-		_, cidr, err := net.ParseCIDR(raw)
-		if err != nil {
-			log.Printf("graph: ignoring invalid exclude CIDR %q: %v", raw, err)
-			continue
-		}
-		out = append(out, *cidr)
-	}
-	return out
-}
-
 /* ---------------- Utility ---------------- */
 
 // graphStrikesFromScore converts a graph signal score (0-100) to FSM strike credits.
@@ -153,27 +136,20 @@ func graphStrikesFromScore(score int) int {
 	}
 }
 
-// sendStrike parses subjectID as an IP address and sends a graphStrikeMsg to ch.
-// addToCands=true: the IP is added to cands so the FSM processes it this tick
-// even without Shield telemetry (used for freeze violations where the source is
-// actively sending traffic). addToCands=false: strikes accumulate in state and
-// are applied the next time the source appears naturally in telemetry (used for
-// baseline deviations to avoid UpStreak reset from zero-metric processing).
-// No-op if the IP cannot be parsed or the channel is full.
-func sendStrike(ch chan<- graphStrikeMsg, subjectID string, n int, forceBlock, addToCands bool) {
-	ip := net.ParseIP(subjectID)
-	if ip == nil {
+// sendStrike sends a graphStrikeMsg to ch for an opaque source ID.
+// addToCands=true: the source is added to cands so the FSM processes it this tick
+// even without source-level adapter telemetry.
+// No-op if the source ID is empty or the channel is full.
+func sendStrike(ch chan<- graphStrikeMsg, subjectID string, n int, forceBlock, addToCands bool, signalScore int) {
+	if subjectID == "" {
 		return
 	}
-	var msg graphStrikeMsg
-	msg.n = n
-	msg.forceBlock = forceBlock
-	msg.addToCands = addToCands
-	if ip4 := ip.To4(); ip4 != nil {
-		copy(msg.ip4[:], ip4)
-	} else {
-		msg.isV6 = true
-		copy(msg.ip6[:], ip.To16())
+	msg := graphStrikeMsg{
+		sourceID:    subjectID,
+		n:           n,
+		signalScore: signalScore,
+		forceBlock:  forceBlock,
+		addToCands:  addToCands,
 	}
 	select {
 	case ch <- msg:
@@ -192,20 +168,3 @@ func minInt(a, b, c int) int {
 	}
 	return m
 }
-
-// parseIPv4String parses an IPv4 address string into a [4]byte array.
-// Returns a zero array if the string is not a valid IPv4 address.
-func parseIPv4String(s string) [4]byte {
-	ip := net.ParseIP(s)
-	if ip == nil {
-		return [4]byte{}
-	}
-	ip4 := ip.To4()
-	if ip4 == nil {
-		return [4]byte{}
-	}
-	var arr [4]byte
-	copy(arr[:], ip4)
-	return arr
-}
-

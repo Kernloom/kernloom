@@ -124,12 +124,12 @@ type EdgeProposalSummary struct {
 }
 
 type GraphEdgeEntry struct {
-	Source          EdgeEntity          `yaml:"source"                    json:"source"`
-	Destination     EdgeEntity          `yaml:"destination"               json:"destination"`
-	Protocol        string              `yaml:"protocol,omitempty"        json:"protocol,omitempty"`
-	DestinationPort int                 `yaml:"destination_port,omitempty" json:"destination_port,omitempty"`
-	State           string              `yaml:"state,omitempty"           json:"state,omitempty"`
-	Baseline        *EdgeBaselineValues `yaml:"baseline,omitempty"        json:"baseline,omitempty"`
+	Source      EdgeEntity             `yaml:"source"               json:"source"`
+	Destination EdgeEntity             `yaml:"destination"          json:"destination"`
+	Predicate   string                 `yaml:"predicate,omitempty"  json:"predicate,omitempty"`
+	Dimensions  map[string]string      `yaml:"dimensions,omitempty" json:"dimensions,omitempty"`
+	State       string                 `yaml:"state,omitempty"      json:"state,omitempty"`
+	Baselines   []MetricBaselineValues `yaml:"baselines,omitempty"  json:"baselines,omitempty"`
 }
 
 type EdgeEntity struct {
@@ -137,8 +137,9 @@ type EdgeEntity struct {
 	ID   string `yaml:"id"   json:"id"`
 }
 
-type EdgeBaselineValues struct {
-	PPSEwma      float64 `yaml:"pps_ewma"     json:"pps_ewma"`
-	BPSEwma      float64 `yaml:"bps_ewma"     json:"bps_ewma"`
+type MetricBaselineValues struct {
+	MetricID     string  `yaml:"metric_id"    json:"metric_id"`
+	EWMA         float64 `yaml:"ewma"         json:"ewma"`
+	Peak         float64 `yaml:"peak"         json:"peak,omitempty"`
 	Observations int     `yaml:"observations" json:"observations"`
 }

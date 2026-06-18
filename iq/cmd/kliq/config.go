@@ -12,8 +12,8 @@ import (
 	"time"
 
 	"github.com/kernloom/kernloom/iq/internal/actions"
-	"github.com/kernloom/kernloom/pkg/adapters/klshield/pep"
-	celeval "github.com/kernloom/kernloom/pkg/core/cel"
+	"github.com/kernloom/kernloom/pkg/adapterruntime"
+	"github.com/kernloom/kernloom/pkg/adapters/catalog"
 	"github.com/kernloom/kernloom/pkg/core/fsm"
 )
 
@@ -35,10 +35,6 @@ type cfg struct {
 	// policy file is loaded — unsigned packs are rejected (CLAUDE.md rule #8).
 	PolicyVerifyKeyPath string
 
-	// CELRules holds compiled v1.2 CEL rules from the active policy pack.
-	// Populated by rulesFromPolicyPack; evaluated per-source-IP on every tick.
-	CELRules []*celeval.CompiledRule
-
 	// Forge control-plane coordinates.
 	ForgeURL         string
 	ForgeEnrollToken string // one-time enrollment token (consumed at enrollment, replaced by session token)
@@ -57,8 +53,7 @@ type cfg struct {
 	RuntimePDPMode string
 
 	// Adapters is the comma-separated list of PEP adapters to activate.
-	// Valid values: klshield, netfilter. Default: "klshield".
-	// Example: --adapter=klshield,netfilter  or  --adapter=netfilter
+	// Valid values are provided by the adapter catalog plus netfilter.
 	Adapters string
 
 	// Profiles + persistence
@@ -153,16 +148,9 @@ type cfg struct {
 	LearnSkipIfBlocks bool
 	LearnMaxDropRatio float64
 
-	// Severity thresholds
-	TrigPPS  float64
-	TrigSyn  float64
-	TrigScan float64
-	TrigBPS  float64
-	WPPS     float64
-	WSyn     float64
-	WScan    float64
-	WBps     float64
-	SevCap   float64
+	// Legacy network scoring parameters. These are passed to the selected
+	// runtime adapter as canonical metric thresholds and weights.
+	adapterruntime.LegacyNetworkScoring
 
 	// Strike mapping
 	SevStep1      float64
@@ -222,9 +210,9 @@ type cfg struct {
 	SoftDirectiveRatePPS uint64
 	HardDirectiveRatePPS uint64
 
-	// adapterParams holds the Shield PEP adapter capability parameters,
-	// loaded from PDPConfig.spec.adapters.shield_pep or DefaultCapabilityParams().
-	adapterParams shieldpep.CapabilityParams
+	// adapterParams holds the default catalog adapter capability parameters,
+	// loaded from adapter-owned PDPConfig sections or DefaultCapabilityParams().
+	adapterParams adapterruntime.CapabilityParams
 
 	// Block gating
 	BlockMinSev float64
@@ -281,30 +269,65 @@ type cfg struct {
 	GraphFreezeMinSeverity int           // minimum signal score (0-100) before enforcement
 
 	// Baseline engine (per-edge EWMA traffic learning, active when GraphEnabled=true).
-	BaselineMinObservations    uint64
-	BaselineAlpha              float64
-	BaselineAlphaBootstrap     float64
-	BaselineMinObsTimeBased    uint64
-	BaselineMinAge             time.Duration
-	BaselineDeviationThreshold float64
-	BaselineMinUpdatePPS       float64
-	BaselineMinUpdateBPS       float64
-	BaselinePeakTolerance      float64
-	BaselinePeakDecayHalfLife  time.Duration
+	BaselineMinObservations     uint64
+	BaselineAlpha               float64
+	BaselineAlphaBootstrap      float64
+	BaselineMinObsTimeBased     uint64
+	BaselineMinAge              time.Duration
+	BaselineDeviationThreshold  float64
+	BaselineMinUpdatePacketRate float64
+	BaselineMinUpdateByteRate   float64
+	BaselinePeakTolerance       float64
+	BaselinePeakDecayHalfLife   time.Duration
 }
 
 // hasAdapter reports whether name is in the --adapter list.
 func (c cfg) hasAdapter(name string) bool {
-	for _, a := range strings.Split(c.Adapters, ",") {
-		if strings.TrimSpace(a) == name {
+	if catalog.IsBindingAdapter(name) {
+		name = catalog.CanonicalAdapterID(name)
+	}
+	for _, a := range c.adapterNames() {
+		if a == name {
 			return true
 		}
 	}
 	return false
 }
 
-// WantsKLShield returns true when klshield is in the adapter list.
-func (c cfg) WantsKLShield() bool { return c.hasAdapter("klshield") }
+func (c cfg) adapterNames() []string {
+	seen := make(map[string]bool)
+	var out []string
+	for _, raw := range strings.Split(c.Adapters, ",") {
+		name := strings.TrimSpace(raw)
+		if name == "" {
+			continue
+		}
+		key := name
+		if catalog.IsBindingAdapter(name) {
+			key = catalog.CanonicalAdapterID(name)
+			name = key
+		}
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		out = append(out, name)
+	}
+	return out
+}
+
+func (c cfg) bindingAdapterNames() []string {
+	var out []string
+	for _, name := range c.adapterNames() {
+		switch name {
+		case "none", "netfilter":
+			continue
+		default:
+			out = append(out, name)
+		}
+	}
+	return out
+}
 
 // WantsNetfilter returns true when netfilter is in the adapter list.
 func (c cfg) WantsNetfilter() bool { return c.hasAdapter("netfilter") }
@@ -350,7 +373,7 @@ func (c cfg) toFSMConfig() fsm.Config {
 //  3. Static     — adapterParams from PDPConfig or DefaultCapabilityParams().
 //
 // Called every tick so adaptive rates follow autotune changes automatically.
-func (c cfg) toPEPParams() shieldpep.EnforcementParams {
+func (c cfg) toPEPParams() adapterruntime.EnforcementParams {
 	softRate := c.adapterParams.SoftRatePPS
 	softBurst := c.adapterParams.SoftBurst
 	hardRate := c.adapterParams.HardRatePPS
@@ -380,7 +403,7 @@ func (c cfg) toPEPParams() shieldpep.EnforcementParams {
 		hardRate, hardBurst = c.HardDirectiveRatePPS, c.HardDirectiveRatePPS*2
 	}
 
-	return shieldpep.EnforcementParams{
+	return adapterruntime.EnforcementParams{
 		SoftRate:  softRate,
 		SoftBurst: softBurst,
 		SoftTTL:   c.SoftTTL,
@@ -409,6 +432,52 @@ func (c cfg) ttlForFSMLevel(level fsm.Level) time.Duration {
 	return c.ttlForLevelName(actions.FsmLevelName(level))
 }
 
+func (c *cfg) applyTuningThresholds(t adapterruntime.TuningThresholds) {
+	c.TrigPPS = t.PacketsPerSecond
+	c.TrigSyn = t.SynRate
+	c.TrigScan = t.DestinationPortChanges
+	c.TrigBPS = t.BytesPerSecond
+}
+
+func (c cfg) tuningThresholds() adapterruntime.TuningThresholds {
+	return adapterruntime.TuningThresholds{
+		PacketsPerSecond:       c.TrigPPS,
+		SynRate:                c.TrigSyn,
+		DestinationPortChanges: c.TrigScan,
+		BytesPerSecond:         c.TrigBPS,
+	}
+}
+
+func (c cfg) tuningConfig() adapterruntime.TuningConfig {
+	return adapterruntime.TuningConfig{
+		MinSamples:                c.AutoMinSamples,
+		FloorPPS:                  c.AutoFloorPPS,
+		FloorSyn:                  c.AutoFloorSyn,
+		FloorScan:                 c.AutoFloorScan,
+		FloorBPS:                  c.AutoFloorBPS,
+		MinWindowsBeforeDownscale: c.BootstrapMinWindowsBeforeDownscale,
+		MinSourcesBeforeDownscale: c.BootstrapMinSourcesBeforeDownscale,
+	}
+}
+
+func (c *cfg) applyPersistedTuningThresholds(st *stateFile, explicitFlags map[string]bool) {
+	if st == nil {
+		return
+	}
+	if st.Active.Trig.TrigPPS > 0 && !explicitFlags["trig-pps"] {
+		c.TrigPPS = st.Active.Trig.TrigPPS
+	}
+	if st.Active.Trig.TrigSyn > 0 && !explicitFlags["trig-syn"] {
+		c.TrigSyn = st.Active.Trig.TrigSyn
+	}
+	if st.Active.Trig.TrigScan > 0 && !explicitFlags["trig-scan"] {
+		c.TrigScan = st.Active.Trig.TrigScan
+	}
+	if st.Active.Trig.TrigBPS > 0 && !explicitFlags["trig-bps"] {
+		c.TrigBPS = st.Active.Trig.TrigBPS
+	}
+}
+
 func parseFlags() cfg {
 	var c cfg
 
@@ -418,25 +487,24 @@ func parseFlags() cfg {
 		fmt.Fprintf(os.Stdout, `Kernloom IQ — local intelligence and enforcement agent
 
 USAGE
-  kliq [flags]                      run the kliq agent
+  kliq run [flags]                  run the kliq agent
   kliq status                       show node status: bootstrap phase, autotune triggers, graph/baseline summary
   kliq runtime status [profile]     show active feature set for a runtime profile
-                                    profiles: dos-light  iq-learning  graph-learning  graph-enforce  klshield-light
+                                    profiles: dos-light  iq-learning  graph-learning  graph-enforce
   kliq graph <subcommand>           manage the communication graph and edge baselines
 
 GRAPH SUBCOMMANDS
-  kliq graph edges [--all] [--sort=last|state|src|port|seen] [store] [node-id]
-      Show learned communication edges and their state.
+  kliq graph edges [--all] [--sort=last|state|dimension|seen] [store] [node-id]
+      Show learned relationships and their state.
       --all    show all edges (default: first 30)
-      --sort=  sort by: last (default), state, src, port, seen
+      --sort=  sort by: last (default), state, dimension, seen
 
-  kliq graph baselines [--all] [--sort=obs|state|src|port|pps|bps] [store] [node-id]
-      Show per-edge EWMA traffic baselines (src, dst, proto, port, pps, bps).
+  kliq graph baselines [store] [node-id]
+      Show generic metric baselines for relationship scopes.
       --all    show all edges (default: first 40)
-      --sort=  sort by: obs (default), state, src, port, pps, bps
 
   kliq graph baselines reset [store] [node-id]
-      Zero all per-edge baseline stats so EWMA learning restarts from scratch.
+      Run metric-baseline cleanup so learning can rebuild expired state.
 
   kliq graph export [--format=json] [store] [node-id]
       Export full graph as YAML (or JSON) to stdout.
@@ -448,11 +516,11 @@ GRAPH SUBCOMMANDS
       Delete candidate/learned/expired edges so the graph re-learns.
       --all   also wipe frozen and approved edges (full reset).
 
-  kliq graph approve-ip <ip> [store] [node-id]
-      Mark all edges from <ip> as approved (stops freeze-violation signals).
+  kliq graph approve-source <source> [store] [node-id]
+      Mark all relationships from <source> as approved (stops freeze-violation signals).
 
-  kliq graph deny-ip <ip> [store] [node-id]
-      Mark all edges from <ip> as denied.
+  kliq graph deny-source <source> [store] [node-id]
+      Mark all relationships from <source> as denied.
 
 AGENT FLAGS
 `)
@@ -473,8 +541,8 @@ AGENT FLAGS
 	flag.StringVar(&c.ForgeCAPath, "forge-ca", "", "path to PEM CA certificate for TLS verification of forge serve; empty = system roots")
 	flag.DurationVar(&c.ForgeHeartbeat, "forge-heartbeat", 5*time.Minute, "heartbeat interval to forge serve")
 
-	flag.StringVar(&c.Adapters, "adapter", "klshield",
-		`comma-separated PEP adapters to activate: klshield, netfilter (e.g. --adapter=klshield,netfilter or --adapter=netfilter)`)
+	flag.StringVar(&c.Adapters, "adapter", catalog.DefaultAdapterID,
+		`comma-separated adapters to activate: catalog runtime adapters, netfilter, none, or a combination`)
 	flag.StringVar(&c.Mode, "mode", "standalone", `agent mode: standalone (local policy) or managed (Forge-managed; currently logs a warning and runs as standalone)`)
 	flag.StringVar(&c.PolicyFile, "policy-file", "", "path to a LocalPolicyPack YAML (abstract enforcement rules: autonomy, rules, graph, exports)")
 	flag.StringVar(&c.PDPConfig, "pdp-config", "", "path to a PDPConfig YAML (kliq signal engine + FSM behavior); overrides --profile when set")
@@ -493,8 +561,8 @@ AGENT FLAGS
 	flag.StringVar(&c.FeedbackPath, "feedback-file", "/var/lib/kernloom/iq/feedback.json", "feedback file for temporary forgive/whitelist entries (runtime, not IMA-attested); empty disables")
 	flag.DurationVar(&c.FeedbackReload, "feedback-reload", 10*time.Second, "reload feedback file if changed (0 disables)")
 	flag.BoolVar(&c.FeedbackLearn, "feedback-learn", false, "if true, feedback-exempt IPs may contribute to learning; default false")
-	flag.BoolVar(&c.FeedbackCIDRDeenforce, "feedback-deenforce-cidr", true, "if true, CIDR feedback entries will actively de-enforce existing deny/rl map entries by scanning maps periodically (best effort)")
-	flag.DurationVar(&c.FeedbackCIDREvery, "feedback-cidr-every", 30*time.Second, "how often to scan maps to de-enforce CIDR feedback entries (0 disables)")
+	flag.BoolVar(&c.FeedbackCIDRDeenforce, "feedback-deenforce-cidr", true, "if true, CIDR feedback entries actively de-enforce matching runtime state entries periodically (best effort)")
+	flag.DurationVar(&c.FeedbackCIDREvery, "feedback-cidr-every", 30*time.Second, "how often to de-enforce CIDR feedback entries from runtime state (0 disables)")
 	flag.IntVar(&c.FeedbackCIDRMax, "feedback-cidr-max", 5000, "max number of entries to delete per CIDR de-enforce scan (bounds cost)")
 
 	flag.StringVar(&c.FeatureProfile, "feature-profile", "", `runtime feature profile: dos-light, iq-learning, graph-learning, graph-enforce (default: auto from --graph)`)
@@ -582,7 +650,7 @@ AGENT FLAGS
 	flag.DurationVar(&c.SoftTTL, "soft-ttl", 0, "soft enforcement TTL (0 => from policy rule or profile)")
 	flag.DurationVar(&c.HardTTL, "hard-ttl", 0, "hard enforcement TTL (0 => from policy rule or profile)")
 	flag.DurationVar(&c.BlockTTL, "block-ttl", 0, "block TTL (0 => from policy rule or profile)")
-	// Rate/burst/cooldown come from PDPConfig.adapters.shield_pep, not CLI flags.
+	// Rate/burst/cooldown come from adapter-owned PDPConfig sections, not CLI flags.
 
 	c.BlockMinSev = math.NaN() // sentinel: use profile default
 	flag.Float64Var(&c.BlockMinSev, "block-min-sev", math.NaN(), "only allow BLOCK if severity >= this (NaN => from profile, 0 disables)")
@@ -644,8 +712,8 @@ AGENT FLAGS
 	flag.Uint64Var(&c.BaselineMinObsTimeBased, "baseline-min-obs-time", 5, "min observations for time-based promotion (0 disables); promotes edge after baseline-min-age even if obs < baseline-min-obs")
 	flag.DurationVar(&c.BaselineMinAge, "baseline-min-age", 7*24*time.Hour, "min edge age for time-based promotion (e.g. 168h for weekly jobs)")
 	flag.Float64Var(&c.BaselineDeviationThreshold, "baseline-threshold", 5.0, "MAD multiplier that triggers an edge baseline deviation signal")
-	flag.Float64Var(&c.BaselineMinUpdatePPS, "baseline-min-update-pps", 0, "skip EWMA update when pps below this (filters idle keepalive ticks; 0=disabled)")
-	flag.Float64Var(&c.BaselineMinUpdateBPS, "baseline-min-update-bps", 0, "skip EWMA update when bps below this (0=disabled)")
+	flag.Float64Var(&c.BaselineMinUpdatePacketRate, "baseline-min-update-pps", 0, "skip EWMA update when pps below this (filters idle keepalive ticks; 0=disabled)")
+	flag.Float64Var(&c.BaselineMinUpdateByteRate, "baseline-min-update-bps", 0, "skip EWMA update when bps below this (0=disabled)")
 	flag.Float64Var(&c.BaselinePeakTolerance, "baseline-peak-tolerance", 1.5, "factor above learned peak that triggers a signal (1.5 = 50% above max)")
 	flag.DurationVar(&c.BaselinePeakDecayHalfLife, "baseline-peak-decay-half-life", 0, "half-life for peak decay (e.g. 336h = 14d); 0 disables decay (running max, original behaviour)")
 

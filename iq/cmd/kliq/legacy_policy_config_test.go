@@ -8,8 +8,9 @@ import (
 	"testing"
 	"time"
 
-	klshieldautotuner "github.com/kernloom/kernloom/pkg/adapters/klshield/autotuner"
-	"github.com/kernloom/kernloom/pkg/adapters/klshield/pep"
+	"github.com/kernloom/kernloom/iq/internal/sourcefilters"
+	"github.com/kernloom/kernloom/pkg/adapterruntime"
+	"github.com/kernloom/kernloom/pkg/adapters/catalog"
 	"github.com/kernloom/kernloom/pkg/core/fsm"
 	"github.com/kernloom/kernloom/pkg/core/policy"
 )
@@ -40,7 +41,7 @@ func loadPackFromYAML(t *testing.T, yaml string) cfg {
 	}
 	applyPolicyPackToCfg(pp, &c)
 	rulesFromPolicyPack(pp, &c)
-	c.adapterParams = shieldpep.DefaultCapabilityParams()
+	c.adapterParams = catalog.DefaultCapabilityParams(catalog.DefaultAdapterID)
 	return c
 }
 
@@ -51,17 +52,17 @@ func TestNormalizeCapabilityID_ForgeToKLIQ(t *testing.T) {
 		input string
 		want  string
 	}{
-		{"enforce.traffic.rate_limit", "network.rate_limit_source"},
-		{"enforce.access.deny", "network.block_source"},
-		{"enforce.traffic.drop", "network.block_source"},
-		{"enforce.traffic.quarantine", "network.block_source"},
-		{"enforce.access.allow", "network.allow_source"},
-		{"enforce.access.default_deny", "network.enforce_allowlist"},
-		{"enforce.network.deny", "network.block_source"},
-		{"enforce.network.rate_limit", "network.rate_limit_source"},
-		// Already KLIQ IDs pass through unchanged.
-		{"network.rate_limit_source", "network.rate_limit_source"},
-		{"network.block_source", "network.block_source"},
+		{"enforce.traffic.rate_limit", "enforce.traffic.rate_limit"},
+		{"enforce.access.deny", "enforce.access.deny"},
+		{"enforce.traffic.drop", "enforce.traffic.drop"},
+		{"enforce.traffic.quarantine", "enforce.traffic.quarantine"},
+		{"enforce.access.allow", "enforce.access.allow"},
+		{"enforce.access.default_deny", "enforce.access.default_deny"},
+		{"enforce.network.deny", "enforce.network.deny"},
+		{"enforce.network.rate_limit", "enforce.network.rate_limit"},
+		// Legacy network IDs are mapped to current action IDs.
+		{"network.rate_limit_source", "enforce.traffic.rate_limit"},
+		{"network.block_source", "enforce.access.deny"},
 		// Unknown IDs pass through (forward-compatible).
 		{"x.vendor.custom_cap", "x.vendor.custom_cap"},
 	}
@@ -186,16 +187,16 @@ func TestRulesFromPolicyPack_CapabilityNormalised(t *testing.T) {
 	var c cfg
 	rulesFromPolicyPack(pp, &c)
 
-	if c.SoftCapability != "network.rate_limit_source" {
-		t.Errorf("SoftCapability: got %q, want network.rate_limit_source", c.SoftCapability)
+	if c.SoftCapability != "enforce.traffic.rate_limit" {
+		t.Errorf("SoftCapability: got %q, want enforce.traffic.rate_limit", c.SoftCapability)
 	}
-	if c.BlockCapability != "network.block_source" {
-		t.Errorf("BlockCapability: got %q, want network.block_source", c.BlockCapability)
+	if c.BlockCapability != "enforce.access.deny" {
+		t.Errorf("BlockCapability: got %q, want enforce.access.deny", c.BlockCapability)
 	}
 }
 
-func TestRulesFromPolicyPack_AlreadyKLIQIDPassThrough(t *testing.T) {
-	// Existing packs using KLIQ-internal IDs still work.
+func TestRulesFromPolicyPack_LegacyNetworkIDNormalised(t *testing.T) {
+	// Existing packs using old network.* IDs still work.
 	pp := makeTestPack([]policy.RuleSpec{
 		{
 			When: policy.WhenSpec{FsmLevel: "soft"},
@@ -209,7 +210,7 @@ func TestRulesFromPolicyPack_AlreadyKLIQIDPassThrough(t *testing.T) {
 	var c cfg
 	rulesFromPolicyPack(pp, &c)
 
-	if c.SoftCapability != "network.rate_limit_source" {
+	if c.SoftCapability != "enforce.traffic.rate_limit" {
 		t.Errorf("SoftCapability: got %q", c.SoftCapability)
 	}
 }
@@ -284,9 +285,9 @@ func TestApplyPolicyPackToCfg_DryRun(t *testing.T) {
 	}
 }
 
-// ── Integration: processCandidate4 with PolicyMaxAction ───────────────────────
+// ── Integration: processCandidate with PolicyMaxAction ─────────────────────────
 
-// newTestCfg builds a minimal cfg for processCandidate4 integration tests.
+// newTestCfg builds a minimal cfg for processCandidate integration tests.
 // SevStep/Delta thresholds are set so that Severity=99 adds 3 strikes per tick.
 // With BlockAt=3, a single tick is enough to reach LevelBlock (no cap).
 func newTestCfg(maxAction string) cfg {
@@ -306,42 +307,51 @@ func newTestCfg(maxAction string) cfg {
 		c.Mode = string(policy.ModeManaged)
 		c.HasPolicyPack = true
 	}
-	c.adapterParams = shieldpep.DefaultCapabilityParams()
+	c.adapterParams = catalog.DefaultCapabilityParams(catalog.DefaultAdapterID)
 	return c
 }
 
-// runFSM drives processCandidate4 n times with high-severity metrics and
-// returns the final FSM state. Uses dryRun=true so no BPF maps are required.
+// runFSM drives processCandidate n times with high-severity metrics and
+// returns the final FSM state. No primary PEP is needed; the executor updates
+// FSM state in-memory when no adapter is attached.
 func runFSM(n int, c cfg) fsm.State {
-	pep := shieldpep.New(nil, true) // dryRun=true — no BPF maps needed
 	resolver := c.buildPolicyResolver()
-	executor := buildExecutor(pep)
-	wl := newWhitelist("")
-	fb := &feedbackManager{}
-	at := klshieldautotuner.New(
-		klshieldautotuner.Thresholds{TrigPPS: c.TrigPPS, TrigSyn: c.TrigSyn, TrigScan: c.TrigScan, TrigBPS: c.TrigBPS},
-		klshieldautotuner.Config{MinSamples: 10, FloorPPS: 50, FloorSyn: 50, FloorScan: 5},
+	executor := buildExecutor(nil)
+	wl := sourcefilters.NewWhitelist("")
+	fb := sourcefilters.NewFeedback("")
+	tuner, err := catalog.NewTuner(catalog.DefaultAdapterID,
+		adapterruntime.TuningThresholds{
+			PacketsPerSecond:       c.TrigPPS,
+			SynRate:                c.TrigSyn,
+			DestinationPortChanges: c.TrigScan,
+			BytesPerSecond:         c.TrigBPS,
+		},
+		adapterruntime.TuningConfig{MinSamples: 10, FloorPPS: 50, FloorSyn: 50, FloorScan: 5},
 		16,
 	)
+	if err != nil {
+		panic(err)
+	}
 
 	m := metrics{
-		IPVer:    4,
-		IP4:      [4]byte{10, 0, 0, 1},
-		PPS:      50000,
-		SynRate:  5000,
-		Severity: 99,
+		Target: adapterruntime.SourceTarget{SourceID: "source-1"},
+		Score:  99,
+		Signals: map[string]float64{
+			adapterruntime.MetricNetworkPacketsPerSecond: 50000,
+			adapterruntime.MetricNetworkSynRate:          5000,
+		},
 	}
 	st := fsm.State{Level: fsm.LevelObserve}
 	now := time.Now()
 
 	for i := 0; i < n; i++ {
-		st = processCandidate4(m, st, now, c, wl, fb, resolver, executor, at, false)
+		st = processCandidate(m, st, now, c, wl, fb, resolver, executor, tuner, false)
 		now = now.Add(time.Second)
 	}
 	return st
 }
 
-func TestProcessCandidate4_DefaultAllowsBlock(t *testing.T) {
+func TestProcessCandidate_DefaultAllowsBlock(t *testing.T) {
 	// Without PolicyMaxAction the FSM can reach LevelBlock.
 	c := newTestCfg("")
 	st := runFSM(10, c)
@@ -350,7 +360,7 @@ func TestProcessCandidate4_DefaultAllowsBlock(t *testing.T) {
 	}
 }
 
-func TestProcessCandidate4_RateLimitCapPreventsBlock(t *testing.T) {
+func TestProcessCandidate_RateLimitCapPreventsBlock(t *testing.T) {
 	// With max_action=rate_limit the FSM must not exceed LevelSoft.
 	c := newTestCfg("rate_limit")
 	st := runFSM(10, c)
@@ -381,6 +391,40 @@ func TestProcessCandidate4_ExistingBehaviourUnchanged(t *testing.T) {
 	}
 }
 
+func TestGraphBaselineStrikeProcessesSyntheticCandidate(t *testing.T) {
+	c := newTestCfg("")
+	c.HasPolicyPack = true
+	c.PolicyMaxAction = "block"
+	c.UpNeed = 1
+	c.BlockMinSev = 0
+	c.BlockMinDur = 0
+
+	sources := newSourceStates()
+	cands := []metrics{}
+	now := time.Now()
+	sources.applyGraphStrike(&cands, graphStrikeMsg{
+		sourceID:    "source-1",
+		signalScore: 99,
+		addToCands:  true,
+	}, now, c)
+	if len(cands) != 1 {
+		t.Fatalf("expected graph strike to add a synthetic candidate, got %d", len(cands))
+	}
+
+	resolver := c.buildPolicyResolver()
+	executor := buildExecutor(nil)
+	wl := sourcefilters.NewWhitelist("")
+	fb := sourcefilters.NewFeedback("")
+	processed := sources.processCandidates(cands, now, c, wl, fb, resolver, executor, nil, false)
+	if !processed["source-1"] {
+		t.Fatal("expected source-1 to be processed")
+	}
+	entry := sources.entries["source-1"]
+	if entry.state.Level == fsm.LevelObserve {
+		t.Fatalf("expected graph baseline signal to escalate FSM, got %s", entry.state.Level)
+	}
+}
+
 // ── Phase 6a: Adaptive rate params ───────────────────────────────────────────
 
 func TestToPEPParams_StaticMode(t *testing.T) {
@@ -404,9 +448,9 @@ func TestToPEPParams_StaticMode(t *testing.T) {
 func TestToPEPParams_AdaptiveMode(t *testing.T) {
 	// Adaptive: factors set → rates derived from TrigPPS.
 	c := cfg{
-		SoftRateFactor: 0.5,
-		HardRateFactor: 0.1,
-		TrigPPS:        1000,
+		SoftRateFactor:       0.5,
+		HardRateFactor:       0.1,
+		LegacyNetworkScoring: adapterruntime.LegacyNetworkScoring{TrigPPS: 1000},
 	}
 	c.adapterParams.SoftRatePPS = 20 // ignored in adaptive mode
 	c.adapterParams.HardRatePPS = 5  // ignored in adaptive mode
@@ -429,9 +473,9 @@ func TestToPEPParams_AdaptiveMode(t *testing.T) {
 func TestToPEPParams_AdaptiveTracksAutotune(t *testing.T) {
 	// When TrigPPS changes (autotune), rates change accordingly.
 	c := cfg{
-		SoftRateFactor: 0.5,
-		HardRateFactor: 0.1,
-		TrigPPS:        500,
+		SoftRateFactor:       0.5,
+		HardRateFactor:       0.1,
+		LegacyNetworkScoring: adapterruntime.LegacyNetworkScoring{TrigPPS: 500},
 	}
 
 	p1 := c.toPEPParams()
@@ -449,9 +493,9 @@ func TestToPEPParams_AdaptiveTracksAutotune(t *testing.T) {
 func TestToPEPParams_AdaptiveMinimum(t *testing.T) {
 	// Tiny TrigPPS must not produce zero rate.
 	c := cfg{
-		SoftRateFactor: 0.5,
-		HardRateFactor: 0.1,
-		TrigPPS:        1, // very low threshold
+		SoftRateFactor:       0.5,
+		HardRateFactor:       0.1,
+		LegacyNetworkScoring: adapterruntime.LegacyNetworkScoring{TrigPPS: 1},
 	}
 	p := c.toPEPParams()
 	if p.SoftRate < 1 {
@@ -469,7 +513,7 @@ func TestToPEPParams_DirectiveOverridesAdaptive(t *testing.T) {
 	c := cfg{
 		SoftRateFactor:       0.5,
 		HardRateFactor:       0.1,
-		TrigPPS:              1000,
+		LegacyNetworkScoring: adapterruntime.LegacyNetworkScoring{TrigPPS: 1000},
 		SoftDirectiveRatePPS: 200,
 		HardDirectiveRatePPS: 50,
 	}

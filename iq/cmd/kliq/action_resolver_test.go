@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/kernloom/kernloom/pkg/adapters/klshield/pep"
+	"github.com/kernloom/kernloom/pkg/adapters/catalog"
 	"github.com/kernloom/kernloom/pkg/core/decision"
 	"github.com/kernloom/kernloom/pkg/core/fsm"
 	"github.com/kernloom/kernloom/pkg/core/policy"
@@ -145,7 +145,7 @@ func TestResolveDecisionAction_ManagedWithPack_RateLimitCap(t *testing.T) {
 	}
 }
 
-// ── Integration: processCandidate4 with managed mode ─────────────────────────
+// ── Integration: source FSM with managed mode ─────────────────────────────────
 
 // managedTestCfg builds a cfg that simulates a managed-mode KLIQ node.
 func managedTestCfg(maxAction string, hasPack bool) cfg {
@@ -158,7 +158,7 @@ func managedTestCfg(maxAction string, hasPack bool) cfg {
 		SoftAt: 1, HardAt: 2, BlockAt: 3,
 		SoftTTL: time.Minute, HardTTL: time.Minute, BlockTTL: time.Minute,
 	}
-	c.adapterParams = shieldpep.DefaultCapabilityParams()
+	c.adapterParams = catalog.DefaultCapabilityParams(catalog.DefaultAdapterID)
 	return c
 }
 
@@ -199,7 +199,7 @@ func TestProcessCandidate4_StandaloneNoPackNeeded(t *testing.T) {
 		SoftAt: 1, HardAt: 2, BlockAt: 3,
 		SoftTTL: time.Minute, HardTTL: time.Minute, BlockTTL: time.Minute,
 	}
-	c.adapterParams = shieldpep.DefaultCapabilityParams()
+	c.adapterParams = catalog.DefaultCapabilityParams(catalog.DefaultAdapterID)
 	st := runFSM(5, c)
 	if st.Level < fsm.LevelHard {
 		t.Errorf("standalone without pack: expected enforcement to proceed, got %s", st.Level)

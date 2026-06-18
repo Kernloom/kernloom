@@ -133,20 +133,23 @@ func (a *Adapter) Stop(ctx context.Context) error {
 
 /* ── actions.PEPSidecar ─────────────────────────────────────────────────── */
 
-// NotifyTransition4 mirrors an IPv4 FSM transition into Netfilter rules.
-func (a *Adapter) NotifyTransition4(ip [4]byte, prev, next fsm.Level, ttl time.Duration) {
+// NotifySourceTransition mirrors a generic source FSM transition into
+// Netfilter rules. Netfilter supports IP sources, so the source-ID
+// interpretation is local to this adapter.
+func (a *Adapter) NotifySourceTransition(target adapterruntime.SourceTarget, prev, next fsm.Level, ttl time.Duration) {
 	if atomic.LoadUint32(&a.healthy) == 0 {
 		return
 	}
-	a.applyLevel(context.Background(), net.IP(ip[:]).String(), prev, next, ttl)
-}
-
-// NotifyTransition6 mirrors an IPv6 FSM transition into Netfilter rules.
-func (a *Adapter) NotifyTransition6(ip [16]byte, prev, next fsm.Level, ttl time.Duration) {
-	if atomic.LoadUint32(&a.healthy) == 0 {
+	sourceID := target.SourceID
+	if sourceID == "" {
+		sourceID = target.Subject.ID
+	}
+	ip := net.ParseIP(sourceID)
+	if ip == nil {
+		logger.Printf("skip source transition for non-IP source=%q", sourceID)
 		return
 	}
-	a.applyLevel(context.Background(), net.IP(ip[:]).String(), prev, next, ttl)
+	a.applyLevel(context.Background(), ip.String(), prev, next, ttl)
 }
 
 /* ── Enforcement ─────────────────────────────────────────────────────────── */

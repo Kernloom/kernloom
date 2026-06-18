@@ -5,6 +5,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"strings"
@@ -89,7 +90,7 @@ func runBaselinesGenericList(dbPath, metricFilter, scopeFilter, sourceClassFilte
 	// Join with entities to resolve subject_entity_id → human-readable IP.
 	rows, err := s.DB().QueryContext(context.Background(), `
 		SELECT b.metric_id, b.scope_type, b.scope_id, b.source_class, b.visibility_point,
-		       b.truth_class, b.window_seconds, b.state, b.observations, b.last_updated_at,
+		       b.truth_class, b.window_seconds, b.state, b.ewma_state, b.observations, b.last_updated_at,
 		       COALESCE(e.id, '') as entity_display
 		FROM metric_baselines b
 		LEFT JOIN entities e ON e.stable_id = b.subject_entity_id
@@ -102,14 +103,14 @@ func runBaselinesGenericList(dbPath, metricFilter, scopeFilter, sourceClassFilte
 	defer rows.Close()
 
 	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
-	fmt.Fprintln(w, "METRIC\tSUBJECT\tSOURCE\tSCOPE\tTRUTH\tWIN\tSTATE\tOBS\tLAST UPDATED")
+	fmt.Fprintln(w, "METRIC\tSUBJECT\tSOURCE\tSCOPE\tTRUTH\tWIN\tSTATE\tBASELINE\tPEAK\tCONF\tOBS\tLAST UPDATED")
 
 	count := 0
 	for rows.Next() {
-		var metricID, scopeType, scopeID, sourceClass, visPoint, truthClass, state, lastUpdated, entityDisplay string
+		var metricID, scopeType, scopeID, sourceClass, visPoint, truthClass, state, ewmaState, lastUpdated, entityDisplay string
 		var windowSec, obs int64
 		if err := rows.Scan(&metricID, &scopeType, &scopeID, &sourceClass, &visPoint,
-			&truthClass, &windowSec, &state, &obs, &lastUpdated, &entityDisplay); err != nil {
+			&truthClass, &windowSec, &state, &ewmaState, &obs, &lastUpdated, &entityDisplay); err != nil {
 			continue
 		}
 		if metricFilter != "" && !strings.Contains(metricID, metricFilter) {
@@ -129,10 +130,11 @@ func runBaselinesGenericList(dbPath, metricFilter, scopeFilter, sourceClassFilte
 		if subject == "" || subject == scopeID {
 			subject = shortID(scopeID)
 		}
+		baseline, peak, confidence := formatBaselineState(ewmaState)
 		t, _ := time.Parse(time.RFC3339Nano, lastUpdated)
-		fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%ds\t%s\t%d\t%s\n",
+		fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%ds\t%s\t%s\t%s\t%s\t%d\t%s\n",
 			metricID, subject, sourceClass, scope, shortTruth(truthClass),
-			windowSec, state, obs, t.UTC().Format("2006-01-02T15:04"))
+			windowSec, state, baseline, peak, confidence, obs, t.UTC().Format("2006-01-02T15:04"))
 		count++
 	}
 	w.Flush()
@@ -142,6 +144,40 @@ func runBaselinesGenericList(dbPath, metricFilter, scopeFilter, sourceClassFilte
 		return
 	}
 	fmt.Printf("\nTotal: %d baseline(s)\n", count)
+}
+
+func formatBaselineState(raw string) (baseline, peak, confidence string) {
+	baseline, peak, confidence = "-", "-", "-"
+	if strings.TrimSpace(raw) == "" {
+		return baseline, peak, confidence
+	}
+	var state map[string]float64
+	if err := json.Unmarshal([]byte(raw), &state); err != nil {
+		return baseline, peak, confidence
+	}
+	if v, ok := state["ewma"]; ok {
+		baseline = formatBaselineNumber(v)
+	}
+	if v, ok := state["peak"]; ok {
+		peak = formatBaselineNumber(v)
+	}
+	if v, ok := state["confidence"]; ok {
+		confidence = fmt.Sprintf("%.2f", v)
+	}
+	return baseline, peak, confidence
+}
+
+func formatBaselineNumber(v float64) string {
+	switch {
+	case v == 0:
+		return "0"
+	case v >= 100:
+		return fmt.Sprintf("%.0f", v)
+	case v >= 10:
+		return fmt.Sprintf("%.1f", v)
+	default:
+		return fmt.Sprintf("%.2f", v)
+	}
 }
 
 func shortTruth(tc string) string {
