@@ -55,7 +55,7 @@ func TestFakeExtractor_Interface(t *testing.T) {
 func TestFakeExtractor_Extract(t *testing.T) {
 	ext := &fakeExtractor{name: "fake", appliesTo: []observation.ObservationType{observation.TypeFlow}}
 
-	obs := observation.NewObservation(observation.SourceShield, observation.TypeFlow, "node-1",
+	obs := observation.NewObservation(observation.ObservationSource("shield"), observation.TypeFlow, "node-1",
 		observation.EntityRef{Kind: observation.KindIP, ID: "10.0.0.1"})
 	obs.SetMetric("packets", 42.0)
 

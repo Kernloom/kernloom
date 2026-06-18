@@ -73,7 +73,7 @@ func TestRunner_SubmitAndProcess(t *testing.T) {
 	r.Start(ctx)
 
 	// Submit observations that map to known metrics.
-	obs := observation.NewObservation(observation.SourceShield, observation.TypeFlow, "node-1",
+	obs := observation.NewObservation(observation.ObservationSource("shield"), observation.TypeFlow, "node-1",
 		observation.EntityRef{Kind: observation.KindIP, ID: "10.0.0.1"})
 	obs.SetMetric("pps", 1000)
 	r.SubmitObservations([]observation.Observation{*obs})

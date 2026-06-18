@@ -5,7 +5,7 @@
 // It is part of the OpenZiti adapter package (pkg/adapters/openziti/).
 //
 // It produces "ziti.dials" relationships from TypeConnection observations
-// where source=ziti. This is currently a stub/test extractor for pipeline
+// where source=openziti. This is currently a stub/test extractor for pipeline
 // validation — a real implementation will add controller API enrichment.
 package ziti
 
@@ -19,7 +19,10 @@ import (
 	"github.com/kernloom/kernloom/pkg/statestore/sqlite"
 )
 
-const PredicateDials = "ziti.dials"
+const (
+	PredicateDials = "ziti.dials"
+	SourceOpenZiti = observation.ObservationSource("openziti")
+)
 
 // Extractor derives ziti.dials relationships from TypeConnection observations.
 type Extractor struct {
@@ -37,17 +40,17 @@ func (e *Extractor) Name() string { return "ziti" }
 //
 // Expected observation:
 //
-//	Source: SourceZiti
+//	Source: SourceOpenZiti
 //	Type:   TypeConnection
 //	Subject: identity:<id>
-//	Object:  ziti_service:<name>
+//	Object:  service:<name>
 //	Attributes: posture, trust_level
 func (e *Extractor) Extract(_ context.Context, obs []observation.Observation) ([]relationship.Relationship, error) {
 	now := time.Now().UTC()
 	var result []relationship.Relationship
 
 	for _, o := range obs {
-		if o.Source != observation.SourceZiti {
+		if o.Source != SourceOpenZiti {
 			continue
 		}
 		if o.Type != observation.TypeConnection {
@@ -58,7 +61,7 @@ func (e *Extractor) Extract(_ context.Context, obs []observation.Observation) ([
 		}
 
 		subjectID := sqlite.StableEntityID(string(entity.KindUser), o.Subject.ID, "")
-		objectID := sqlite.StableEntityID(string(entity.KindZitiService), o.Object.ID, "")
+		objectID := sqlite.StableEntityID(string(entity.KindService), o.Object.ID, "")
 
 		dims := map[string]string{}
 		if p := o.Attributes["posture"]; p != "" {
@@ -85,7 +88,7 @@ func (e *Extractor) Extract(_ context.Context, obs []observation.Observation) ([
 			SubjectLabel:    o.Subject.ID,
 			SubjectKind:     string(entity.KindUser),
 			ObjectLabel:     o.Object.ID,
-			ObjectKind:      string(entity.KindZitiService),
+			ObjectKind:      string(entity.KindService),
 		})
 	}
 	return result, nil

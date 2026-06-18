@@ -4,9 +4,13 @@
 package bundle_test
 
 import (
+	"crypto/ed25519"
+	"crypto/rand"
+	"encoding/base64"
 	"testing"
 
 	"github.com/kernloom/kernloom/pkg/core/bundle"
+	"gopkg.in/yaml.v3"
 )
 
 const minimalBundle = `
@@ -164,4 +168,94 @@ func TestWindowDuration_Default(t *testing.T) {
 	if d != 14*24*3600*1e9 {
 		t.Errorf("default should be 14d, got %v", d)
 	}
+}
+
+func TestVerifyRuntimeBundle_Valid(t *testing.T) {
+	pub, priv := genKeyPair(t)
+	signed := signBundle(t, mustParseBundle(t, minimalBundle), priv)
+
+	b, err := bundle.VerifyRuntimeBundle(signed, pub)
+	if err != nil {
+		t.Fatalf("VerifyRuntimeBundle: %v", err)
+	}
+	if b.Metadata.NodeID != "test-node" {
+		t.Errorf("NodeID: got %q", b.Metadata.NodeID)
+	}
+}
+
+func TestVerifyRuntimeBundle_Unsigned(t *testing.T) {
+	pub, _ := genKeyPair(t)
+	unsigned := mustParseBundle(t, minimalBundle)
+	unsigned.Signature = bundle.BundleSignature{}
+	raw, err := yaml.Marshal(unsigned)
+	if err != nil {
+		t.Fatalf("marshal unsigned bundle: %v", err)
+	}
+
+	if _, err := bundle.VerifyRuntimeBundle(raw, pub); err == nil {
+		t.Fatal("unsigned bundle should fail verification")
+	}
+}
+
+func TestVerifyRuntimeBundle_WrongKey(t *testing.T) {
+	_, priv := genKeyPair(t)
+	otherPub, _ := genKeyPair(t)
+	signed := signBundle(t, mustParseBundle(t, minimalBundle), priv)
+
+	if _, err := bundle.VerifyRuntimeBundle(signed, otherPub); err == nil {
+		t.Fatal("bundle signed by another key should fail verification")
+	}
+}
+
+func TestVerifyRuntimeBundle_TamperedPayload(t *testing.T) {
+	pub, priv := genKeyPair(t)
+	b := mustParseBundle(t, minimalBundle)
+	signed := signBundle(t, b, priv)
+
+	tampered := mustParseBundle(t, string(signed))
+	tampered.Metadata.Generation = 2
+	raw, err := yaml.Marshal(tampered)
+	if err != nil {
+		t.Fatalf("marshal tampered bundle: %v", err)
+	}
+
+	if _, err := bundle.VerifyRuntimeBundle(raw, pub); err == nil {
+		t.Fatal("tampered bundle should fail verification")
+	}
+}
+
+func genKeyPair(t *testing.T) (ed25519.PublicKey, ed25519.PrivateKey) {
+	t.Helper()
+	pub, priv, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatalf("generate key: %v", err)
+	}
+	return pub, priv
+}
+
+func signBundle(t *testing.T, b *bundle.RuntimeBundle, priv ed25519.PrivateKey) []byte {
+	t.Helper()
+	payload, err := b.SigningPayload()
+	if err != nil {
+		t.Fatalf("signing payload: %v", err)
+	}
+	sig := ed25519.Sign(priv, payload)
+	b.Signature = bundle.BundleSignature{
+		Algorithm: "ed25519",
+		Value:     base64.StdEncoding.EncodeToString(sig),
+	}
+	raw, err := yaml.Marshal(b)
+	if err != nil {
+		t.Fatalf("marshal signed bundle: %v", err)
+	}
+	return raw
+}
+
+func mustParseBundle(t *testing.T, raw string) *bundle.RuntimeBundle {
+	t.Helper()
+	b, err := bundle.Parse([]byte(raw))
+	if err != nil {
+		t.Fatalf("parse bundle: %v", err)
+	}
+	return b
 }

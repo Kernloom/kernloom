@@ -165,7 +165,8 @@ kernloom/
 │   │   │   ├── shadow/        shadow/dry-run metric wrapper
 │   │   │   ├── signalengine/  KLShield heuristic signal engine
 │   │   │   └── telemetry/     telemetry → observations
-│   │   └── netfilter/         netfilter PEP (nftables + iptables)
+│   │   ├── netfilter/         netfilter PEP (nftables + iptables)
+│   │   └── openziti/          OpenZiti adapter package
 │   ├── pipeline/
 │   │   ├── runner.go          Generic pipeline runner
 │   │   └── graphpipeline/     Graph learning pipeline component
@@ -177,7 +178,7 @@ kernloom/
 │   ├── relationshiplearner/   Relationship extractor interface + implementations
 │   │   ├── network/           Generic L3/L4 network relationships
 │   │   ├── http/              Generic HTTP relationships
-│   │   └── ziti/              OpenZiti stub (TO MOVE: → pkg/adapters/openziti/)
+│   │   └── ...                Generic extractors only; vendor extractors live in adapters/
 │   ├── riskaggregator/        Signal risk aggregation
 │   ├── decisionengine/        Decision engine (FSM + signals → decisions)
 │   ├── adapterruntime/        Adapter lifecycle interface + EventBus
@@ -186,8 +187,6 @@ kernloom/
     ├── pdp/                   PDPConfig profiles (16 profiles, all node roles)
     └── policies/              LocalPolicyPack examples
 ```
-
-> **Note:** Items marked `TO MOVE` are vendor-specific code that should be in `pkg/adapters/<vendor>/`. See `.claude/17-adapter-boundary-and-vendor-isolation.md` for the full list of planned fixes.
 
 ---
 

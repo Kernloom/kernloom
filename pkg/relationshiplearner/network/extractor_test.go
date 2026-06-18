@@ -14,9 +14,9 @@ import (
 
 func flowObs(srcIP, dstIP, proto, dstPort string) observation.Observation {
 	return observation.Observation{
-		Type:   observation.TypeFlow,
-		Source: observation.SourceShield,
-		NodeID: "node-1",
+		Type:    observation.TypeFlow,
+		Source:  observation.ObservationSource("shield"),
+		NodeID:  "node-1",
 		Subject: observation.EntityRef{Kind: observation.KindIP, ID: srcIP},
 		Object:  observation.EntityRef{Kind: observation.KindIP, ID: dstIP},
 		Attributes: map[string]string{

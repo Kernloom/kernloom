@@ -192,3 +192,48 @@ func TestRevertExpiredMarksConflictOnFencingMismatch(t *testing.T) {
 		t.Fatalf("expected conflict lease, got %s", loaded.Status)
 	}
 }
+
+func TestReconcilePendingMarksUnknownApplyFailed(t *testing.T) {
+	now := time.Date(2026, 6, 17, 12, 0, 0, 0, time.UTC)
+	pep := &fakePEP{}
+	b, store := newBroker(t, pep, func() time.Time { return now })
+	defer store.Close()
+
+	lease := decision.ActionLease{
+		LeaseID:      "lease-pending",
+		DecisionID:   "decision-pending",
+		NodeID:       "node-1",
+		AdapterID:    pep.AdapterID(),
+		Target:       "ip:10.0.0.1",
+		Action:       "enforce.traffic.rate_limit",
+		Level:        "soft",
+		Status:       decision.ActionLeasePending,
+		FencingToken: "token-pending",
+		AppliedAt:    now.Add(-time.Minute),
+		ExpiresAt:    now.Add(time.Minute),
+	}
+	if err := store.UpsertActionLease(context.Background(), lease); err != nil {
+		t.Fatalf("seed pending lease: %v", err)
+	}
+
+	receipts, err := b.ReconcilePending(context.Background())
+	if err != nil {
+		t.Fatalf("reconcile pending: %v", err)
+	}
+	if len(receipts) != 1 || receipts[0].Status != decision.StatusFailed {
+		t.Fatalf("expected failed receipt, got %#v", receipts)
+	}
+	if pep.applyCalls != 0 || pep.revertCalls != 0 {
+		t.Fatalf("reconcile pending must not touch PEP: apply=%d revert=%d", pep.applyCalls, pep.revertCalls)
+	}
+	loaded, ok, err := store.GetActionLease(context.Background(), lease.LeaseID)
+	if err != nil || !ok {
+		t.Fatalf("load reconciled lease: ok=%v err=%v", ok, err)
+	}
+	if loaded.Status != decision.ActionLeaseFailed {
+		t.Fatalf("expected failed lease, got %s", loaded.Status)
+	}
+	if loaded.LastError == "" {
+		t.Fatal("expected diagnostic last_error")
+	}
+}

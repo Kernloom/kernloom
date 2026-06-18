@@ -13,8 +13,8 @@ import (
 
 func httpObs(subj, obj, method, route, status string) observation.Observation {
 	return observation.Observation{
-		Type:   observation.TypeHTTP,
-		Source: observation.SourceNginx,
+		Type:    observation.TypeHTTP,
+		Source:  observation.ObservationSource("nginx"),
 		Subject: observation.EntityRef{Kind: observation.KindWorkload, ID: subj},
 		Object:  observation.EntityRef{Kind: observation.KindService, ID: obj},
 		Attributes: map[string]string{

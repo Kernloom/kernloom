@@ -56,7 +56,6 @@ import (
 	"github.com/kernloom/kernloom/pkg/adapters/klshield/signalengine"
 	"github.com/kernloom/kernloom/pkg/adapters/klshield/telemetry"
 	netfilteradapter "github.com/kernloom/kernloom/pkg/adapters/netfilter"
-	"github.com/kernloom/kernloom/pkg/core/bundle"
 	celeval "github.com/kernloom/kernloom/pkg/core/cel"
 	"github.com/kernloom/kernloom/pkg/core/decision"
 	"github.com/kernloom/kernloom/pkg/core/featureset"
@@ -181,13 +180,19 @@ func main() {
 		applyPDPGraphToCfg(pdpc, &c)
 		applyPDPBaselineToCfg(pdpc, &c)
 		applyPDPAutotuneToCfg(pdpc, &c)
-		c.adapterParams = adapterParamsFromPDPConfig(pdpc)
-		applyPDPAdaptiveRatesToCfg(pdpc, &c)
+		adapterParams, err := adapterParamsFromPDPConfig(pdpc)
+		if err != nil {
+			log.Fatalf("load PDP adapter config: %v", err)
+		}
+		c.adapterParams = adapterParams
+		if err := applyPDPAdaptiveRatesToCfg(pdpc, &c); err != nil {
+			log.Fatalf("load PDP adaptive adapter config: %v", err)
+		}
 	} else {
 		// In managed mode: LKG bundle may override pdp_profile and adapters.
 		if c.Mode == string(corepolicy.ModeManaged) {
 			if lkgBytes := loadLastKnownGoodBundle(c.StatePath); lkgBytes != nil {
-				if b, err := bundle.Parse(lkgBytes); err == nil {
+				if b, err := parseTrustedRuntimeBundle(lkgBytes, &c); err == nil {
 					if b.Spec.PDPProfile != "" {
 						kliqLog.Printf("PDP profile from bundle: %s (was: %s)", b.Spec.PDPProfile, c.ProfileName)
 						c.ProfileName = b.Spec.PDPProfile
@@ -196,6 +201,8 @@ func main() {
 						kliqLog.Printf("Adapters from bundle: %s (was: %s)", b.Spec.Adapters, c.Adapters)
 						c.Adapters = b.Spec.Adapters
 					}
+				} else {
+					kliqLog.Printf("MANAGED: ignoring untrusted last-known-good bundle for profile/adapters: %v", err)
 				}
 			}
 		}
@@ -249,9 +256,11 @@ func main() {
 	// initialized with the wrong profile.
 	if c.FeatureProfile == "" {
 		if lkgBytes := loadLastKnownGoodBundle(c.StatePath); lkgBytes != nil {
-			if b, err := bundle.Parse(lkgBytes); err == nil && b.Spec.FeatureProfile != "" {
+			if b, err := parseTrustedRuntimeBundle(lkgBytes, &c); err == nil && b.Spec.FeatureProfile != "" {
 				c.FeatureProfile = b.Spec.FeatureProfile
 				kliqLog.Printf("Feature profile from bundle: %s", c.FeatureProfile)
+			} else if err != nil {
+				kliqLog.Printf("MANAGED: ignoring untrusted last-known-good bundle for feature profile: %v", err)
 			}
 		}
 	}

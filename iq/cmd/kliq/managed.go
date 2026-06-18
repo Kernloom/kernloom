@@ -26,6 +26,7 @@ import (
 	"github.com/kernloom/kernloom/iq/internal/lifecycle/bootstrapautotune"
 	lgraph "github.com/kernloom/kernloom/iq/internal/lifecycle/graph"
 	"github.com/kernloom/kernloom/pkg/core/bundle"
+	corepolicy "github.com/kernloom/kernloom/pkg/core/policy"
 )
 
 // managedState holds the bundle-related runtime state that is persisted
@@ -56,9 +57,9 @@ func applyBundleUpdate(
 		return
 	}
 
-	b, err := bundle.Parse(rawBundle)
+	b, err := parseTrustedRuntimeBundle(rawBundle, c)
 	if err != nil {
-		kliqLog.Printf("BUNDLE apply: parse failed: %v", err)
+		kliqLog.Printf("BUNDLE apply: trust/parse failed: %v", err)
 		return
 	}
 	if err := b.Validate(); err != nil {
@@ -72,6 +73,11 @@ func applyBundleUpdate(
 	// Rollback protection: reject bundles with an older generation.
 	if ms.BundleGeneration > 0 && b.Metadata.Generation < ms.BundleGeneration {
 		kliqLog.Printf("BUNDLE apply: rollback rejected gen=%d < current=%d", b.Metadata.Generation, ms.BundleGeneration)
+		return
+	}
+	if ms.BundleGeneration > 0 && b.Metadata.Generation == ms.BundleGeneration && ms.BundleHash != "" && newHash != ms.BundleHash {
+		kliqLog.Printf("BUNDLE apply: same-generation mutation rejected gen=%d current_hash=%s new_hash=%s",
+			b.Metadata.Generation, ms.BundleHash, newHash)
 		return
 	}
 
@@ -158,6 +164,20 @@ func loadLastKnownGoodBundle(statePath string) []byte {
 		return nil
 	}
 	return data
+}
+
+func parseTrustedRuntimeBundle(rawBundle []byte, c *cfg) (*bundle.RuntimeBundle, error) {
+	if c.Mode != string(corepolicy.ModeManaged) {
+		return bundle.Parse(rawBundle)
+	}
+	if c.PolicyVerifyKeyPath == "" {
+		return nil, fmt.Errorf("managed mode requires --policy-verify-key to verify runtime bundle signature")
+	}
+	pubKey, err := corepolicy.LoadPublicKey(c.PolicyVerifyKeyPath)
+	if err != nil {
+		return nil, fmt.Errorf("load runtime bundle verify key: %w", err)
+	}
+	return bundle.VerifyRuntimeBundle(rawBundle, pubKey)
 }
 
 // buildRuntimeStatus assembles the rich heartbeat payload for Forge.

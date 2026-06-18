@@ -15,7 +15,7 @@ func TestNewObservation(t *testing.T) {
 	}
 	subject.Labels = map[string]string{"role": "client"}
 
-	obs := NewObservation(SourceShield, TypeFlow, "node-001", subject)
+	obs := NewObservation(ObservationSource("shield"), TypeFlow, "node-001", subject)
 
 	if obs.ID == "" {
 		t.Error("expected non-empty ID")
@@ -23,8 +23,8 @@ func TestNewObservation(t *testing.T) {
 	if obs.Time.IsZero() {
 		t.Error("expected non-zero Time")
 	}
-	if obs.Source != SourceShield {
-		t.Errorf("expected source=%s, got %s", SourceShield, obs.Source)
+	if obs.Source != ObservationSource("shield") {
+		t.Errorf("expected source=%s, got %s", ObservationSource("shield"), obs.Source)
 	}
 	if obs.Type != TypeFlow {
 		t.Errorf("expected type=%s, got %s", TypeFlow, obs.Type)
@@ -41,7 +41,7 @@ func TestObservationChaining(t *testing.T) {
 	subject := EntityRef{Kind: KindIP, ID: "203.0.113.55"}
 	object := EntityRef{Kind: KindService, ID: "api-gateway"}
 
-	obs := NewObservation(SourceShield, TypeDrop, "node-001", subject).
+	obs := NewObservation(ObservationSource("shield"), TypeDrop, "node-001", subject).
 		SetObject(object).
 		SetMetric("packets", 42.0).
 		SetMetric("bytes", 4096.0).
@@ -66,13 +66,13 @@ func TestObservationChaining(t *testing.T) {
 func TestSeverityHintClamping(t *testing.T) {
 	subject := EntityRef{Kind: KindIP, ID: "1.1.1.1"}
 
-	obs1 := NewObservation(SourceShield, TypeFlow, "node-001", subject)
+	obs1 := NewObservation(ObservationSource("shield"), TypeFlow, "node-001", subject)
 	obs1.SetSeverityHint(-10)
 	if obs1.SeverityHint != 0 {
 		t.Errorf("expected severity clamped to 0, got %d", obs1.SeverityHint)
 	}
 
-	obs2 := NewObservation(SourceShield, TypeFlow, "node-001", subject)
+	obs2 := NewObservation(ObservationSource("shield"), TypeFlow, "node-001", subject)
 	obs2.SetSeverityHint(150)
 	if obs2.SeverityHint != 100 {
 		t.Errorf("expected severity clamped to 100, got %d", obs2.SeverityHint)
@@ -108,7 +108,7 @@ func TestEntityRef(t *testing.T) {
 
 func TestObservationSources(t *testing.T) {
 	sources := []ObservationSource{
-		SourceShield, SourceNginx, SourceZiti, SourceTrustd, SourceApp, SourceSyslog, SourceCilium, SourceCorrelate,
+		ObservationSource("shield"), ObservationSource("nginx"), ObservationSource("openziti"), SourceTrustd, SourceApp, SourceSyslog, ObservationSource("cilium"), SourceCorrelate,
 	}
 
 	for _, src := range sources {
@@ -125,7 +125,7 @@ func TestObservationTypes(t *testing.T) {
 	}
 
 	for _, obsType := range types {
-		obs := NewObservation(SourceShield, obsType, "node-001", EntityRef{Kind: KindIP, ID: "1.1.1.1"})
+		obs := NewObservation(ObservationSource("shield"), obsType, "node-001", EntityRef{Kind: KindIP, ID: "1.1.1.1"})
 		if obs.Type != obsType {
 			t.Errorf("expected type=%s, got %s", obsType, obs.Type)
 		}
@@ -133,7 +133,7 @@ func TestObservationTypes(t *testing.T) {
 }
 
 func TestMetricsNilInitialization(t *testing.T) {
-	obs := NewObservation(SourceShield, TypeFlow, "node-001", EntityRef{Kind: KindIP, ID: "1.1.1.1"})
+	obs := NewObservation(ObservationSource("shield"), TypeFlow, "node-001", EntityRef{Kind: KindIP, ID: "1.1.1.1"})
 	if obs.Metrics == nil {
 		t.Error("expected Metrics to be initialized, got nil")
 	}
@@ -167,7 +167,7 @@ func TestObservationWithLabels(t *testing.T) {
 		Labels: map[string]string{"role": "public-api", "env": "prod"},
 	}
 
-	obs := NewObservation(SourceShield, TypeFlow, "node-web-01", subject)
+	obs := NewObservation(ObservationSource("shield"), TypeFlow, "node-web-01", subject)
 	if obs.Subject.Labels["role"] != "public-api" {
 		t.Errorf("expected label role=public-api, got %s", obs.Subject.Labels["role"])
 	}

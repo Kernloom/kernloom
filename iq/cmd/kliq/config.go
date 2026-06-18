@@ -217,7 +217,7 @@ type cfg struct {
 	HardDirectiveRatePPS uint64
 
 	// adapterParams holds the Shield PEP adapter capability parameters,
-	// loaded from PDPConfig.Adapters.ShieldPEP or DefaultCapabilityParams().
+	// loaded from PDPConfig.spec.adapters.shield_pep or DefaultCapabilityParams().
 	adapterParams shieldpep.CapabilityParams
 
 	// Block gating

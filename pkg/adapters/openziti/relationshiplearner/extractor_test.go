@@ -13,10 +13,10 @@ import (
 
 func zitiObs(identity, service, posture, trustLevel string) observation.Observation {
 	return observation.Observation{
-		Source:  observation.SourceZiti,
+		Source:  zitiext.SourceOpenZiti,
 		Type:    observation.TypeConnection,
 		Subject: observation.EntityRef{Kind: observation.KindUser, ID: identity},
-		Object:  observation.EntityRef{Kind: observation.KindZitiService, ID: service},
+		Object:  observation.EntityRef{Kind: observation.KindService, ID: service},
 		Attributes: map[string]string{
 			"posture":     posture,
 			"trust_level": trustLevel,
@@ -46,7 +46,7 @@ func TestZitiExtract_Dials(t *testing.T) {
 func TestZitiExtract_SkipsNonZiti(t *testing.T) {
 	e := zitiext.New("node-1")
 	obs := []observation.Observation{{
-		Source:  observation.SourceShield,
+		Source:  observation.ObservationSource("shield"),
 		Type:    observation.TypeConnection,
 		Subject: observation.EntityRef{ID: "x"},
 		Object:  observation.EntityRef{ID: "y"},

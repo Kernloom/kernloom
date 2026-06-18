@@ -25,6 +25,8 @@ import (
 
 var logger = log.New(os.Stderr, "[shield-telemetry] ", log.LstdFlags)
 
+const SourceKLShield observation.ObservationSource = "shield"
+
 // Config holds the configuration for the Shield telemetry adapter.
 type Config struct {
 	// BPFfsRoot is the bpffs mount point (default: /sys/fs/bpf).
@@ -232,7 +234,7 @@ func (a *Adapter) poll(ctx context.Context, bus adapterruntime.EventBus, nowWall
 		}
 
 		obs := observation.NewObservation(
-			observation.SourceShield,
+			SourceKLShield,
 			observation.TypeFlow,
 			a.cfg.NodeID,
 			observation.EntityRef{Kind: observation.KindIP, ID: ip4String(k4)},
@@ -300,7 +302,7 @@ func (a *Adapter) poll(ctx context.Context, bus adapterruntime.EventBus, nowWall
 			}
 
 			obs := observation.NewObservation(
-				observation.SourceShield,
+				SourceKLShield,
 				observation.TypeFlow,
 				a.cfg.NodeID,
 				observation.EntityRef{Kind: observation.KindIP, ID: ip6String(ip6)},
@@ -382,7 +384,7 @@ func (a *Adapter) pollFlow4(ctx context.Context, bus adapterruntime.EventBus, no
 	for _, e := range batch {
 		srcIP := net.IPv4(e.k.SrcIP[0], e.k.SrcIP[1], e.k.SrcIP[2], e.k.SrcIP[3]).String()
 		obs := observation.NewObservation(
-			observation.SourceShield,
+			SourceKLShield,
 			observation.TypeFlow,
 			a.cfg.NodeID,
 			observation.EntityRef{Kind: observation.KindIP, ID: srcIP},

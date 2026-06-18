@@ -20,6 +20,7 @@ import (
 // LeaseStore is the durable journal used by the broker.
 type LeaseStore interface {
 	UpsertActionLease(context.Context, decision.ActionLease) error
+	ListActionLeasesByStatus(context.Context, decision.ActionLeaseStatus) ([]decision.ActionLease, error)
 	ListExpiredActionLeases(context.Context, time.Time) ([]decision.ActionLease, error)
 	UpdateActionLeaseStatus(context.Context, decision.ActionLease) error
 }
@@ -158,6 +159,32 @@ func (b *Broker) RevertExpired(ctx context.Context, now time.Time) ([]*decision.
 		if err != nil {
 			return receipts, err
 		}
+	}
+	return receipts, nil
+}
+
+// ReconcilePending marks leases that were persisted before PEP apply completed
+// as failed. This handles crashes between the pending journal write and the
+// active status update without guessing whether enforcement happened.
+func (b *Broker) ReconcilePending(ctx context.Context) ([]*decision.EnforcementReceipt, error) {
+	leases, err := b.store.ListActionLeasesByStatus(ctx, decision.ActionLeasePending)
+	if err != nil {
+		return nil, err
+	}
+	now := b.now().UTC()
+	receipts := make([]*decision.EnforcementReceipt, 0, len(leases))
+	for _, lease := range leases {
+		lease.Status = decision.ActionLeaseFailed
+		lease.LastError = "pending lease found during broker startup; apply outcome unknown"
+		receipt := decision.NewEnforcementReceipt(lease.DecisionID, b.nodeID, lease.AdapterID, decision.StatusFailed).SetLease(lease)
+		receipt.AppliedAt = lease.AppliedAt
+		receipt.RevertedAt = &now
+		receipt.RevertStatus = decision.RevertStatusFailed
+		receipt.SetMessage(lease.LastError)
+		if err := b.store.UpdateActionLeaseStatus(ctx, lease); err != nil {
+			return receipts, err
+		}
+		receipts = append(receipts, receipt)
 	}
 	return receipts, nil
 }

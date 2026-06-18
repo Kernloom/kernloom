@@ -157,7 +157,7 @@ spec:
 	}
 }
 
-func TestAdapters_ShieldPEP_Parsed(t *testing.T) {
+func TestAdapters_RawSectionCanDecode(t *testing.T) {
 	yaml := `
 apiVersion: kernloom.io/v1alpha1
 kind: PDPConfig
@@ -185,12 +185,19 @@ spec:
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	a := c.Spec.Adapters.ShieldPEP
+	var a struct {
+		SoftRatePPS uint64       `yaml:"soft_rate_pps"`
+		Cooldown    pdp.Duration `yaml:"cooldown"`
+	}
+	found, err := c.Spec.Adapters.Decode("shield_pep", &a)
+	if err != nil {
+		t.Fatalf("decode adapter section: %v", err)
+	}
+	if !found {
+		t.Fatal("expected shield_pep adapter section")
+	}
 	if a.SoftRatePPS != 600 {
 		t.Errorf("expected soft_rate_pps=600, got %d", a.SoftRatePPS)
-	}
-	if a.HardRatePPS != 150 {
-		t.Errorf("expected hard_rate_pps=150, got %d", a.HardRatePPS)
 	}
 	if a.Cooldown.D.Seconds() != 30 {
 		t.Errorf("expected cooldown=30s, got %s", a.Cooldown.D)

@@ -60,7 +60,7 @@ func TestFakeEngine_Evaluate_Empty(t *testing.T) {
 func TestFakeEngine_Evaluate_WithObservations(t *testing.T) {
 	eng := &fakeEngine{name: "fake"}
 
-	obs := observation.NewObservation(observation.SourceShield, observation.TypeFlow, "node-1",
+	obs := observation.NewObservation(observation.ObservationSource("shield"), observation.TypeFlow, "node-1",
 		observation.EntityRef{Kind: observation.KindIP, ID: "10.0.0.5"})
 	obs.SetSeverityHint(70)
 

@@ -22,6 +22,8 @@ package pdp
 import (
 	"fmt"
 	"time"
+
+	"gopkg.in/yaml.v3"
 )
 
 const (
@@ -66,8 +68,8 @@ type Spec struct {
 	// Baseline controls per-source traffic baseline learning and deviation detection.
 	Baseline BaselineSpec `yaml:"baseline,omitempty"`
 
-	// Adapters holds generic built-in adapter parameters that are still owned by
-	// the core runtime. Product-specific adapter config is parsed by the adapter.
+	// Adapters holds raw adapter-owned sections keyed by adapter config name.
+	// Core keeps these opaque; each adapter parses its own section.
 	Adapters AdaptersSpec `yaml:"adapters,omitempty"`
 
 	// Autotune controls how kliq learns trigger thresholds (TrigPPS/TrigSyn/
@@ -280,37 +282,22 @@ type GraphExcludeSpec struct {
 
 // ─── Adapters ─────────────────────────────────────────────────────────────────
 
-// AdaptersSpec holds concrete parameters still owned by the core runtime.
-// Vendor/product-specific adapters parse their own config sections so core does
-// not grow adapter-specific Go types.
-type AdaptersSpec struct {
-	// ShieldPEP configures the built-in Kernloom Shield XDP/eBPF adapter.
-	ShieldPEP ShieldPEPAdapterSpec `yaml:"shield_pep,omitempty"`
-}
+// AdaptersSpec keeps adapter-specific YAML sections opaque to core PDP config.
+type AdaptersSpec map[string]yaml.Node
 
-// ShieldPEPAdapterSpec is the Shield-specific implementation of the abstract
-// network.rate_limit_source and network.block_source capabilities.
-type ShieldPEPAdapterSpec struct {
-	// Static rate/burst: used when adaptive mode is disabled (factors = 0).
-	SoftRatePPS uint64 `yaml:"soft_rate_pps"`
-	SoftBurst   uint64 `yaml:"soft_burst"`
-	HardRatePPS uint64 `yaml:"hard_rate_pps"`
-	HardBurst   uint64 `yaml:"hard_burst"`
-
-	// Adaptive rate factors: when > 0, the effective rate is computed as
-	// trig_pps × factor, updated every autotune cycle. This keeps enforcement
-	// proportional to the learned traffic baseline instead of using fixed values.
-	//
-	//   soft_rate = trig_pps × SoftRateFactor  (e.g. 0.5 = 50% of normal)
-	//   hard_rate = trig_pps × HardRateFactor  (e.g. 0.1 = 10% of normal)
-	//
-	// Burst is derived as rate × 2 (two seconds of headroom).
-	// Static rate/burst fields are ignored when the corresponding factor is set.
-	SoftRateFactor float64 `yaml:"soft_rate_factor,omitempty"`
-	HardRateFactor float64 `yaml:"hard_rate_factor,omitempty"`
-
-	// Cooldown is the minimum time between FSM level transitions.
-	Cooldown Duration `yaml:"cooldown"`
+// Decode decodes one adapter-owned section into out.
+func (a AdaptersSpec) Decode(name string, out any) (bool, error) {
+	if len(a) == 0 {
+		return false, nil
+	}
+	node, ok := a[name]
+	if !ok || node.Kind == 0 {
+		return false, nil
+	}
+	if err := node.Decode(out); err != nil {
+		return true, fmt.Errorf("spec.adapters.%s: %w", name, err)
+	}
+	return true, nil
 }
 
 // ─── Duration ─────────────────────────────────────────────────────────────────

@@ -15,13 +15,9 @@ import (
 type ObservationSource string
 
 const (
-	SourceShield    ObservationSource = "shield"    // eBPF/XDP telemetry
-	SourceNginx     ObservationSource = "nginx"     // HTTP/access logs
-	SourceZiti      ObservationSource = "ziti"      // OpenZiti session events
 	SourceTrustd    ObservationSource = "trustd"    // Local trust daemon
 	SourceApp       ObservationSource = "app"       // Application instrumentation
 	SourceSyslog    ObservationSource = "syslog"    // Syslog/journald
-	SourceCilium    ObservationSource = "cilium"    // Cilium eBPF
 	SourceCorrelate ObservationSource = "correlate" // Correlate global signals as obs
 )
 
@@ -59,18 +55,17 @@ type EntityRef = entity.Ref
 
 // Re-export entity.Kind constants so callers using observation.KindXxx continue to compile.
 const (
-	KindIP          = entity.KindIP
-	KindCIDR        = entity.KindCIDR
-	KindNode        = entity.KindNode
-	KindService     = entity.KindService
-	KindUser        = entity.KindUser
-	KindWorkload    = entity.KindWorkload
-	KindProcess     = entity.KindProcess
-	KindNamespace   = entity.KindNamespace
-	KindHTTPRoute   = entity.KindHTTPRoute
-	KindSocket      = entity.KindSocket
-	KindZitiService = entity.KindZitiService
-	KindTrustState  = entity.KindTrustState
+	KindIP         = entity.KindIP
+	KindCIDR       = entity.KindCIDR
+	KindNode       = entity.KindNode
+	KindService    = entity.KindService
+	KindUser       = entity.KindUser
+	KindWorkload   = entity.KindWorkload
+	KindProcess    = entity.KindProcess
+	KindNamespace  = entity.KindNamespace
+	KindHTTPRoute  = entity.KindHTTPRoute
+	KindSocket     = entity.KindSocket
+	KindTrustState = entity.KindTrustState
 )
 
 // Observation is a normalized, timestamped observation about activity in the system.

@@ -90,9 +90,15 @@ func pdpConfigToProfile(c *pdp.Config) profile {
 
 // adapterParamsFromPDPConfig extracts Shield PEP adapter parameters from the
 // PDPConfig. Returns defaults for any field that is zero (not configured).
-func adapterParamsFromPDPConfig(c *pdp.Config) shieldpep.CapabilityParams {
+func adapterParamsFromPDPConfig(c *pdp.Config) (shieldpep.CapabilityParams, error) {
 	p := shieldpep.DefaultCapabilityParams()
-	a := c.Spec.Adapters.ShieldPEP
+	a, found, err := shieldpep.PDPAdapterConfigFrom(c.Spec.Adapters)
+	if err != nil {
+		return p, err
+	}
+	if !found {
+		return p, nil
+	}
 	if a.SoftRatePPS > 0 {
 		p.SoftRatePPS = a.SoftRatePPS
 	}
@@ -108,19 +114,26 @@ func adapterParamsFromPDPConfig(c *pdp.Config) shieldpep.CapabilityParams {
 	if a.Cooldown.D > 0 {
 		p.Cooldown = a.Cooldown.D
 	}
-	return p
+	return p, nil
 }
 
 // applyPDPAdaptiveRatesToCfg reads the adaptive rate factors from PDPConfig and
 // writes them into cfg. Only non-zero values override CLI defaults (0 = disabled).
-func applyPDPAdaptiveRatesToCfg(dc *pdp.Config, c *cfg) {
-	a := dc.Spec.Adapters.ShieldPEP
+func applyPDPAdaptiveRatesToCfg(dc *pdp.Config, c *cfg) error {
+	a, found, err := shieldpep.PDPAdapterConfigFrom(dc.Spec.Adapters)
+	if err != nil {
+		return err
+	}
+	if !found {
+		return nil
+	}
 	if a.SoftRateFactor > 0 {
 		c.SoftRateFactor = a.SoftRateFactor
 	}
 	if a.HardRateFactor > 0 {
 		c.HardRateFactor = a.HardRateFactor
 	}
+	return nil
 }
 
 // rulesFromPolicyPack extracts enforcement TTLs and capabilities from the Rules

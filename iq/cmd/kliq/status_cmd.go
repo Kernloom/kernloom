@@ -338,7 +338,7 @@ func min3(a, b int) int {
 // Usage: kliq runtime status [profile]
 func runRuntimeStatus(profile featureset.RuntimeProfile) {
 	// klshield-light means XDP only — KLIQ is not part of this setup at all.
-	if profile == featureset.ProfileKLShieldLight {
+	if string(profile) == "klshield-light" {
 		fmt.Println("Profile: klshield-light")
 		fmt.Println()
 		fmt.Println("  This profile runs klshield (XDP) only — no kliq needed.")

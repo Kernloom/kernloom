@@ -11,9 +11,6 @@ package featureset
 type RuntimeProfile string
 
 const (
-	// ProfileKLShieldLight: XDP only. No kliq process needed or useful.
-	// Run klshield attach-xdp and manage deny/allow/RL via klshield CLI directly.
-	ProfileKLShieldLight RuntimeProfile = "klshield-light"
 	// ProfileDOSLight: source heuristic + global autotune. No graph or SQLite.
 	ProfileDOSLight RuntimeProfile = "dos-light"
 	// ProfileIQLearning: adds per-source EWMA baseline (generic engine) on top of dos-light.
@@ -59,9 +56,6 @@ type FeatureSet struct {
 // Unknown profiles fall back to ProfileDOSLight.
 func FeaturesFor(profile RuntimeProfile) FeatureSet {
 	switch profile {
-	case ProfileKLShieldLight:
-		return FeatureSet{ShieldXDP: true}
-
 	case ProfileDOSLight:
 		return FeatureSet{
 			ShieldXDP:       true,
