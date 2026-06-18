@@ -51,6 +51,7 @@ import (
 	"github.com/kernloom/kernloom/iq/internal/forgeagent"
 	"github.com/kernloom/kernloom/iq/internal/lifecycle/bootstrapautotune"
 	lgraph "github.com/kernloom/kernloom/iq/internal/lifecycle/graph"
+	klshieldautotuner "github.com/kernloom/kernloom/pkg/adapters/klshield/autotuner"
 	"github.com/kernloom/kernloom/pkg/adapterruntime"
 	"github.com/kernloom/kernloom/pkg/adapters/klshield/client"
 	"github.com/kernloom/kernloom/pkg/adapters/klshield/guard"
@@ -83,6 +84,25 @@ import (
 )
 
 var kliqLog = log.New(os.Stderr, "[kliq] ", log.LstdFlags)
+
+const kliqUsage = `Kernloom IQ — local intelligence and enforcement agent
+
+Usage:
+  kliq run [flags...]         Start the KLIQ runtime (DoS prevention / microsegmentation)
+  kliq graph <subcommand>     Communication graph: edges, baselines, freeze, approve-ip, ...
+  kliq status                 Show current runtime status (autotune, FSM, bootstrap)
+  kliq entities               Entity store browser
+  kliq relationships          Relationship store browser
+  kliq baselines              Metric baseline store browser
+  kliq learning               Learning guard / exclusion store
+  kliq storage                SQLite state store info
+
+  kliq run --help             Show all runtime flags
+
+Examples:
+  kliq run --pdp-config=/etc/kernloom/pdp/node.yaml --dry-run=true
+  kliq graph edges --sort=state
+  kliq status`
 
 // graphStrikeMsg carries FSM strike credits from a graph.new_edge_after_freeze signal
 // to the main tick loop where state4/state6 are owned.
@@ -126,15 +146,28 @@ type prevV6 struct {
 //	§8 Main tick loop       (FSM evaluation, autotune — core of KLIQ)
 func main() {
 	// ── §1 Subcommand dispatch ───────────────────────────────────────────────
-	// Handle subcommands before flag parsing so they work standalone.
-	// All read-path subcommands use the state store (kliq-state.db), not the
-	// old graphstore.  --db overrides this default for all subcommands.
+	// kliq requires an explicit first argument:
+	//   kliq run [flags...]   — start the KLIQ runtime
+	//   kliq graph <sub>      — graph subcommands
+	//   kliq status           — show runtime status
+	//   kliq entities         — entity store
+	//   kliq relationships    — relationship store
+	//   kliq baselines        — baseline engine
+	//   kliq learning         — learning guard
+	//   kliq storage          — SQLite store
+	//
+	// An unknown or missing first argument is an error — this prevents
+	// accidentally starting the KLIQ runtime when mistyping a subcommand.
 	const defaultStateDB = "/var/lib/kernloom/iq/kliq-state.db"
 	const defaultStateFile = "/var/lib/kernloom/iq/state.json"
 
+	// Extract first arg before --db parsing so we can dispatch early.
+	firstArg := ""
+	if len(os.Args) >= 2 {
+		firstArg = os.Args[1]
+	}
+
 	// Allow --db <path> to override the state store path for subcommands.
-	// This must be parsed before handleXxx calls so that e.g.
-	// "kliq graph edges --db /tmp/test.db" works.
 	subCmdDB := defaultStateDB
 	for i, a := range os.Args[1:] {
 		if a == "--db" && i+2 < len(os.Args) {
@@ -144,31 +177,61 @@ func main() {
 		}
 	}
 
-	if handleGraphSubcommand(
-		subCmdDB,
-		"/opt/kernloom/attested/etc/frozen-graph.yaml",
-		"",
-	) {
+	switch firstArg {
+	case "run":
+		// Remove "run" from os.Args so flag.Parse() sees the actual flags.
+		os.Args = append([]string{os.Args[0]}, os.Args[2:]...)
+
+	case "graph":
+		if !handleGraphSubcommand(subCmdDB, "/opt/kernloom/attested/etc/frozen-graph.yaml", "") {
+			fmt.Fprintln(os.Stderr, "usage: kliq graph <edges|baselines|freeze|approve-ip|deny-ip|export|reset>")
+			os.Exit(1)
+		}
 		return
-	}
-	if handleStatusSubcommand(defaultStateFile, subCmdDB) {
+	case "status":
+		if !handleStatusSubcommand(defaultStateFile, subCmdDB) {
+			fmt.Fprintln(os.Stderr, "usage: kliq status [--state-file <path>]")
+			os.Exit(1)
+		}
 		return
-	}
-	if handleEntitiesSubcommand(subCmdDB) {
+	case "entities":
+		if !handleEntitiesSubcommand(subCmdDB) {
+			fmt.Fprintln(os.Stderr, "usage: kliq entities [--db <path>]")
+			os.Exit(1)
+		}
 		return
-	}
-	if handleRelationshipsSubcommand(subCmdDB, "") {
+	case "relationships":
+		if !handleRelationshipsSubcommand(subCmdDB, "") {
+			fmt.Fprintln(os.Stderr, "usage: kliq relationships [--db <path>]")
+			os.Exit(1)
+		}
 		return
-	}
-	if handleBaselinesGenericSubcommand(subCmdDB) {
+	case "baselines":
+		if !handleBaselinesGenericSubcommand(subCmdDB) {
+			fmt.Fprintln(os.Stderr, "usage: kliq baselines [--db <path>]")
+			os.Exit(1)
+		}
 		return
-	}
-	if handleLearningSubcommand(subCmdDB) {
+	case "learning":
+		if !handleLearningSubcommand(subCmdDB) {
+			fmt.Fprintln(os.Stderr, "usage: kliq learning [--db <path>]")
+			os.Exit(1)
+		}
 		return
-	}
-	if handleStorageSubcommand(subCmdDB) {
+	case "storage":
+		if !handleStorageSubcommand(subCmdDB) {
+			fmt.Fprintln(os.Stderr, "usage: kliq storage [--db <path>]")
+			os.Exit(1)
+		}
 		return
+	case "", "--help", "-h":
+		fmt.Fprintln(os.Stderr, kliqUsage)
+		os.Exit(0)
+	default:
+		fmt.Fprintf(os.Stderr, "kliq: unknown command %q\n\n%s\n", firstArg, kliqUsage)
+		os.Exit(1)
 	}
+
 	// ── §2 Config + PDP setup ───────────────────────────────────────────────
 	c := parseFlags()
 
@@ -1075,26 +1138,29 @@ func main() {
 	state4 := make(map[[4]byte]fsm.State, 64_000)
 	state6 := make(map[[16]byte]fsm.State, 64_000)
 
-	resPPS := newReservoir(50_000)
-	resSyn := newReservoir(50_000)
-	resScan := newReservoir(50_000)
-	resBps := newReservoir(50_000)
+	// KLShield-specific autotune: reservoir sampling + median/MAD threshold calculation.
+	// Config and thresholds live in pkg/adapters/klshield/autotuner — out of this orchestrator.
+	klshieldAt := klshieldautotuner.New(
+		klshieldautotuner.Thresholds{
+			TrigPPS: c.TrigPPS, TrigSyn: c.TrigSyn, TrigScan: c.TrigScan, TrigBPS: c.TrigBPS,
+		},
+		klshieldautotuner.Config{
+			MinSamples:                c.AutoMinSamples,
+			FloorPPS:                  c.AutoFloorPPS,
+			FloorSyn:                  c.AutoFloorSyn,
+			FloorScan:                 c.AutoFloorScan,
+			FloorBPS:                  c.AutoFloorBPS,
+			MinWindowsBeforeDownscale: c.BootstrapMinWindowsBeforeDownscale,
+			MinSourcesBeforeDownscale: c.BootstrapMinSourcesBeforeDownscale,
+		},
+		50_000,
+	)
 
-	lastTune := time.Now()
-	if stFile != nil && !stFile.Active.UpdatedAt.IsZero() {
-		lastTune = stFile.Active.UpdatedAt
-	}
 	totalLearnTicks := 0
 	cleanLearnTicks := 0
 
-	// Autotune quiet-node fix: consecutive skip counter.
-	// After 2 skips (2× interval) we proceed with available samples so quiet
-	// nodes are not permanently locked out of autotune.
-	autotuneSkipCount := 0
-
-	// Bootstrap downscale guards.
-	bootstrapCompletedWindows := 0
-	bootstrapDistinctSources := make(map[string]bool, 256)
+	// Note: autotuneSkipCount and bootstrapCompletedWindows are now owned by
+	// pkg/adapters/klshield/autotuner.Autotuner (klshieldAt).
 
 	// Baseline totals for drop-ratio gating.
 	var prevTotals shieldclient.Totals
@@ -1397,7 +1463,6 @@ func main() {
 
 				if dPkts > 0 || dSyn > 0 || dScan > 0 {
 					seenForLearn++
-					bootstrapDistinctSources[subject4.ID] = true
 					if fsmM4.Severity >= c.LearnSevGT {
 						highSevCount++
 					}
@@ -1483,7 +1548,6 @@ func main() {
 
 				if dPkts > 0 || dSyn > 0 || dScan > 0 {
 					seenForLearn++
-					bootstrapDistinctSources[subject6.ID] = true
 					if fsmM6.Severity >= c.LearnSevGT {
 						highSevCount++
 					}
@@ -1645,10 +1709,10 @@ func main() {
 		inCands6 := make(map[[16]byte]bool)
 		for _, m := range cands {
 			if m.IPVer == 4 {
-				state4[m.IP4] = processCandidate4(m, state4[m.IP4], nowWall, c, wl, fb, resolver, executor, resPPS, resSyn, resScan, resBps, clean)
+				state4[m.IP4] = processCandidate4(m, state4[m.IP4], nowWall, c, wl, fb, resolver, executor, klshieldAt, clean)
 				inCands4[m.IP4] = true
 			} else {
-				state6[m.IP6] = processCandidate6(m, state6[m.IP6], nowWall, c, wl, fb, resolver, executor, resPPS, resSyn, resScan, resBps, clean)
+				state6[m.IP6] = processCandidate6(m, state6[m.IP6], nowWall, c, wl, fb, resolver, executor, klshieldAt, clean)
 				inCands6[m.IP6] = true
 			}
 		}
@@ -1737,10 +1801,12 @@ func main() {
 			topSummary := "none"
 			if len(cands) > 0 {
 				top := cands[0]
-				topSummary = fmt.Sprintf("%s sev=%.2f pps=%.0f bps=%s syn=%.0f scan=%.0f", top.ipString(), top.Severity, top.PPS, fmtBPS(top.Bps), top.SynRate, top.ScanRate)
+				topSummary = fmt.Sprintf("%s sev=%.2f", top.ipString(), top.Severity)
 			}
-			kliqLog.Printf("TICK#%d sources=%d cands=%d reservoir=%d clean=%v fsm{soft=%d hard=%d block=%d} trig{pps=%.0f bps=%s syn=%.0f scan=%.0f} top: %s",
-				tickN, seenForLearn, len(cands), resPPS.Len(), clean, softN, hardN, blockN, c.TrigPPS, fmtBPS(c.TrigBPS), c.TrigSyn, c.TrigScan, topSummary)
+			t := klshieldAt.CurrentThresholds()
+			kliqLog.Printf("TICK#%d sources=%d cands=%d samples=%d clean=%v fsm{soft=%d hard=%d block=%d} thresholds{pps=%.0f bps=%s syn=%.0f scan=%.0f} top: %s",
+				tickN, seenForLearn, len(cands), klshieldAt.SampleCount(), clean, softN, hardN, blockN,
+				t.TrigPPS, fmtBPS(t.TrigBPS), t.TrigSyn, t.TrigScan, topSummary)
 		}
 
 		// Housekeeping: bound memory.
@@ -1823,7 +1889,7 @@ func main() {
 			}
 		}
 
-		// Autotune schedule.
+		// Autotune — policy is computed here; threshold math lives in the KLShield adapter.
 		steadyEveryEff := c.AutoEvery
 		if c.Bootstrap {
 			steadyEveryEff = c.SteadyEvery
@@ -1846,162 +1912,86 @@ func main() {
 		// Keep BootstrapActive in sync so the FSM block cap is applied correctly.
 		c.BootstrapActive = pol.Active
 
-		if c.AutoTune && pol.Every > 0 && time.Since(lastTune) >= pol.Every {
-			n := minInt(len(resPPS.data), len(resSyn.data), len(resScan.data))
+		if c.AutoTune {
 			cleanRatio := 0.0
 			if totalLearnTicks > 0 {
 				cleanRatio = float64(cleanLearnTicks) / float64(totalLearnTicks)
 			}
-
-			if n < c.AutoMinSamples {
-				autotuneSkipCount++
-				// 2× failsafe: after 2 consecutive skips proceed with whatever
-				// samples exist so quiet nodes are not permanently locked out.
-				// Require ≥50 samples to avoid running on empty data.
-				if n < 50 || autotuneSkipCount < 2 {
-					kliqLog.Printf("AUTOTUNE skipped: not enough samples (have=%d need=%d skip=%d) cleanRatio=%.4f",
-						n, c.AutoMinSamples, autotuneSkipCount, cleanRatio)
-					lastTune = time.Now()
-					continue
-				}
-				kliqLog.Printf("AUTOTUNE proceeding with limited samples after %d skips (have=%d need=%d) cleanRatio=%.4f",
-					autotuneSkipCount, n, c.AutoMinSamples, cleanRatio)
-			}
-			autotuneSkipCount = 0 // reset on successful run
-
-			// Bootstrap downscale guard (optional, default disabled).
-			// Only active when bootstrap-min-windows > 0. The floor
-			// (autotune-floor-pps) is the primary protection against collapse.
-			distinctSourceCount := len(bootstrapDistinctSources)
-			guardEnabled := pol.Active && c.BootstrapMinWindowsBeforeDownscale > 0
-			canDownscale := !guardEnabled ||
-				(bootstrapCompletedWindows >= c.BootstrapMinWindowsBeforeDownscale &&
-					(c.BootstrapMinSourcesBeforeDownscale == 0 ||
-						distinctSourceCount >= c.BootstrapMinSourcesBeforeDownscale))
-
-			mPPS := median(resPPS.data)
-			mdPPS := mad(resPPS.data, mPPS)
-			mSyn := median(resSyn.data)
-			mdSyn := mad(resSyn.data, mSyn)
-			mScan := median(resScan.data)
-			mdScan := mad(resScan.data, mScan)
-
-			targetPPS := math.Max(c.AutoFloorPPS, mPPS+pol.K*mdPPS)
-			targetSyn := math.Max(c.AutoFloorSyn, mSyn+pol.K*mdSyn)
-			targetScan := math.Max(c.AutoFloorScan, mScan+pol.K*mdScan)
-
-			// Apply downscale guard when active: clamp targets to current values
-			// from below so triggers can only rise, not fall, this cycle.
-			if !canDownscale {
-				if targetPPS < c.TrigPPS {
-					kliqLog.Printf("AUTOTUNE guard: downscale blocked (windows=%d need=%d sources=%d need=%d) — pps target %.1f clamped to %.1f",
-						bootstrapCompletedWindows, c.BootstrapMinWindowsBeforeDownscale,
-						distinctSourceCount, c.BootstrapMinSourcesBeforeDownscale,
-						targetPPS, c.TrigPPS)
-					targetPPS = c.TrigPPS
-				}
-				if targetSyn < c.TrigSyn {
-					targetSyn = c.TrigSyn
-				}
-				if targetScan < c.TrigScan {
-					targetScan = c.TrigScan
-				}
+			atPol := klshieldautotuner.Policy{
+				Active:  pol.Active,
+				Every:   pol.Every,
+				K:       pol.K,
+				MaxUp:   pol.MaxUp,
+				MaxDown: pol.MaxDown,
+				Alpha:   pol.Alpha,
+				Phase:   pol.Phase,
 			}
 
-			targetPPS = capChangeDir(c.TrigPPS, targetPPS, pol.MaxUp, pol.MaxDown)
-			targetSyn = capChangeDir(c.TrigSyn, targetSyn, pol.MaxUp, pol.MaxDown)
-			targetScan = capChangeDir(c.TrigScan, targetScan, pol.MaxUp, pol.MaxDown)
+			if r, ok := klshieldAt.Tick(nowWall, atPol, cleanRatio); ok {
+				t := r.NewThresholds
+				c.TrigPPS, c.TrigSyn, c.TrigScan, c.TrigBPS = t.TrigPPS, t.TrigSyn, t.TrigScan, t.TrigBPS
 
-			// EWMA smoothing is applied only in steady-state (pol.Active == false).
-			// During bootstrap the cap (maxDown) alone is the intended brake —
-			// stacking Alpha on top reduces the effective per-cycle drop from 10%
-			// to ~1%, preventing the fast convergence bootstrap is designed for.
-			if !pol.Active && pol.Alpha > 0 && pol.Alpha < 1 {
-				targetPPS = c.TrigPPS*(1-pol.Alpha) + targetPPS*pol.Alpha
-				targetSyn = c.TrigSyn*(1-pol.Alpha) + targetSyn*pol.Alpha
-				targetScan = c.TrigScan*(1-pol.Alpha) + targetScan*pol.Alpha
-			}
-
-			oldPPS, oldSyn, oldScan := c.TrigPPS, c.TrigSyn, c.TrigScan
-			c.TrigPPS, c.TrigSyn, c.TrigScan = targetPPS, targetSyn, targetScan
-
-			// BPS autotune: only when AutoFloorBPS > 0 (opt-in).
-			oldBPS := c.TrigBPS
-			if c.AutoFloorBPS > 0 && len(resBps.data) >= c.AutoMinSamples {
-				mBps := median(resBps.data)
-				mdBps := mad(resBps.data, mBps)
-				targetBPS := math.Max(c.AutoFloorBPS, mBps+pol.K*mdBps)
-				targetBPS = capChangeDir(c.TrigBPS, targetBPS, pol.MaxUp, pol.MaxDown)
-				if !pol.Active && pol.Alpha > 0 && pol.Alpha < 1 {
-					targetBPS = c.TrigBPS*(1-pol.Alpha) + targetBPS*pol.Alpha
-				}
-				c.TrigBPS = targetBPS
-			}
-
-			lastTune = time.Now()
-			bootstrapCompletedWindows++
-			// Reset distinct-source window for the next autotune cycle.
-			bootstrapDistinctSources = make(map[string]bool, 256)
-
-			engine.UpdateConfig(shieldheuristic.Config{
-				NodeID:  nodeID,
-				TrigPPS: c.TrigPPS, TrigSyn: c.TrigSyn, TrigScan: c.TrigScan, TrigBPS: c.TrigBPS,
-				WPPS: c.WPPS, WSyn: c.WSyn, WScan: c.WScan, WBps: c.WBps,
-				SevCap: c.SevCap,
-			})
-
-			// Keep the graph learner's anti-poisoning cap in sync with the
-			// just-learned host triggers. Without this it stays on the cold-start
-			// bootstrap values and either over-rejects (cap too low) or fails to
-			// reject attack-level traffic (cap too high) once autotune diverges.
-			if gpAdapter != nil {
-				gpAdapter.UpdateTriggers(c.TrigPPS, c.TrigBPS)
-			}
-
-			kliqLog.Printf("AUTOTUNE applied: trig_pps %.1f->%.1f trig_syn %.1f->%.1f trig_scan %.1f->%.1f trig_bps %.0f->%.0f (median+MAD k=%.2f) samples=%d cleanRatio=%.4f clean=%v dropRatio=%.4f phase=%s",
-				oldPPS, c.TrigPPS, oldSyn, c.TrigSyn, oldScan, c.TrigScan, oldBPS, c.TrigBPS, pol.K, n, cleanRatio, clean, dropRatio, pol.Phase)
-
-			if c.StatePath != "" {
-				st := stFile
-				if st == nil {
-					st = &stateFile{Version: 1}
-				}
-				rev := st.Active.Revision + 1
-				mBpsHist := median(resBps.data)
-				mdBpsHist := mad(resBps.data, mBpsHist)
-				st.History = append(st.History, stateHistory{
-					Revision:  rev,
-					At:        time.Now(),
-					Trig:      trigState{TrigPPS: c.TrigPPS, TrigSyn: c.TrigSyn, TrigScan: c.TrigScan, TrigBPS: c.TrigBPS},
-					MedianPPS: mPPS, MadPPS: mdPPS,
-					MedianSyn: mSyn, MadSyn: mdSyn,
-					MedianScan: mScan, MadScan: mdScan,
-					MedianBPS: mBpsHist, MadBPS: mdBpsHist,
-					SampleCount: n,
-					CleanRatio:  cleanRatio,
-					Notes:       fmt.Sprintf("autotune median+mad dropRatio=%.4f phase=%s", dropRatio, pol.Phase),
+				engine.UpdateConfig(shieldheuristic.Config{
+					NodeID:  nodeID,
+					TrigPPS: c.TrigPPS, TrigSyn: c.TrigSyn, TrigScan: c.TrigScan, TrigBPS: c.TrigBPS,
+					WPPS: c.WPPS, WSyn: c.WSyn, WScan: c.WScan, WBps: c.WBps,
+					SevCap: c.SevCap,
 				})
-				if len(st.History) > c.HistoryKeep && c.HistoryKeep > 0 {
-					st.History = st.History[len(st.History)-c.HistoryKeep:]
+				if gpAdapter != nil {
+					gpAdapter.UpdateTriggers(c.TrigPPS, c.TrigBPS)
 				}
-				st.Active = stateActive{
-					Profile:     p.Name,
-					Revision:    rev,
-					UpdatedAt:   time.Now(),
-					Trig:        trigState{TrigPPS: c.TrigPPS, TrigSyn: c.TrigSyn, TrigScan: c.TrigScan, TrigBPS: c.TrigBPS},
-					Tune:        tuneMeta{Method: "median_mad", Window: "reservoir", K: pol.K, SigmaFactor: 1.4826},
-					Bootstrap:   bs,
-					ConfigHash:  cfgHash,
-					SampleCount: n,
-					CleanRatio:  cleanRatio,
-					Notes:       "autotune",
+
+				kliqLog.Printf("AUTOTUNE applied: trig_pps %.1f->%.1f trig_syn %.1f->%.1f trig_scan %.1f->%.1f trig_bps %.0f->%.0f (median+MAD k=%.2f) samples=%d cleanRatio=%.4f clean=%v dropRatio=%.4f phase=%s",
+					r.OldThresholds.TrigPPS, c.TrigPPS,
+					r.OldThresholds.TrigSyn, c.TrigSyn,
+					r.OldThresholds.TrigScan, c.TrigScan,
+					r.OldThresholds.TrigBPS, c.TrigBPS,
+					pol.K, r.SampleCount, r.CleanRatio, clean, dropRatio, r.Phase)
+
+				if c.StatePath != "" {
+					st := stFile
+					if st == nil {
+						st = &stateFile{Version: 1}
+					}
+					rev := st.Active.Revision + 1
+					st.History = append(st.History, stateHistory{
+						Revision:    rev,
+						At:          time.Now(),
+						Trig:        trigState{TrigPPS: c.TrigPPS, TrigSyn: c.TrigSyn, TrigScan: c.TrigScan, TrigBPS: c.TrigBPS},
+						MedianPPS:   r.MedianPPS, MadPPS: r.MadPPS,
+						MedianSyn:   r.MedianSyn, MadSyn: r.MadSyn,
+						MedianScan:  r.MedianScan, MadScan: r.MadScan,
+						MedianBPS:   r.MedianBPS, MadBPS: r.MadBPS,
+						SampleCount: r.SampleCount,
+						CleanRatio:  r.CleanRatio,
+						Notes:       fmt.Sprintf("autotune median+mad dropRatio=%.4f phase=%s", dropRatio, r.Phase),
+					})
+					if len(st.History) > c.HistoryKeep && c.HistoryKeep > 0 {
+						st.History = st.History[len(st.History)-c.HistoryKeep:]
+					}
+					st.Active = stateActive{
+						Profile:     p.Name,
+						Revision:    rev,
+						UpdatedAt:   time.Now(),
+						Trig:        trigState{TrigPPS: c.TrigPPS, TrigSyn: c.TrigSyn, TrigScan: c.TrigScan, TrigBPS: c.TrigBPS},
+						Tune:        tuneMeta{Method: "median_mad", Window: "reservoir", K: pol.K, SigmaFactor: 1.4826},
+						Bootstrap:   bs,
+						ConfigHash:  cfgHash,
+						SampleCount: r.SampleCount,
+						CleanRatio:  r.CleanRatio,
+						Notes:       "autotune",
+					}
+					if err := writeStateAtomic(c.StatePath, st); err != nil {
+						kliqLog.Printf("AUTOTUNE state write failed: %v", err)
+					} else {
+						stFile = st
+						kliqLog.Printf("AUTOTUNE state saved: %s (rev=%d)", c.StatePath, rev)
+					}
 				}
-				if err := writeStateAtomic(c.StatePath, st); err != nil {
-					kliqLog.Printf("AUTOTUNE state write failed: %v", err)
-				} else {
-					stFile = st
-					kliqLog.Printf("AUTOTUNE state saved: %s (rev=%d)", c.StatePath, rev)
-				}
+			} else if r.Skipped {
+				kliqLog.Printf("AUTOTUNE skipped: %s (have=%d need=%d) cleanRatio=%.4f",
+					r.SkipReason, r.SampleCount, c.AutoMinSamples, r.CleanRatio)
+				continue
 			}
 		}
 

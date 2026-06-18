@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/kernloom/kernloom/iq/internal/actions"
+	klshieldautotuner "github.com/kernloom/kernloom/pkg/adapters/klshield/autotuner"
 	shieldpep "github.com/kernloom/kernloom/pkg/adapters/klshield/pep"
 	"github.com/kernloom/kernloom/pkg/core/fsm"
 )
@@ -20,13 +21,11 @@ type fsmActionExecutor interface {
 	ApplyDeEnforce6([16]byte, fsm.State, shieldpep.EnforcementParams, time.Time) fsm.State
 }
 
-// processCandidate4 runs the FSM for a single IPv4 source.
-// It handles whitelist/feedback de-enforcement, constructs the doTransition
-// callback (which drives the shieldpep adapter), calls fsm.Advance and adds
-// learning samples when appropriate.
+// processCandidate4 runs the FSM for a single IPv4 source and feeds the
+// autotuner reservoir (KLShield-specific PPS/SYN/scan/BPS samples).
 func processCandidate4(m metrics, st fsm.State, nowWall time.Time, c cfg,
 	wl *whitelist, fb *feedbackManager, resolver *actions.PolicyResolver, executor fsmActionExecutor,
-	resPPS, resSyn, resScan, resBps *reservoir, clean bool,
+	at *klshieldautotuner.Autotuner, clean bool,
 ) fsm.State {
 	st.LastSeenWallTime = nowWall
 
@@ -42,10 +41,7 @@ func processCandidate4(m metrics, st fsm.State, nowWall time.Time, c cfg,
 		st.HighSevSince = time.Time{}
 		if c.AutoTune && clean && st.Level == fsm.LevelObserve && m.Severity <= c.LearnMaxSev && m.DropRLRate == 0 {
 			if (wlHit && c.WhitelistLearn) || (fbHit && c.FeedbackLearn) {
-				resPPS.Add(m.PPS)
-				resSyn.Add(m.SynRate)
-				resScan.Add(m.ScanRate)
-				resBps.Add(m.Bps)
+				at.RecordSample(m.PPS, m.SynRate, m.ScanRate, m.Bps, m.ipString(), true)
 			}
 		}
 		return st
@@ -83,12 +79,8 @@ func processCandidate4(m metrics, st fsm.State, nowWall time.Time, c cfg,
 			m.Severity, m.PPS, m.Bps, m.SynRate, m.ScanRate, m.DropRLRate)
 	}
 
-	if clean && c.AutoTune && st.Level == fsm.LevelObserve && m.Severity <= c.LearnMaxSev && m.DropRLRate == 0 {
-		resPPS.Add(m.PPS)
-		resSyn.Add(m.SynRate)
-		resScan.Add(m.ScanRate)
-		resBps.Add(m.Bps)
-	}
+	shouldRecord := clean && c.AutoTune && st.Level == fsm.LevelObserve && m.Severity <= c.LearnMaxSev && m.DropRLRate == 0
+	at.RecordSample(m.PPS, m.SynRate, m.ScanRate, m.Bps, m.ipString(), shouldRecord)
 
 	return st
 }
@@ -96,7 +88,7 @@ func processCandidate4(m metrics, st fsm.State, nowWall time.Time, c cfg,
 // processCandidate6 runs the FSM for a single IPv6 source.
 func processCandidate6(m metrics, st fsm.State, nowWall time.Time, c cfg,
 	wl *whitelist, fb *feedbackManager, resolver *actions.PolicyResolver, executor fsmActionExecutor,
-	resPPS, resSyn, resScan, resBps *reservoir, clean bool,
+	at *klshieldautotuner.Autotuner, clean bool,
 ) fsm.State {
 	st.LastSeenWallTime = nowWall
 
@@ -112,10 +104,7 @@ func processCandidate6(m metrics, st fsm.State, nowWall time.Time, c cfg,
 		st.HighSevSince = time.Time{}
 		if c.AutoTune && clean && st.Level == fsm.LevelObserve && m.Severity <= c.LearnMaxSev && m.DropRLRate == 0 {
 			if (wlHit && c.WhitelistLearn) || (fbHit && c.FeedbackLearn) {
-				resPPS.Add(m.PPS)
-				resSyn.Add(m.SynRate)
-				resScan.Add(m.ScanRate)
-				resBps.Add(m.Bps)
+				at.RecordSample(m.PPS, m.SynRate, m.ScanRate, m.Bps, m.ipString(), true)
 			}
 		}
 		return st
@@ -153,12 +142,8 @@ func processCandidate6(m metrics, st fsm.State, nowWall time.Time, c cfg,
 			m.Severity, m.PPS, m.Bps, m.SynRate, m.ScanRate, m.DropRLRate)
 	}
 
-	if clean && c.AutoTune && st.Level == fsm.LevelObserve && m.Severity <= c.LearnMaxSev && m.DropRLRate == 0 {
-		resPPS.Add(m.PPS)
-		resSyn.Add(m.SynRate)
-		resScan.Add(m.ScanRate)
-		resBps.Add(m.Bps)
-	}
+	shouldRecord := clean && c.AutoTune && st.Level == fsm.LevelObserve && m.Severity <= c.LearnMaxSev && m.DropRLRate == 0
+	at.RecordSample(m.PPS, m.SynRate, m.ScanRate, m.Bps, m.ipString(), shouldRecord)
 
 	return st
 }

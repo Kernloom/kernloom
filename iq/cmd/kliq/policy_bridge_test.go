@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	klshieldautotuner "github.com/kernloom/kernloom/pkg/adapters/klshield/autotuner"
 	"github.com/kernloom/kernloom/pkg/adapters/klshield/pep"
 	"github.com/kernloom/kernloom/pkg/core/fsm"
 	"github.com/kernloom/kernloom/pkg/core/policy"
@@ -317,7 +318,11 @@ func runFSM(n int, c cfg) fsm.State {
 	executor := buildExecutor(pep)
 	wl := newWhitelist("")
 	fb := &feedbackManager{}
-	r := newReservoir(16)
+	at := klshieldautotuner.New(
+		klshieldautotuner.Thresholds{TrigPPS: c.TrigPPS, TrigSyn: c.TrigSyn, TrigScan: c.TrigScan, TrigBPS: c.TrigBPS},
+		klshieldautotuner.Config{MinSamples: 10, FloorPPS: 50, FloorSyn: 50, FloorScan: 5},
+		16,
+	)
 
 	m := metrics{
 		IPVer:    4,
@@ -330,7 +335,7 @@ func runFSM(n int, c cfg) fsm.State {
 	now := time.Now()
 
 	for i := 0; i < n; i++ {
-		st = processCandidate4(m, st, now, c, wl, fb, resolver, executor, r, r, r, r, false)
+		st = processCandidate4(m, st, now, c, wl, fb, resolver, executor, at, false)
 		now = now.Add(time.Second)
 	}
 	return st
