@@ -114,7 +114,18 @@ type prevV6 struct {
 	LastWall                       time.Time
 }
 
+// main is organised into the following phases:
+//
+//	§1 Subcommand dispatch  (before flag parse; early return on match)
+//	§2 Config + PDP setup   (flags, profiles, PDPConfig, bootstrap)
+//	§3 State store + graph  (SQLite, lifecycle controllers)
+//	§4 Adapter init         (KLShield PEP, netfilter, PIPs)
+//	§5 Decision pipeline    (bus, signal engine, decision engine)
+//	§6 Forge agent          (enrollment, heartbeat, bundle delivery)
+//	§7 Tick-loop prep       (ticker, signals, runtime PDP, shadow pipeline)
+//	§8 Main tick loop       (FSM evaluation, autotune — core of KLIQ)
 func main() {
+	// ── §1 Subcommand dispatch ───────────────────────────────────────────────
 	// Handle subcommands before flag parsing so they work standalone.
 	// All read-path subcommands use the state store (kliq-state.db), not the
 	// old graphstore.  --db overrides this default for all subcommands.
@@ -158,6 +169,7 @@ func main() {
 	if handleStorageSubcommand(subCmdDB) {
 		return
 	}
+	// ── §2 Config + PDP setup ───────────────────────────────────────────────
 	c := parseFlags()
 
 	// Mode handling.
@@ -431,6 +443,7 @@ func main() {
 		}
 	}
 
+	// ── §4 Adapter init ─────────────────────────────────────────────────────
 	// Open Shield eBPF maps — only when klshield is in the adapter list.
 	// kliq runs without klshield when netfilter-only or observation-only.
 	var maps *shieldclient.Maps
@@ -467,6 +480,7 @@ func main() {
 		}
 	}
 
+	// ── §3 State store + graph ──────────────────────────────────────────────
 	if c.StateStorePath != "" && c.StateStorePath != ":memory:" {
 		if err := os.MkdirAll(filepath.Dir(c.StateStorePath), 0o755); err != nil {
 			log.Fatalf("create state store dir for %s: %v", c.StateStorePath, err)
@@ -605,6 +619,7 @@ func main() {
 	// tupleActive is set after edge-map probe and read by the heartbeat goroutine.
 	tupleActive := false
 
+	// ── §6 Forge agent ──────────────────────────────────────────────────────
 	// Receipt upload queue — runs whenever a Forge client is available.
 	// Picks up persisted receipts and uploads them to Forge asynchronously.
 	// Initialized below after forgeC is created; nil-safe if Forge is not configured.
@@ -727,6 +742,7 @@ func main() {
 		}
 	}
 
+	// ── §5 Decision pipeline ────────────────────────────────────────────────
 	// Decision engine: adds audit trail for FSM transitions and enforces graph-freeze signals.
 	// LocalPolicy MaxAction is resolved via the Action Resolver so that
 	// managed-no-pack and PolicyMaxAction rules apply to the decision engine path too.
@@ -1145,6 +1161,7 @@ func main() {
 	defer pipelineCancel()
 	shadowPipeline.Start(pipelineCtx)
 
+	// ── §7 Tick-loop prep ───────────────────────────────────────────────────
 	ticker := time.NewTicker(c.Interval)
 	defer ticker.Stop()
 	var tickN uint64
@@ -1169,6 +1186,13 @@ func main() {
 	kliqLog.Printf("Kernloom IQ started profile=%s bootstrap=%s interval=%s dry_run=%v top=%d trig{pps=%.1f bps=%s syn=%.1f scan=%.1f} weights{pps=%.2f bps=%.2f syn=%.2f scan=%.2f} cap=%.1f (klshield=%v ipv6=%v)",
 		p.Name, bootstrapPhase, c.Interval.String(), c.DryRun, c.TopN, c.TrigPPS, fmtBPS(c.TrigBPS), c.TrigSyn, c.TrigScan, c.WPPS, c.WBps, c.WSyn, c.WScan, c.SevCap, maps != nil, maps != nil && maps.Src6 != nil)
 
+	// ── §8 Main tick loop ───────────────────────────────────────────────────
+	// This loop is the core of KLIQ. Each tick:
+	//   a) drains pending bundle/signal updates
+	//   b) reads eBPF map telemetry (v4+v6)
+	//   c) evaluates FSM per source (processCandidate4/6)
+	//   d) runs autotune when due
+	// The loop runs on a single goroutine — no locking needed for shared state.
 	for {
 		select {
 		case <-stopCh:
