@@ -15,16 +15,31 @@ import (
 	shieldpep "github.com/kernloom/kernloom/pkg/adapters/klshield/pep"
 	"github.com/kernloom/kernloom/pkg/core/decision"
 	"github.com/kernloom/kernloom/pkg/core/fsm"
+	"github.com/kernloom/kernloom/pkg/statestore/sqlite"
 )
 
-type brokeredActionExecutor struct {
-	legacy *actions.ShieldActionExecutor
-	broker *actionbroker.Broker
-	pep    *brokeredFSMPEP
+// receiptStore is the minimal interface the brokered executor needs for
+// durable receipt persistence. Satisfied by *sqlite.Store.
+type receiptStore interface {
+	PersistReceipt(ctx context.Context, r decision.EnforcementReceipt) error
 }
 
-func newBrokeredActionExecutor(legacy *actions.ShieldActionExecutor, broker *actionbroker.Broker, pep *brokeredFSMPEP) *brokeredActionExecutor {
-	return &brokeredActionExecutor{legacy: legacy, broker: broker, pep: pep}
+type brokeredActionExecutor struct {
+	legacy  *actions.ShieldActionExecutor
+	broker  *actionbroker.Broker
+	pep     *brokeredFSMPEP
+	store   receiptStore // may be nil when running without a state store
+	nodeID  string
+}
+
+func newBrokeredActionExecutor(
+	legacy *actions.ShieldActionExecutor,
+	broker *actionbroker.Broker,
+	pep *brokeredFSMPEP,
+	store *sqlite.Store,
+	nodeID string,
+) *brokeredActionExecutor {
+	return &brokeredActionExecutor{legacy: legacy, broker: broker, pep: pep, store: store, nodeID: nodeID}
 }
 
 func (e *brokeredActionExecutor) AddSidecar(s actions.PEPSidecar) {
@@ -63,6 +78,7 @@ func (e *brokeredActionExecutor) applyBrokered(ctx applyContext) (fsm.State, act
 	applied := e.pep.finish()
 	if receipt != nil {
 		logEnforcementReceipt(receipt)
+		e.persistReceipt(receipt)
 	}
 	if err != nil {
 		result := applied.result
@@ -160,6 +176,20 @@ func (p *brokeredFSMPEP) CurrentFencingToken(_ context.Context, lease decision.A
 
 func (p *brokeredFSMPEP) Revert(_ context.Context, lease decision.ActionLease) error {
 	return fmt.Errorf("brokered fsm pep revert is not wired to runtime state maps for target %s", lease.Target)
+}
+
+// persistReceipt durably stores a receipt so it can be uploaded to Forge later.
+// Non-blocking: errors are logged but never propagate to the enforcement path.
+func (e *brokeredActionExecutor) persistReceipt(r *decision.EnforcementReceipt) {
+	if r == nil || e.store == nil {
+		return
+	}
+	if r.NodeID == "" {
+		r.NodeID = e.nodeID
+	}
+	if err := e.store.PersistReceipt(context.Background(), *r); err != nil {
+		kliqLog.Printf("ACTION-RECEIPT persist error id=%s: %v", r.ID, err)
+	}
 }
 
 func logEnforcementReceipt(receipt *decision.EnforcementReceipt) {

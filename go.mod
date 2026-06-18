@@ -5,11 +5,13 @@ go 1.25.1
 require (
 	github.com/cilium/ebpf v0.19.0
 	github.com/google/cel-go v0.28.1
-	github.com/kernloom/kernloom-contracts v0.0.0
+	github.com/kernloom/kernloom-contracts v0.1.0
 	gopkg.in/yaml.v3 v3.0.1
 	modernc.org/sqlite v1.50.1
 )
 
+// kernloom-contracts is a private repo; replace directive active until GOPRIVATE is configured.
+// Tag v0.1.0 is published at github.com/Kernloom/kernloom-contracts.
 replace github.com/kernloom/kernloom-contracts => ../kernloom-contracts
 
 require (

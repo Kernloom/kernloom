@@ -51,6 +51,11 @@ type cfg struct {
 	PolicyFile string // path to LocalPolicyPack YAML (abstract enforcement rules)
 	PDPConfig  string // path to PDPConfig YAML (kliq signal engine + FSM behavior)
 
+	// RuntimePDPMode controls the new contracts-based Runtime PDP path.
+	// "shadow" (default): evaluates alongside FSM, logs decisions only.
+	// "active": RuntimePDP decisions become ActionProposals; FSM stays for network defense.
+	RuntimePDPMode string
+
 	// Adapters is the comma-separated list of PEP adapters to activate.
 	// Valid values: klshield, netfilter. Default: "klshield".
 	// Example: --adapter=klshield,netfilter  or  --adapter=netfilter
@@ -463,6 +468,7 @@ AGENT FLAGS
 	flag.StringVar(&c.ComponentConfigPath, "component-config", "", "path to a KliqComponentConfig YAML (enabled adapters and analyzers); reserved for future use")
 	flag.StringVar(&c.PolicyVerifyKeyPath, "policy-verify-key", "", "path to Ed25519 public key for verifying LocalPolicyPack signatures; required in managed mode")
 	flag.StringVar(&c.ForgeURL, "forge-url", "", "forge serve base URL (e.g. https://forge.example.com:8443); enables enrollment and heartbeat when set")
+	flag.StringVar(&c.RuntimePDPMode, "runtime-pdp-mode", "shadow", "runtime PDP mode: shadow (log only) or active (enforce via action broker)")
 	flag.StringVar(&c.ForgeEnrollToken, "forge-enroll-token", "", "one-time enrollment token issued by 'forge token create' (consumed on first enrollment)")
 	flag.StringVar(&c.ForgeCAPath, "forge-ca", "", "path to PEM CA certificate for TLS verification of forge serve; empty = system roots")
 	flag.DurationVar(&c.ForgeHeartbeat, "forge-heartbeat", 5*time.Minute, "heartbeat interval to forge serve")

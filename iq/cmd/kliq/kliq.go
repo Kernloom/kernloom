@@ -492,7 +492,7 @@ func main() {
 	if abErr != nil {
 		log.Fatalf("action broker init: %v", abErr)
 	}
-	executor := newBrokeredActionExecutor(legacyExecutor, actionBroker, brokerPEP)
+	executor := newBrokeredActionExecutor(legacyExecutor, actionBroker, brokerPEP, stateStore, nodeID)
 	if receipts, err := actionBroker.ReconcilePending(context.Background()); err != nil {
 		kliqLog.Printf("WARNING: action broker pending lease reconciliation failed: %v", err)
 	} else if len(receipts) > 0 {
@@ -603,6 +603,12 @@ func main() {
 	// tupleActive is set after edge-map probe and read by the heartbeat goroutine.
 	tupleActive := false
 
+	// Receipt upload queue — runs whenever a Forge client is available.
+	// Picks up persisted receipts and uploads them to Forge asynchronously.
+	// Initialized below after forgeC is created; nil-safe if Forge is not configured.
+	receiptUploaderCtx, receiptUploaderCancel := context.WithCancel(context.Background())
+	defer receiptUploaderCancel()
+
 	// Forge enrollment + heartbeat loop (only when --forge-url is set).
 	var forgeC *forgeClient
 	var enrolledPackName string
@@ -614,6 +620,10 @@ func main() {
 		if fcErr != nil {
 			kliqLog.Fatalf("forge client init: %v", fcErr)
 		}
+
+		// Start receipt upload queue now that we have a Forge client.
+		startReceiptUploader(receiptUploaderCtx, stateStore, forgeC,
+			log.New(os.Stderr, "[receipt-uploader] ", log.LstdFlags))
 
 		// Restore persisted Forge state from state file (avoids re-enrollment after restart).
 		if stFile != nil && stFile.Active.ForgeSessionToken != "" {
@@ -825,6 +835,36 @@ func main() {
 	// The signal consumer goroutine writes credits; the tick loop drains and applies them
 	// to state4/state6 so the FSM is the single enforcement authority.
 	graphStrikeCh := make(chan graphStrikeMsg, 512)
+
+	// RuntimePDP path: shadow (observe only) or active (enforce via action broker).
+	// Default: shadow. Set --runtime-pdp-mode=active after shadow parity is confirmed.
+	shadowRunner := newShadowPDPRunner(nodeID, log.New(os.Stderr, "[runtime-pdp] ", log.LstdFlags))
+	if c.RuntimePDPMode == string(PDPModeActive) {
+		// In active mode the RuntimePDP emits proposals via a channel.
+		// A goroutine drains them → resolver → executor (KLShield IPv4 path).
+		rpdpProposalCh := make(chan actions.ActionProposal, 256)
+		shadowRunner.SetMode(PDPModeActive, rpdpProposalCh)
+		go func() {
+			pepParams := c.toPEPParams()
+			for prop := range rpdpProposalCh {
+				res := resolver.Resolve(prop)
+				if !res.Allowed {
+					kliqLog.Printf("[runtime-pdp:active] proposal denied: %s", res.DenyReason)
+					continue
+				}
+				if ip := parseIPv4String(res.Target.Value); ip != [4]byte{} {
+					executor.Apply4(ip, fsm.State{}, res, pepParams, time.Now())
+				}
+			}
+		}()
+		kliqLog.Printf("RuntimePDP mode: ACTIVE — decisions will be enforced via action broker")
+	} else {
+		shadowRunner.SetMode(PDPModeShadow, nil)
+		kliqLog.Printf("RuntimePDP mode: SHADOW — decisions logged only (--runtime-pdp-mode=active to enforce)")
+	}
+	shadowCtx, shadowCancel := context.WithCancel(context.Background())
+	defer shadowCancel()
+	startShadowPDP(shadowCtx, mainBus, shadowRunner)
 
 	// Signal consumer: logs signals, injects graph strikes into FSM state.
 	// Use a dedicated subscriber channel — the bus fans signals out to every

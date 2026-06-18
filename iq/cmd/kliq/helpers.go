@@ -192,3 +192,20 @@ func minInt(a, b, c int) int {
 	}
 	return m
 }
+
+// parseIPv4String parses an IPv4 address string into a [4]byte array.
+// Returns a zero array if the string is not a valid IPv4 address.
+func parseIPv4String(s string) [4]byte {
+	ip := net.ParseIP(s)
+	if ip == nil {
+		return [4]byte{}
+	}
+	ip4 := ip.To4()
+	if ip4 == nil {
+		return [4]byte{}
+	}
+	var arr [4]byte
+	copy(arr[:], ip4)
+	return arr
+}
+

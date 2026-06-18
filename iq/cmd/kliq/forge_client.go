@@ -283,6 +283,50 @@ func (c *forgeClient) ReportBundleStatus(ctx context.Context, generation int, ap
 	return err
 }
 
+// UploadReceipts sends POST /api/v1/nodes/{id}/receipts with a batch of
+// EnforcementReceipt objects encoded as JSON. Returns the IDs that the server
+// accepted so the caller can mark them uploaded in the local store.
+func (c *forgeClient) UploadReceipts(ctx context.Context, receipts []any) ([]string, error) {
+	body, err := json.Marshal(map[string]any{"receipts": receipts})
+	if err != nil {
+		return nil, fmt.Errorf("upload-receipts: marshal: %w", err)
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost,
+		c.baseURL+"/api/v1/nodes/"+c.nodeID+"/receipts", bytes.NewReader(body))
+	if err != nil {
+		return nil, fmt.Errorf("upload-receipts: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	if c.sessionToken != "" {
+		req.Header.Set("Authorization", "Bearer "+c.sessionToken)
+	}
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("upload-receipts: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated {
+		return nil, fmt.Errorf("upload-receipts: server returned %d", resp.StatusCode)
+	}
+	var result struct {
+		Accepted []string `json:"accepted"`
+	}
+	_ = json.NewDecoder(resp.Body).Decode(&result)
+	if len(result.Accepted) == 0 {
+		// Server didn't return accepted IDs — assume all were accepted.
+		ids := make([]string, 0, len(receipts))
+		for _, r := range receipts {
+			if m, ok := r.(map[string]any); ok {
+				if id, ok := m["id"].(string); ok {
+					ids = append(ids, id)
+				}
+			}
+		}
+		return ids, nil
+	}
+	return result.Accepted, nil
+}
+
 // UploadBaselineProposal sends POST /api/v1/nodes/{id}/baseline-proposals
 // with the raw YAML proposal bytes.
 func (c *forgeClient) UploadBaselineProposal(ctx context.Context, proposalYAML []byte) (string, error) {

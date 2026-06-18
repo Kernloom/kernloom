@@ -209,6 +209,29 @@ CREATE INDEX IF NOT EXISTS idx_action_leases_status_expires ON action_leases (st
 CREATE INDEX IF NOT EXISTS idx_action_leases_decision ON action_leases (decision_id);
 CREATE INDEX IF NOT EXISTS idx_action_leases_target ON action_leases (adapter_id, target, status);
 
+-- ── Enforcement receipts ─────────────────────────────────────────────────────
+-- Durable receipt log for every action applied, skipped, or reverted.
+-- upload_status: pending | uploaded | failed
+CREATE TABLE IF NOT EXISTS action_receipts (
+    id             TEXT    PRIMARY KEY,
+    decision_id    TEXT    NOT NULL DEFAULT '',
+    lease_id       TEXT    NOT NULL DEFAULT '',
+    node_id        TEXT    NOT NULL DEFAULT '',
+    adapter_id     TEXT    NOT NULL DEFAULT '',
+    status         TEXT    NOT NULL,  -- applied|failed|skipped|dry_run|reverted|conflict
+    action         TEXT    NOT NULL DEFAULT '',
+    target         TEXT    NOT NULL DEFAULT '',
+    message        TEXT    NOT NULL DEFAULT '',
+    fencing_token  TEXT    NOT NULL DEFAULT '',
+    applied_at     TEXT    NOT NULL,
+    expires_at     TEXT    NOT NULL DEFAULT '',
+    upload_status  TEXT    NOT NULL DEFAULT 'pending',
+    uploaded_at    TEXT    NOT NULL DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS idx_action_receipts_lease   ON action_receipts (lease_id);
+CREATE INDEX IF NOT EXISTS idx_action_receipts_upload  ON action_receipts (upload_status, applied_at);
+CREATE INDEX IF NOT EXISTS idx_action_receipts_adapter ON action_receipts (adapter_id, applied_at);
+
 -- ── Adapter state ─────────────────────────────────────────────────────────────
 -- Opaque per-adapter checkpoint blobs (cursor positions, sequence numbers, etc.)
 CREATE TABLE IF NOT EXISTS adapter_state (
@@ -230,4 +253,4 @@ CREATE TABLE IF NOT EXISTS registry_versions (
 
 // currentSchemaVersion is incremented whenever schema changes are made.
 // The migrate() function applies missing versions in order.
-const currentSchemaVersion = 3
+const currentSchemaVersion = 4
