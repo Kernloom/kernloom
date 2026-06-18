@@ -75,12 +75,12 @@ type EventSource interface {
 
 // ControllerVersion carries the version information discovered at startup.
 type ControllerVersion struct {
-	Version        string
-	Revision       string
-	ManagementAPI  string
+	Version         string
+	Revision        string
+	ManagementAPI   string
 	EventNamespaces map[string]string // namespace → version string
-	Compatible     bool
-	Warnings       []string
+	Compatible      bool
+	Warnings        []string
 }
 
 // Config configures the WebSocket event source.
@@ -183,4 +183,4 @@ func (f *FileReplaySource) Start(ctx context.Context, out chan<- RawVendorEvent)
 }
 
 func (f *FileReplaySource) Health(_ context.Context) EventSourceHealth { return f.health }
-func (f *FileReplaySource) Close(_ context.Context) error               { return nil }
+func (f *FileReplaySource) Close(_ context.Context) error              { return nil }

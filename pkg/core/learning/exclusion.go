@@ -12,25 +12,25 @@ import "time"
 type ExclusionReason string
 
 const (
-	ReasonEnforcementActive    ExclusionReason = "enforcement_active"     // klshield/netfilter blocking this source
-	ReasonRateLimited          ExclusionReason = "rate_limited"           // rate-limit action in effect
-	ReasonBlocked              ExclusionReason = "blocked"                // full-block action in effect
-	ReasonSuspiciousSignal     ExclusionReason = "suspicious_signal"      // SuspiciousRegistry entry
-	ReasonDownstreamCensored   ExclusionReason = "downstream_censored"    // blocked upstream, downstream data is tainted
-	ReasonAdminOverride        ExclusionReason = "admin_override"         // explicit operator exclusion
-	ReasonForgePolicy          ExclusionReason = "forge_policy"           // Forge policy excludes this entity
-	ReasonCorrelateAlert       ExclusionReason = "correlate_alert"        // Correlate global risk alert
-	ReasonAttestationFailure   ExclusionReason = "attestation_failure"    // Keylime/trustd failure
+	ReasonEnforcementActive  ExclusionReason = "enforcement_active"  // klshield/netfilter blocking this source
+	ReasonRateLimited        ExclusionReason = "rate_limited"        // rate-limit action in effect
+	ReasonBlocked            ExclusionReason = "blocked"             // full-block action in effect
+	ReasonSuspiciousSignal   ExclusionReason = "suspicious_signal"   // SuspiciousRegistry entry
+	ReasonDownstreamCensored ExclusionReason = "downstream_censored" // blocked upstream, downstream data is tainted
+	ReasonAdminOverride      ExclusionReason = "admin_override"      // explicit operator exclusion
+	ReasonForgePolicy        ExclusionReason = "forge_policy"        // Forge policy excludes this entity
+	ReasonCorrelateAlert     ExclusionReason = "correlate_alert"     // Correlate global risk alert
+	ReasonAttestationFailure ExclusionReason = "attestation_failure" // Keylime/trustd failure
 )
 
 // AppliesTo names the learning dimension that an Exclusion affects.
 type AppliesTo string
 
 const (
-	AppliesMetricBaseline       AppliesTo = "metric_baseline"        // EWMA baseline updates
-	AppliesRelationshipLearning AppliesTo = "relationship_learning"  // graph edge promotion
-	AppliesGraphAcceptance      AppliesTo = "graph_acceptance"       // new edge candidate acceptance
-	AppliesEntityPromotion      AppliesTo = "entity_promotion"       // entity confidence promotion
+	AppliesMetricBaseline       AppliesTo = "metric_baseline"       // EWMA baseline updates
+	AppliesRelationshipLearning AppliesTo = "relationship_learning" // graph edge promotion
+	AppliesGraphAcceptance      AppliesTo = "graph_acceptance"      // new edge candidate acceptance
+	AppliesEntityPromotion      AppliesTo = "entity_promotion"      // entity confidence promotion
 )
 
 // Exclusion records that learning is suspended for a specific entity/scope.

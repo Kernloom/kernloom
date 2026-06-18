@@ -23,12 +23,12 @@ const Predicate = "network.connects_to"
 
 // Config controls extractor filtering behaviour.
 type Config struct {
-	NodeID            string
-	ExcludeLoopback   bool
-	ExcludeBroadcast  bool
+	NodeID             string
+	ExcludeLoopback    bool
+	ExcludeBroadcast   bool
 	ExcludeSourceCIDRs []net.IPNet
-	MinPackets        uint64
-	MinBytes          uint64
+	MinPackets         uint64
+	MinBytes           uint64
 	// CollapseEphemeralPorts collapses destination ports >= 32768 to 0.
 	CollapseEphemeralPorts bool
 }
@@ -138,10 +138,10 @@ func (e *Extractor) Extract(_ context.Context, obs []observation.Observation) ([
 			LastSeenAt:      now,
 			LearnedBy:       relationship.LearnedByLocal,
 			SourceAdapter:   string(o.Source),
-			SubjectLabel: o.Subject.ID,
-			SubjectKind:  string(entity.KindIP),
-			ObjectLabel:  objID,
-			ObjectKind:   string(entity.KindIP),
+			SubjectLabel:    o.Subject.ID,
+			SubjectKind:     string(entity.KindIP),
+			ObjectLabel:     objID,
+			ObjectKind:      string(entity.KindIP),
 		})
 	}
 	return result, nil

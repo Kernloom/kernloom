@@ -175,7 +175,7 @@ func TestAgent_Stop_TerminatesHeartbeat(t *testing.T) {
 			heartbeatCalled.Add(1)
 			return false, "active", nil
 		},
-		PullBundle: func(ctx context.Context) ([]byte, error) { return nil, nil },
+		PullBundle:   func(ctx context.Context) ([]byte, error) { return nil, nil },
 		ReportStatus: func(ctx context.Context) error { return nil },
 	}
 	agent := forgeagent.New(

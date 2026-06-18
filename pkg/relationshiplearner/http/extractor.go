@@ -17,7 +17,7 @@ import (
 )
 
 const (
-	PredicateCalls    = "http.calls"
+	PredicateCalls     = "http.calls"
 	PredicateUsesRoute = "http.uses_route"
 )
 

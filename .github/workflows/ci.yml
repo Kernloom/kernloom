@@ -9,7 +9,7 @@ permissions:
   contents: read
 
 jobs:
-  build:
+  go:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -21,10 +21,50 @@ jobs:
           go-version-file: go.mod
 
       - name: Go fmt
-        run: test -z "$(gofmt -l .)"
+        shell: bash
+        run: |
+          set -euo pipefail
+          mapfile -d '' -t tracked < <(git ls-files -z '*.go')
+          files=()
+          for file in "${tracked[@]}"; do
+            if [ -f "$file" ]; then
+              files+=("$file")
+            fi
+          done
+          if [ "${#files[@]}" -eq 0 ]; then
+            echo "No Go files found."
+            exit 0
+          fi
+
+          mapfile -t unformatted < <(gofmt -l "${files[@]}")
+          if [ "${#unformatted[@]}" -ne 0 ]; then
+            echo "The following Go files need gofmt:"
+            printf '  %s\n' "${unformatted[@]}"
+            echo
+            gofmt -d "${unformatted[@]}"
+            exit 1
+          fi
 
       - name: Go test
         run: go test ./...
+
+      - name: Build CLIs
+        run: |
+          mkdir -p bin
+          go build -o bin/klshield ./shield/cmd/klshield
+          go build -o bin/kliq     ./iq/cmd/kliq
+
+  bpf-build:
+    runs-on: ubuntu-latest
+    needs: go
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Setup Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
 
       - name: Install clang/llvm for BPF
         run: |

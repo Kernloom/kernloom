@@ -36,10 +36,10 @@ func TestUpsertEntity_InsertAndGet(t *testing.T) {
 	ctx := context.Background()
 
 	e := entity.Entity{
-		Kind:      entity.KindIP,
-		ID:        "10.0.0.1",
-		Namespace: "",
-		Labels:    map[string]string{"role": "web"},
+		Kind:        entity.KindIP,
+		ID:          "10.0.0.1",
+		Namespace:   "",
+		Labels:      map[string]string{"role": "web"},
 		FirstSeenAt: time.Now().Add(-time.Hour),
 		LastSeenAt:  time.Now(),
 	}

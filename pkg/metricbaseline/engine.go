@@ -45,8 +45,8 @@ type UpdateOptions struct {
 // It stores one Profile per unique Key and supports TTL-based eviction.
 type Engine struct {
 	mu       sync.Mutex
-	profiles map[string]*Profile          // key: Key.String() or baselineKeyString()
-	dirty    map[string]corebaseline.Key  // keys needing SQLite flush; nil until first write
+	profiles map[string]*Profile         // key: Key.String() or baselineKeyString()
+	dirty    map[string]corebaseline.Key // keys needing SQLite flush; nil until first write
 	cfg      Config
 }
 

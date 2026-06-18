@@ -47,13 +47,13 @@ func DimensionsHash(dims map[string]string) string {
 
 // BaselineRow is the persisted form of a metric baseline bucket.
 type BaselineRow struct {
-	ID          string
-	Key         baseline.Key
-	State       string
-	EWMAState   map[string]any // adapter-defined EWMA fields
+	ID           string
+	Key          baseline.Key
+	State        string
+	EWMAState    map[string]any // adapter-defined EWMA fields
 	Observations int64
-	LastUpdated time.Time
-	CreatedAt   time.Time
+	LastUpdated  time.Time
+	CreatedAt    time.Time
 }
 
 // UpsertBaseline writes or updates a baseline row.

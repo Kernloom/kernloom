@@ -77,9 +77,9 @@ const (
 // Model carries the full measurement semantics for an observation or baseline key.
 // When stored on a baseline key, it ensures baselines are adapter-isolated.
 type Model struct {
-	SourceAdapter   string          // e.g. "klshield", "conntrack", "nginx", "ziti"
-	SourceClass     string          // e.g. "xdp", "proc_net", "access_log"
-	SourceLayer     string          // e.g. "l3", "l7", "identity"
+	SourceAdapter   string // e.g. "klshield", "conntrack", "nginx", "ziti"
+	SourceClass     string // e.g. "xdp", "proc_net", "access_log"
+	SourceLayer     string // e.g. "l3", "l7", "identity"
 	VisibilityPoint VisibilityPoint
 	Type            Type
 	TruthClass      TruthClass
