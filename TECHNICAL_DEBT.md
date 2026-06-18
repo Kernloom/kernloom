@@ -93,29 +93,28 @@ Recommended fix:
 
 ## P1 - High Priority
 
-### 4. Shared contracts package is missing
+### 4. Shared contracts module is new but not fully adopted
 
-The README and `.claude` docs describe Forge-facing shared contracts, but the repo still mainly uses
-local core models.
+`github.com/kernloom/kernloom-contracts` now defines the shared runtime wire contracts and signing
+fixtures. KLIQ imports it for `internal/localrisk` and `internal/runtimepdp`, but the older managed
+bundle and Forge client paths still mainly use local core models.
 
 Relevant areas:
 
 - `pkg/core/bundle`
 - `pkg/core/policy`
 - `pkg/core/decision`
-- README references to `pkg/contracts`
+- `github.com/kernloom/kernloom-contracts`
 
 Risk:
 
-- Forge and KLIQ can drift silently on schema semantics.
-- Runtime bundles, policy packs, decisions, receipts, and risk assessments are not validated against
-  one canonical protocol surface.
+- Forge and KLIQ can still drift where older core models remain in the live control-plane path.
+- Runtime bundle ingestion still needs migration from `pkg/core/bundle` to contracts.
 
 Recommended fix:
 
-- Introduce `pkg/contracts` for the Forge/KLIQ wire-level types.
 - Keep internal domain types separate only where they add runtime-only behavior.
-- Add round-trip fixtures for bundle, receipt, proposal, and risk assessment schemas.
+- Migrate managed RuntimeBundle ingestion and Forge status/upload payloads to `kernloom-contracts`.
 
 ### 5. KLIQ command package is doing too much
 
@@ -138,27 +137,28 @@ Recommended fix:
   - `internal/proposals`
 - Keep `cmd/kliq` as composition, config loading, and CLI surface.
 
-### 6. Local risk assessment is not yet wired into Runtime PDP
+### 6. Local risk assessment is not yet live-wired into Runtime PDP
 
 `iq/internal/localrisk` now turns riskaggregator output into an explainable assessment with level,
 confidence, completeness, domains, contributions, missing inputs, validity window, and model
-reference. The current runtime does not yet feed this into a Runtime PDP.
+reference. It can now convert to `contracts.LocalRiskAssessment`. The current runtime tick does not
+yet feed this into Runtime PDP.
 
 Risk:
 
-- Runtime PDP cannot consume the assessment until that package exists.
+- Runtime PDP decisions are not active in the live KLIQ loop yet.
 - Missing inputs and confidence are not yet surfaced to Forge or feedback/proposal flows.
 
 Recommended fix:
 
-- Feed `iq/internal/localrisk.Assessment` into `internal/runtimepdp`.
-- Map the internal assessment to shared contracts once the contracts package/module is decided.
+- Feed pipeline risk outputs into `iq/internal/runtimepdp`.
+- Surface the resulting `contracts.RuntimeDecision` and risk assessment in Forge reports.
 
-### 7. Runtime PDP is not yet a generic runtime decision service
+### 7. Runtime PDP is not yet live
 
-Policy evaluation still uses historical naming and KLShield-specific pathways. `LocalPolicyPack` and
-`PDPConfig` remain as implementation names, while the docs want Runtime Policy Pack and Runtime PDP
-semantics.
+`iq/internal/runtimepdp` now evaluates `contracts.RuntimePolicyPack` CEL expressions over
+`contracts.LocalRiskAssessment` and context snapshots, producing `contracts.RuntimeDecision`. The
+live KLIQ loop still uses the legacy PolicyPack/FSM/CEL bridge.
 
 Relevant files:
 
@@ -168,14 +168,13 @@ Relevant files:
 
 Risk:
 
-- Policy evaluation stays tied to existing adapter history.
-- Forge-produced RuntimeBundles cannot be consumed as a clean runtime decision source.
+- Forge-produced RuntimePolicyPacks are not yet the live decision source.
+- The legacy FSM/CEL path and Runtime PDP path can diverge until bridged.
 
 Recommended fix:
 
-- Add `internal/runtimepdp` that accepts a Runtime Policy Pack, local risk assessment, and context
-  snapshot, then produces a runtime decision.
 - Keep compatibility with existing policy pack fields only at the migration boundary.
+- Add a live runtime-PDP shadow mode before replacing enforcement decisions.
 
 ### 8. Lease and state-store hardening is incomplete
 
@@ -293,7 +292,7 @@ Recommended fix:
 
 ## Recommended Immediate Order
 
-1. Add Forge/KLIQ conformance fixtures for signed RuntimeBundles and trust-root rotation.
-2. Add `pkg/contracts` and fixture tests so Forge and KLIQ share one schema contract.
-3. Extract `internal/runtimepdp` and feed it `iq/internal/localrisk.Assessment`.
-4. Persist/upload enforcement receipts and finish broker support for tuple/de-enforce paths.
+1. Migrate managed RuntimeBundle ingestion to `github.com/kernloom/kernloom-contracts`.
+2. Add live Runtime PDP shadow mode fed by `iq/internal/localrisk`.
+3. Persist/upload enforcement receipts and finish broker support for tuple/de-enforce paths.
+4. Replace legacy PolicyPack/FSM decision source only after shadow parity is proven.

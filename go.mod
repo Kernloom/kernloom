@@ -5,9 +5,12 @@ go 1.25.1
 require (
 	github.com/cilium/ebpf v0.19.0
 	github.com/google/cel-go v0.28.1
+	github.com/kernloom/kernloom-contracts v0.0.0
 	gopkg.in/yaml.v3 v3.0.1
 	modernc.org/sqlite v1.50.1
 )
+
+replace github.com/kernloom/kernloom-contracts => ../kernloom-contracts
 
 require (
 	cel.dev/expr v0.25.2 // indirect

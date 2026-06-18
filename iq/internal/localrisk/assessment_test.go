@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	contracts "github.com/kernloom/kernloom-contracts"
 	"github.com/kernloom/kernloom/iq/internal/localrisk"
 	"github.com/kernloom/kernloom/pkg/core/observation"
 	"github.com/kernloom/kernloom/pkg/core/signal"
@@ -75,5 +76,26 @@ func TestFromSignalsGroupsBySubject(t *testing.T) {
 	}
 	if bySubject["10.0.0.2"].Level != localrisk.LevelMedium {
 		t.Fatalf("10.0.0.2 level: %s", bySubject["10.0.0.2"].Level)
+	}
+}
+
+func TestAssessmentToContract(t *testing.T) {
+	now := time.Now().UTC()
+	assessment := localrisk.FromSignals([]signal.Signal{
+		testSignal("10.0.0.1", signal.SignalPPSHigh, 70, 80, time.Minute),
+	}, now, localrisk.DefaultConfig())[0]
+
+	contract := assessment.ToContract(contracts.EntityRef{Kind: "ip", ID: "10.0.0.1"}, "node-1")
+	if contract.APIVersion != contracts.RuntimeAPIVersion || contract.Kind != contracts.KindLocalRiskAssessment {
+		t.Fatalf("bad typemeta: %#v", contract.TypeMeta)
+	}
+	if contract.Metadata.NodeID != "node-1" {
+		t.Fatalf("node id: %q", contract.Metadata.NodeID)
+	}
+	if contract.Level != contracts.RiskHigh {
+		t.Fatalf("level: %s", contract.Level)
+	}
+	if len(contract.Contributions) != 1 || contract.Contributions[0].SignalType != string(signal.SignalPPSHigh) {
+		t.Fatalf("contributions: %#v", contract.Contributions)
 	}
 }
