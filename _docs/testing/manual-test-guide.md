@@ -1,21 +1,21 @@
 # KLIQ Manual Test Guide
 
-Dieses Dokument beschreibt den schnellen manuellen Testpfad nach dem Umbau von
-KLIQ zum generischen Runtime-Orchestrator.
+This guide shows a simple manual test path after the KLIQ move to a generic
+runtime orchestrator.
 
-Ziel: erst beweisen, dass `kliq run` ohne privilegierte Adapter sauber startet,
-dann `RuntimePolicyPack`/RuntimePDP, optional netfilter, KLShield, Forge und
-Graph/Baseline-Pfade zuschalten.
+Goal: first prove that `kliq run` starts without privileged adapters. Then add
+`RuntimePolicyPack`/RuntimePDP, optional netfilter, KLShield, Forge, and
+graph/baseline paths.
 
-**Voraussetzungen:**
+**Requirements:**
 - Go >= 1.23
 - Linux
-- Optional: Root-Rechte fuer netfilter/KLShield
+- Optional: root privileges for netfilter/KLShield
 - Optional: `sqlite3`, `jq`, `curl`, `timeout`
 
 ---
 
-## 1. Build und Test-Baseline
+## 1. Build And Test Baseline
 
 ```bash
 cd /home/adrian/prj/ebpf-security/kernloom
@@ -27,9 +27,9 @@ go build -o bin/klshield ./shield/cmd/klshield
 go test ./...
 ```
 
-Erwartet: Build erfolgreich, alle Tests gruen.
+Expected: build succeeds and all tests pass.
 
-Falls der Go-Cache in der Umgebung nicht beschreibbar ist:
+If the Go cache is not writable in this environment:
 
 ```bash
 GOCACHE=/tmp/kernloom-go-cache go test ./...
@@ -37,20 +37,20 @@ GOCACHE=/tmp/kernloom-go-cache go test ./...
 
 ---
 
-## 2. KLIQ ohne Adapter starten
+## 2. Start KLIQ Without An Adapter
 
-Das ist der wichtigste Smoke-Test fuer den generischen Orchestrator. Er braucht
-kein eBPF, kein netfilter und kein Root.
+This is the main smoke test for the generic orchestrator. It needs no eBPF, no
+netfilter, and no root privileges.
 
 ```bash
 cd /home/adrian/prj/ebpf-security/kernloom
 mkdir -p /tmp/kernloom-manual
 
 cat > /tmp/kernloom-manual/whitelist.txt <<'EOF'
-# Generische Subject-ID
+# Generic subject ID
 ziti.identity:alice
 
-# IP/CIDR bleibt als eine Match-Variante unter sourcefilters erlaubt
+# IP/CIDR is still allowed as one match form for source filters.
 127.0.0.1
 10.0.0.0/24
 EOF
@@ -76,28 +76,28 @@ timeout 12s ./bin/kliq run \
   --interval=2s
 ```
 
-Erwartet:
-- `kliq run` startet und laeuft bis `timeout` beendet.
-- Exit-Code `124` ist bei `timeout` normal.
-- Log enthaelt sinngemaess: Catalog Adapter Binding wird uebersprungen,
-  RuntimePDP ist im Shadow-Modus, KLIQ startet mit `adapter_active=false`.
-- Whitelist/Feedback laden generische Subjects und IP/CIDR-Eintraege.
+Expected:
+- `kliq run` starts and runs until `timeout` stops it.
+- Exit code `124` is normal when `timeout` stops the process.
+- The log says that catalog adapter binding is skipped, RuntimePDP is in shadow
+  mode, and KLIQ starts with `adapter_active=false`.
+- Whitelist and feedback load generic subjects and IP/CIDR entries.
 
-Wichtig: `run` ist Pflicht. `./bin/kliq --dry-run=true` ist absichtlich kein
-gueltiger Startbefehl mehr.
+Important: `run` is required. `./bin/kliq --dry-run=true` is intentionally not
+a valid start command anymore.
 
-`--runtime-pdp-mode=shadow` und `--dry-run=true` sind nicht dasselbe:
-- `shadow` bedeutet: RuntimePDP evaluiert und loggt Entscheidungen, wird aber
-  keine Enforcement-Aktion an einen PEP ausgeben.
-- `dry-run=true` bedeutet: lokale Enforcement-Effekte werden nicht wirklich an
-  PEPs wie KLShield oder netfilter geschrieben.
+`--runtime-pdp-mode=shadow` and `--dry-run=true` are different:
+- `shadow` means RuntimePDP evaluates and logs decisions, but does not emit an
+  enforcement action to a PEP.
+- `dry-run=true` means local enforcement effects are not written to PEPs such as
+  KLShield or netfilter.
 
 ---
 
-## 2.1 RuntimePolicyPack via --policy-file laden
+## 2.1 Load A RuntimePolicyPack With --policy-file
 
-Dieser Test prueft den neuen lokalen contracts-basierten Policy-Pfad. Er
-braucht kein Root und keinen Adapter.
+This test checks the new local contracts-based policy path. It needs no root
+privileges and no adapter.
 
 ```bash
 cd /home/adrian/prj/ebpf-security/kernloom
@@ -152,36 +152,35 @@ timeout 12s ./bin/kliq run \
   --interval=2s
 ```
 
-Erwartet:
-- Log enthaelt `Policy loaded: ... kind=RuntimePolicyPack`.
-- Log enthaelt `[runtime-pdp] pack loaded: 2 rules`.
-- Log enthaelt `RuntimePDP mode: SHADOW`.
-- Keine Meldungen wie `unsupported kind`, `parse runtime pack` oder
+Expected:
+- The log contains `Policy loaded: ... kind=RuntimePolicyPack`.
+- The log contains `[runtime-pdp] pack loaded: 2 rules`.
+- The log contains `RuntimePDP mode: SHADOW`.
+- No messages like `unsupported kind`, `parse runtime pack`, or
   `compile error`.
 
-Hinweis: Ohne Adapter-Signale gibt es meist keine RuntimePDP-Entscheidungen.
-Dieser Test prueft bewusst nur Laden, Validierung und Kompilierung des Packs.
-`--runtime-pdp-mode=active` sollte erst genutzt werden, wenn das Policy Pack
-fachlich passt und `--dry-run=false` wirklich gewollt ist.
+Note: without adapter signals, there are usually no RuntimePDP decisions. This
+test only checks load, validation, and compilation of the pack. Use
+`--runtime-pdp-mode=active` only after the policy pack is correct and
+`--dry-run=false` is really wanted.
 
-`signals.enforcement.*` sind generische RuntimePDP-Facts fuer laufendes
-PEP-Feedback:
-- `signals.enforcement.feedback_rate`: generische Feedback-Rate.
-- `signals.enforcement.drop_rate`: Drop-Rate; bei KLShield aktuell
+`signals.enforcement.*` are generic RuntimePDP facts for active PEP feedback:
+- `signals.enforcement.feedback_rate`: generic feedback rate.
+- `signals.enforcement.drop_rate`: drop rate; for KLShield this is currently
   `network.rate_limit_drop_rate`.
-- `signals.enforcement.deny_rate`: Deny-/Reject-Rate, aktuell `0` bis ein
-  Adapter sie liefert.
-- `signals.enforcement.throttle_rate`: Throttle-/Backpressure-Rate, aktuell `0`
-  bis ein Adapter sie liefert.
-- `signals.enforcement.active`: `true`, wenn eine dieser Raten groesser als
-  `0` ist.
+- `signals.enforcement.deny_rate`: deny/reject rate, currently `0` until an
+  adapter provides it.
+- `signals.enforcement.throttle_rate`: throttle/backpressure rate, currently
+  `0` until an adapter provides it.
+- `signals.enforcement.active`: `true` when one of these rates is greater than
+  `0`.
 
-`signals.enforcement_feedback_rate` bleibt als alter Alias fuer
-`signals.enforcement.feedback_rate` verwendbar.
+`signals.enforcement_feedback_rate` remains usable as an old alias for
+`signals.enforcement.feedback_rate`.
 
 ---
 
-## 3. State-Store pruefen
+## 3. Check The State Store
 
 ```bash
 cd /home/adrian/prj/ebpf-security/kernloom
@@ -195,17 +194,17 @@ cd /home/adrian/prj/ebpf-security/kernloom
   --db=/tmp/kernloom-manual/kliq-state.db
 ```
 
-Erwartet:
-- `storage status` oeffnet die SQLite-DB und zeigt Tabellen wie `entities`,
+Expected:
+- `storage status` opens the SQLite DB and shows tables such as `entities`,
   `relationships`, `metric_baselines`, `signals`, `decisions`.
-- Ohne Adapter-Telemetrie sind Relationships/Baselines vermutlich leer. Das ist
-  fuer diesen Smoke-Test korrekt.
+- Without adapter telemetry, relationships and baselines will probably be empty.
+  That is correct for this smoke test.
 
 ---
 
 ## 4. Netfilter Dry-Run
 
-Netfilter ist ein Enforcement-Adapter. Er liefert keine Primaer-Telemetrie.
+Netfilter is an enforcement adapter. It does not provide primary telemetry.
 
 ```bash
 cd /home/adrian/prj/ebpf-security/kernloom
@@ -224,19 +223,19 @@ timeout 15s sudo ./bin/kliq run \
   --interval=2s
 ```
 
-Erwartet:
-- Wenn `nft` oder `iptables` vorhanden ist: Log `Netfilter adapter active`.
-- Wenn kein Backend vorhanden ist: Warnung, aber kein Crash.
-- Keine Graph-Telemetrie aus netfilter erwarten; conntrack ist nur optionaler
-  Topology-Fallback.
+Expected:
+- If `nft` or `iptables` is available, the log says `Netfilter adapter active`.
+- If no backend is available, KLIQ logs a warning but does not crash.
+- Do not expect graph telemetry from netfilter; conntrack is only an optional
+  topology fallback.
 
 ---
 
 ## 5. KLShield Runtime-Smoke
 
-Dieser Test nutzt den Default-Adapter `klshield`. Er ist nur sinnvoll, wenn die
-KLShield/eBPF-Maps vorhanden sind oder die Umgebung bewusst als Dry-Run getestet
-wird.
+This test uses the default adapter, `klshield`. It only makes sense when the
+KLShield/eBPF maps exist, or when you intentionally test the environment in
+dry-run mode.
 
 ```bash
 cd /home/adrian/prj/ebpf-security/kernloom
@@ -253,19 +252,18 @@ timeout 20s sudo ./bin/kliq run \
   --interval=2s
 ```
 
-Erwartet:
-- Mit verfuegbaren Maps startet der KLShield Runtime-Adapter.
-- Ohne Maps ist eine Adapter-Warnung akzeptabel; der Prozess darf nicht paniken.
-- KLShield-spezifische Metriken bleiben in `pkg/adapters/klshield/...`; KLIQ
-  verarbeitet nur generische `SourceObservation`-Werte.
+Expected:
+- With available maps, the KLShield runtime adapter starts.
+- Without maps, an adapter warning is acceptable; the process must not panic.
+- KLShield-specific metrics stay in `pkg/adapters/klshield/...`; KLIQ only
+  processes generic `SourceObservation` values.
 
-### 5.1 KLShield + Netfilter am selben KLIQ/PDP
+### 5.1 KLShield + Netfilter On The Same KLIQ/PDP
 
-Mehrere Adapter werden als kommagetrennte Liste angegeben. Der erste verfuegbare
-Source-PEP fuehrt den lokalen FSM-State; weitere Source-PEPs spiegeln
-autorisierte Transitionen als Sidecars. Relationship-PEPs werden gesammelt, so
-dass Tuple-/Relationship-Enforcement von allen verfuegbaren passenden Adaptern
-bedient werden kann.
+Multiple adapters are passed as a comma-separated list. The first available
+source PEP owns the local FSM state. Other source PEPs mirror authorized
+transitions as sidecars. Relationship PEPs are collected, so tuple or
+relationship enforcement can use all available matching adapters.
 
 ```bash
 cd /home/adrian/prj/ebpf-security/kernloom
@@ -282,47 +280,47 @@ timeout 20s sudo ./bin/kliq run \
   --interval=2s
 ```
 
-Erwartet:
-- KLIQ loggt die angeforderten Adapter und die aktiven Inventory-/PEP-Bindings.
-- Wenn Netfilter verfuegbar ist: `Netfilter adapter active`.
-- RuntimePDP bleibt ein einzelner lokaler PDP; Adapter fuehren keine eigenen
-  Policy-Entscheidungen aus.
-- Wenn KLShield Maps fehlen, darf Netfilter trotzdem als Sidecar starten.
+Expected:
+- KLIQ logs the requested adapters and the active inventory/PEP bindings.
+- If Netfilter is available, the log says `Netfilter adapter active`.
+- RuntimePDP remains one local PDP; adapters do not make their own policy
+  decisions.
+- If KLShield maps are missing, Netfilter may still start as a sidecar.
 
-### 5.2 Remote-k6: schrittweise Eskalation und Deeskalation
+### 5.2 Remote k6: Stepwise Escalation And De-Escalation
 
-Dieser Test nutzt zwei Geraete:
-- Zielhost: Service, KLShield und KLIQ laufen hier.
-- Lastgenerator: anderes Geraet im gleichen Netz, auf dem `k6` laeuft.
+This test uses two machines:
+- Target host: the service, KLShield, and KLIQ run here.
+- Load generator: another machine in the same network running `k6`.
 
-Ziel: beweisen, dass KLIQ die Remote-Source sieht, dann schrittweise
-`OBSERVE -> RATE_SOFT -> RATE_HARD -> BLOCK` eskaliert und nach Ende der Last
-wieder bis `OBSERVE` deeskaliert.
+Goal: prove that KLIQ sees the remote source, then escalates step by step from
+`OBSERVE -> RATE_SOFT -> RATE_HARD -> BLOCK`, and de-escalates back to
+`OBSERVE` after the load stops.
 
-Wichtig:
-- Nur in einem Labornetz ausfuehren.
-- Wenn NAT, VPN, WSL, Load-Balancer oder ein Gateway dazwischen ist, sieht KLIQ
-  eventuell nicht die echte k6-IP, sondern die Gateway-/NAT-IP.
-- Fuer einen BLOCK-Test `--bootstrap=false` setzen. Aktiver Bootstrap kappt
-  BLOCK bewusst auf `RATE_HARD`.
-- Fuer diesen Test kein Policy Pack mit `max_action=rate_limit` verwenden,
-  sonst ist BLOCK absichtlich nicht erlaubt.
+Important:
+- Run this only in a lab network.
+- If NAT, VPN, WSL, a load balancer, or a gateway is in the path, KLIQ may see
+  the gateway/NAT IP instead of the real k6 IP.
+- For a BLOCK test, set `--bootstrap=false`. Active bootstrap intentionally caps
+  BLOCK at `RATE_HARD`.
+- Do not use a policy pack with `max_action=rate_limit` for this test, because
+  that intentionally forbids BLOCK.
 
-Zielhost vorbereiten:
+Prepare the target host:
 
 ```bash
 cd /home/adrian/prj/ebpf-security/kernloom
 mkdir -p /tmp/kernloom-manual
 
-# Interface waehlen, auf dem die Pakete vom k6-Geraet hereinkommen.
+# Choose the interface that receives packets from the k6 machine.
 ip -br addr
 export IFACE=eth0
 
-# Testservice starten, falls kein eigener Service genutzt wird.
+# Start a test service if you do not use your own service.
 python3 -m http.server 8000 --bind 0.0.0.0
 ```
 
-In einem zweiten Terminal auf dem Zielhost:
+In a second terminal on the target host:
 
 ```bash
 cd /home/adrian/prj/ebpf-security/kernloom
@@ -331,11 +329,11 @@ sudo ./bin/klshield attach-xdp \
   --iface "$IFACE" \
   --obj shield/bpf/out/xdp_kernloom_shield.bpf.o
 
-# Optional: alte Testeintraege aus den KLShield-Maps entfernen.
+# Optional: remove old test entries from the KLShield maps.
 sudo ./bin/klshield reset || true
 
 cat > /tmp/kernloom-manual/whitelist-empty.txt <<'EOF'
-# leer lassen: die k6-Source darf fuer diesen Test NICHT whitelisted sein
+# Keep this empty. The k6 source must NOT be whitelisted for this test.
 EOF
 
 printf '[]\n' > /tmp/kernloom-manual/feedback-empty.json
@@ -394,7 +392,7 @@ spec:
 EOF
 ```
 
-KLIQ zuerst im Dry-Run starten:
+Start KLIQ in dry-run first:
 
 ```bash
 cd /home/adrian/prj/ebpf-security/kernloom
@@ -437,7 +435,7 @@ sudo ./bin/kliq run \
   2>&1 | tee /tmp/kernloom-manual/kliq-k6-dryrun.log
 ```
 
-Auf dem k6-Geraet:
+On the k6 machine:
 
 ```bash
 cat > stresstest-k6.js <<'EOF'
@@ -457,32 +455,32 @@ export default function () {
 }
 EOF
 
-TARGET=http://ZIELHOST_IP:8000 k6 run stresstest-k6.js
+TARGET=http://TARGET_HOST_IP:8000 k6 run stresstest-k6.js
 ```
 
-Dry-Run Erwartung auf dem Zielhost:
+Dry-run check on the target host:
 
 ```bash
 grep -E 'STATE|ACTION-RECEIPT|TICK#|top:' /tmp/kernloom-manual/kliq-k6-dryrun.log
 ```
 
-Erwartet:
-- Die Source in `top:` oder `STATE` ist die IP des k6-Geraets. Wenn dort die
-  Gateway-IP steht, liegt NAT dazwischen.
-- Log zeigt nacheinander mindestens:
+Expected:
+- The source in `top:` or `STATE` is the IP of the k6 machine. If it is the
+  gateway IP, NAT is in the path.
+- The log shows at least these transitions:
   - `STATE <k6-ip> OBSERVE->RATE_SOFT`
   - `STATE <k6-ip> RATE_SOFT->RATE_HARD`
   - optional `STATE <k6-ip> RATE_HARD->BLOCK`
-- Im Dry-Run gibt es keine echten Drops; `runtime-pdp-mode=active` plus
-  `dry_run=true` prueft Detection, RuntimePolicyPack, Broker-/Receipt-Pfad und
-  Logging ohne PEP-Effekt.
+- In dry-run there are no real drops. `runtime-pdp-mode=active` plus
+  `dry_run=true` checks detection, RuntimePolicyPack, broker/receipt flow, and
+  logging without PEP effects.
 
-Echte Enforcement-Variante:
+Real enforcement variant:
 
-1. KLIQ mit `Ctrl-C` stoppen.
-2. KLShield-Maps resetten.
-3. KLIQ mit denselben Flags, aber `--dry-run=false` starten.
-4. k6 erneut ausfuehren.
+1. Stop KLIQ with `Ctrl-C`.
+2. Reset the KLShield maps.
+3. Start KLIQ with the same flags, but with `--dry-run=false`.
+4. Run k6 again.
 
 ```bash
 sudo ./bin/klshield reset || true
@@ -525,61 +523,60 @@ sudo ./bin/kliq run \
   2>&1 | tee /tmp/kernloom-manual/kliq-k6-enforce.log
 ```
 
-Waehrend k6 laeuft:
+While k6 is running:
 
 ```bash
 grep -E 'STATE|ACTION-RECEIPT|TICK#|top:' /tmp/kernloom-manual/kliq-k6-enforce.log
 sudo ./bin/klshield stats
 ```
 
-Erwartet:
+Expected:
 - `STATE <k6-ip> OBSERVE->RATE_SOFT`
 - `STATE <k6-ip> RATE_SOFT->RATE_HARD`
-- `STATE <k6-ip> RATE_HARD->BLOCK` oder mindestens `RATE_HARD`, wenn der
-  Test zu kurz oder die Last zu niedrig ist.
-- `ACTION-RECEIPT` fuer Apply-Aktionen.
-- `klshield stats` zeigt steigende `drop_rl` oder `drop_deny`.
+- `STATE <k6-ip> RATE_HARD->BLOCK`, or at least `RATE_HARD` if the test is too
+  short or the load is too low.
+- `ACTION-RECEIPT` for apply actions.
+- `klshield stats` shows increasing `drop_rl` or `drop_deny`.
 
-Deeskalation testen:
+Test de-escalation:
 
-1. k6 auslaufen lassen oder mit `Ctrl-C` stoppen.
-2. KLIQ weiterlaufen lassen.
-3. 45-60 Sekunden warten. Mit `soft/hard/block-ttl=10s`, `down-need=2` und
-   KLShield-Cooldown von 5s laeuft die Rueckwaertskette nicht sofort, sondern
-   schrittweise.
+1. Let k6 finish or stop it with `Ctrl-C`.
+2. Keep KLIQ running.
+3. Wait 45-60 seconds. With `soft/hard/block-ttl=10s`, `down-need=2`, and the
+   KLShield 5s cooldown, the reverse chain is stepwise, not instant.
 
 ```bash
 grep -E 'STATE .*->(RATE_HARD|RATE_SOFT|OBSERVE)|TICK#' \
   /tmp/kernloom-manual/kliq-k6-enforce.log
 ```
 
-Erwartet:
-- Nach Lastende erscheinen Rueckwaerts-Transitionen, z.B.:
+Expected:
+- After the load ends, reverse transitions appear, for example:
   - `STATE <k6-ip> BLOCK->RATE_HARD`
   - `STATE <k6-ip> RATE_HARD->RATE_SOFT`
   - `STATE <k6-ip> RATE_SOFT->OBSERVE`
-- Spaetere Ticks zeigen `fsm{soft=0 hard=0 block=0}`.
-- Vom k6-Geraet funktioniert ein normaler Request wieder:
+- Later ticks show `fsm{soft=0 hard=0 block=0}`.
+- A normal request from the k6 machine works again:
 
 ```bash
-curl -fsS http://ZIELHOST_IP:8000 >/dev/null && echo recovered
+curl -fsS http://TARGET_HOST_IP:8000 >/dev/null && echo recovered
 ```
 
-Wenn keine Eskalation sichtbar ist:
-- Pruefen, ob `klshield stats` ueberhaupt `pkts`/`pass` zaehlt.
-- Pruefen, ob KLIQ die k6-IP oder nur eine NAT-/Gateway-IP sieht.
-- `--trig-pps` weiter senken, z.B. auf `5`.
-- Sicherstellen, dass die k6-IP nicht in Whitelist oder Feedback steht.
-- Sicherstellen, dass `--bootstrap=false` gesetzt ist, wenn BLOCK erwartet wird.
-- Bei sehr schnellem BLOCK statt sichtbarer Zwischenstufen `--hard-at` und
-  `--block-at` erhoehen oder die k6-Last reduzieren.
+If no escalation is visible:
+- Check whether `klshield stats` counts any `pkts`/`pass`.
+- Check whether KLIQ sees the k6 IP or only a NAT/gateway IP.
+- Lower `--trig-pps`, for example to `5`.
+- Make sure the k6 IP is not in the whitelist or feedback file.
+- Make sure `--bootstrap=false` is set if BLOCK is expected.
+- If BLOCK happens too fast to see the intermediate states, increase
+  `--hard-at` and `--block-at`, or reduce the k6 load.
 
 ---
 
-## 6. Graph und Baselines
+## 6. Graph And Baselines
 
-Graph Learning braucht eine Telemetriequelle. Mit `--adapter=none` bleiben die
-Stores leer, aber die CLI-Pfade muessen trotzdem funktionieren.
+Graph learning needs a telemetry source. With `--adapter=none`, stores stay
+empty, but the CLI paths must still work.
 
 ```bash
 cd /home/adrian/prj/ebpf-security/kernloom
@@ -601,131 +598,65 @@ timeout 20s sudo ./bin/kliq run \
   --scope=relationship
 ```
 
-Erwartet:
-- `storage status --db=/tmp/kernloom-manual/kliq-graph.db` zeigt Rows in
-  `entities`, `relationships` und `metric_baselines`.
-- `baselines list` zeigt pro Metrik den gelernten `BASELINE`-Wert. Das ist der
-  EWMA-Normalwert fuer diese Metrik und diesen Scope. `PEAK` ist der gelernte
-  Spitzenwert, `CONF` die Baseline-Confidence von 0 bis 1, `OBS` die Anzahl
-  Beobachtungen.
-- `--scope=relationship` filtert Baselines, die an eine gelernte Beziehung
-  gebunden sind, z.B. eine Netzwerk-Kante wie "source IP connects_to target
-  tuple". Andere Scopes koennen z.B. entity-/subject-basierte Baselines sein.
+Expected:
+- `storage status --db=/tmp/kernloom-manual/kliq-graph.db` shows rows in
+  `entities`, `relationships`, and `metric_baselines`.
+- `baselines list` shows the learned `BASELINE` value for each metric. This is
+  the EWMA normal value for that metric and scope. `PEAK` is the learned peak,
+  `CONF` is baseline confidence from 0 to 1, and `OBS` is the observation count.
+- `--scope=relationship` filters baselines bound to a learned relationship, for
+  example a network edge such as "source IP connects_to target tuple". Other
+  scopes can be entity- or subject-based baselines.
 
-Neue generische Graph-Signale, die in Logs/Stores auftauchen koennen:
+New generic graph signals that may appear in logs or stores:
 - `graph.new_relationship_dim`
 - `graph.edge_metric_deviation`
 - `graph.edge_metric_peak_exceeds`
 
-Alte Signalnamen wie `graph.edge_baseline_pps_deviation` sollten nicht mehr in
-neuem Code oder neuen Daten auftauchen.
+Old signal names such as `graph.edge_baseline_pps_deviation` should not appear
+in new code or new data.
 
 ---
 
-## 7. Forge Managed-Smoke
+## 7. Forge -> KLIQ: Standalone-Pack und Managed Mode
 
-In einem zweiten Terminal:
+This section is the new end-to-end path:
 
-```bash
-cd /home/adrian/prj/ebpf-security/kernloom-forge
-mkdir -p bin
-go build -o bin/forge ./cmd/forge
-./bin/forge serve --addr :18443
-```
+1. Forge builds a `RuntimePolicyPack` from an `AccessPolicy`.
+2. KLIQ loads that pack in standalone mode with `--policy-file`.
+3. Forge signs the same intent as a `RuntimeBundle`.
+4. KLIQ pulls the bundle in managed mode from `forge serve`.
 
-Health-Check:
+The longer Forge-side guide is in
+`kernloom-forge/docs/policy-intent-examples.md`.
 
-```bash
-curl -s http://localhost:18443/healthz
-```
-
-Erwartet: `ok`.
-
-KLIQ mit Forge verbinden:
+### 7.1 Binaries And Work Directory
 
 ```bash
+mkdir -p /tmp/kernloom-manual/forge/policies /tmp/kernloom-manual/forge/out
+
 cd /home/adrian/prj/ebpf-security/kernloom
+mkdir -p bin
+go build -o bin/kliq ./iq/cmd/kliq
 
-timeout 20s ./bin/kliq run \
-  --adapter=none \
-  --mode=managed \
-  --dry-run=true \
-  --forge-url=http://localhost:18443 \
-  --forge-enroll-token=dev-token \
-  --runtime-pdp-mode=shadow \
-  --bootstrap=false \
-  --autotune=false \
-  --whitelist=/tmp/kernloom-manual/whitelist.txt \
-  --feedback-file=/tmp/kernloom-manual/feedback.json \
-  --state-file=/tmp/kernloom-manual/state-managed.json \
-  --db=/tmp/kernloom-manual/kliq-managed.db \
-  --interval=2s
-```
-
-Erwartet:
-- Enrollment/Heartbeat-Log oder eine klare Forge-Warnung.
-- Kein Adapter-spezifischer Crash.
-- Ohne zugewiesenes Bundle sind RuntimePDP-Entscheidungen weiterhin leer oder
-  Shadow-only.
-
-Receipts pruefen:
-
-```bash
-sqlite3 /tmp/kernloom-manual/kliq-managed.db \
-  "SELECT id, status, upload_status FROM action_receipts LIMIT 10;"
-```
-
-Falls keine Aktionen passiert sind, ist eine leere Result-Menge normal.
-
----
-
-## 8. Forge als Policy-Builder fuer Standalone-KLIQ
-
-Dieser Pfad nutzt Forge nicht als laufenden Control-Plane-Server, sondern als
-Policy-Compiler fuer einen lokalen Operator-Workflow:
-
-1. Enterprise-Intent als `AccessPolicy` schreiben.
-2. Forge gegen Adapter-Manifeste und Target-Profile kompilieren lassen.
-3. Den Forge-Plan pruefen: deployable, compensating controls, downgrades,
-   unsupported requirements.
-4. Daraus ein lokales KLIQ-`RuntimePolicyPack` bauen und mit
-   `kliq run --policy-file=...` laden.
-
-Wichtig: `forge compile --output yaml` erzeugt aktuell einen
-`kind: EnforcementPlan`. Das ist ein Governance-/Compiler-Report und noch
-nicht direkt das Datei-Format fuer `kliq --policy-file`. Standalone-KLIQ laedt
-lokal:
-
-```yaml
-apiVersion: kernloom.io/runtime/v1alpha1
-kind: RuntimePolicyPack
-```
-
-Forge ist in diesem Ablauf also der sichere Compiler/Validator, der zeigt,
-welche Anforderungen fuer ein Target nativ, partiell, delegiert oder als
-Runtime-Kompensation umgesetzt werden sollen. Die finale Standalone-Datei ist
-danach ein KLIQ-`RuntimePolicyPack`.
-
-Forge bauen:
-
-```bash
 cd /home/adrian/prj/ebpf-security/kernloom-forge
-export PATH=$PATH:/usr/local/go/bin
 mkdir -p bin
 go build -o bin/forge ./cmd/forge
 ```
 
-Ein minimales Standalone-Intent fuer einen Edge-/Router-Node anlegen:
+### 7.2 Write A Simple Policy Intent
+
+This intent says: for a local KLShield node, risk must be `low` and device
+posture must be `healthy`. Both are canonical registry keys.
 
 ```bash
-mkdir -p /tmp/kernloom-manual/forge-profiles
-cp examples/profiles/klshield-local.yaml /tmp/kernloom-manual/forge-profiles/
+cd /home/adrian/prj/ebpf-security/kernloom-forge
 
-cat > /tmp/kernloom-manual/standalone-edge-access.yaml <<'EOF'
+cat > /tmp/kernloom-manual/forge/policies/manual-edge-access.yaml <<'EOF'
 apiVersion: kernloom.io/v1
 kind: AccessPolicy
 metadata:
-  name: standalone-edge-access
+  name: manual-edge-access
   owner: lab-operator
 spec:
   subject:
@@ -741,221 +672,255 @@ spec:
       signal: subject.risk.level
       operator: eq
       value: low
+    - id: require-healthy-device
+      type: device_posture
+      signal: device.posture.status
+      operator: eq
+      value: healthy
   effect: allow
 EOF
 ```
 
-Intent und KLShield-Adaptermanifest validieren:
+### 7.3 Check With Forge And Export A RuntimePolicyPack
 
 ```bash
 ./bin/forge validate \
-  --policy /tmp/kernloom-manual/standalone-edge-access.yaml
+  --policy /tmp/kernloom-manual/forge/policies/manual-edge-access.yaml
 
-./bin/forge validate-adapter \
-  --adapter examples/adapters/klshield/capability.yaml
-```
-
-Policy gegen das lokale KLShield-Target kompilieren:
-
-```bash
 ./bin/forge compile \
-  --policy /tmp/kernloom-manual/standalone-edge-access.yaml \
+  --policy /tmp/kernloom-manual/forge/policies/manual-edge-access.yaml \
   --adapters examples/adapters \
-  --profiles /tmp/kernloom-manual/forge-profiles \
+  --profiles examples/profiles \
   --output summary
 
-./bin/forge compile \
-  --policy /tmp/kernloom-manual/standalone-edge-access.yaml \
+./bin/forge report \
+  --policy /tmp/kernloom-manual/forge/policies/manual-edge-access.yaml \
   --adapters examples/adapters \
-  --profiles /tmp/kernloom-manual/forge-profiles \
-  --output yaml \
-  > /tmp/kernloom-manual/forge-standalone-plan.yaml
+  --profiles examples/profiles \
+  --output /tmp/kernloom-manual/forge/out/manual-edge-report.yaml
+
+./bin/forge export-runtime-policy \
+  --policy /tmp/kernloom-manual/forge/policies/manual-edge-access.yaml \
+  --adapters examples/adapters \
+  --profiles examples/profiles \
+  --target klshield-local \
+  --ttl 30s \
+  --output /tmp/kernloom-manual/forge/out/manual-edge-runtime-pack.yaml
 ```
 
-Erwartet:
-- Die Summary enthaelt `standalone-edge-access -> klshield-local`.
-- `deployable` bedeutet: alle Requirements sind mindestens implementiert,
-  partiell, delegiert oder als kompensierender Runtime-Control abgedeckt.
-- `compensating=require-low-risk` bedeutet: Forge erwartet fuer diese
-  Anforderung eine RuntimePDP-Regel in KLIQ.
-- `unsupported=...` bedeutet: nicht blind weitermachen. Erst entscheiden, ob
-  das Intent, das Target-Profil oder die Adapter-Faehigkeiten angepasst werden
-  muessen.
-- `partial`/`downgraded` bedeutet: die Semantik wurde vereinfacht, z.B. Rolle
-  oder Service wird bei KLShield auf lokale Netzwerk-/Cgroup-Sicht reduziert.
+Expected:
+- `compile --output summary` shows `manual-edge-access -> klshield-local`.
+- The report shows `risk_level` and `device_posture` as
+  `compensating_control`.
+- The exported pack is `kind: RuntimePolicyPack`.
 
-Den Plan inspizieren:
+Quick check:
 
 ```bash
-grep -E 'target:|deployable:|status:|capability:|action:|unsupported|downgrade' \
-  /tmp/kernloom-manual/forge-standalone-plan.yaml
+grep -E 'kind: RuntimePolicyPack|capabilities_required:|when:|capability:|level:' \
+  /tmp/kernloom-manual/forge/out/manual-edge-runtime-pack.yaml
 ```
 
-Fuer Standalone-KLIQ daraus ein lokales RuntimePolicyPack erstellen:
+Expected in the pack:
+- `capability: enforce.access.deny`
+- a rule for `risk.level in ['high', 'critical']`
+- a rule for `device.posture.status in ['degraded', 'unhealthy', 'unknown']`
 
-```bash
-cat > /tmp/kernloom-manual/standalone-runtime-policy.yaml <<'EOF'
-apiVersion: kernloom.io/runtime/v1alpha1
-kind: RuntimePolicyPack
-metadata:
-  name: standalone-klshield-runtime-policy
-  issued_at: "2026-06-19T10:00:00Z"
-spec:
-  default_effect: deny
-  capabilities_required:
-    - enforce.traffic.rate_limit
-    - enforce.access.deny
-  rules:
-    - id: hold-active-enforcement
-      when: "fsm.current_level in ['soft', 'hard', 'block'] && signals.enforcement.active"
-      then:
-        capability: enforce.traffic.rate_limit
-        level: hard
-        ttl: "30s"
-        params:
-          rate_pps: 100
-      reason_codes:
-        - forge_standalone_hold
-        - enforcement_feedback_active
+Important: `forge compile --output yaml` creates an `EnforcementPlan`. That is
+a report. KLIQ standalone loads the file from `export-runtime-policy`.
 
-    - id: critical-risk-deny
-      when: "risk.level == 'critical'"
-      then:
-        capability: enforce.access.deny
-        level: block
-        ttl: "30s"
-      reason_codes:
-        - forge_compensating_control
-        - risk_critical
+### 7.4 Standalone KLIQ With The Forge Pack
 
-    - id: high-risk-rate-limit
-      when: "risk.level == 'high'"
-      then:
-        capability: enforce.traffic.rate_limit
-        level: hard
-        ttl: "30s"
-        params:
-          rate_pps: 100
-      reason_codes:
-        - forge_compensating_control
-        - risk_high
-EOF
-```
-
-Warum diese drei Regeln:
-- `hold-active-enforcement` verhindert Oszillation. Wenn der PEP weiterhin
-  Drops/Deny/Throttle-Feedback meldet, erneuert KLIQ die Lease, auch wenn die
-  Post-Enforcement-Telemetrie sauberer aussieht.
-- `critical-risk-deny` ist die harte Kompensation fuer kritisches Risiko.
-- `high-risk-rate-limit` ist die konservative Kompensation fuer hohes Risiko.
-
-Regel-Reihenfolge ist relevant: RuntimePDP nimmt die erste passende Regel.
-Darum steht Hold vor neuen Eskalationen und `critical` vor `high`.
-
-Hinweis zu Capability-Namen:
-- Forge-Adapterkataloge koennen adapterseitige Action-IDs wie
-  `network.flow_rate_limit` oder `network.flow_deny` zeigen.
-- Das Standalone-`RuntimePolicyPack` fuer KLIQ sollte die contracts-basierten
-  Runtime-Capabilities verwenden: `enforce.traffic.rate_limit` und
-  `enforce.access.deny`.
-
-Policy lokal ohne PEP-Effekt pruefen:
+This test needs no adapter, no eBPF, and no root privileges. It checks loading,
+validation, and RuntimePDP compilation of the pack created by Forge.
 
 ```bash
 cd /home/adrian/prj/ebpf-security/kernloom
 
 timeout 12s ./bin/kliq run \
   --adapter=none \
-  --policy-file=/tmp/kernloom-manual/standalone-runtime-policy.yaml \
+  --policy-file=/tmp/kernloom-manual/forge/out/manual-edge-runtime-pack.yaml \
   --runtime-pdp-mode=shadow \
   --dry-run=true \
   --feature-profile=dos-light \
   --bootstrap=false \
   --autotune=false \
-  --state-file=/tmp/kernloom-manual/state-forge-standalone-shadow.json \
-  --db=/tmp/kernloom-manual/kliq-forge-standalone-shadow.db \
+  --state-file=/tmp/kernloom-manual/state-forge-standalone.json \
+  --db=/tmp/kernloom-manual/kliq-forge-standalone.db \
   --interval=2s
 ```
 
-Erwartet:
+Expected:
 - `Policy loaded: ... kind=RuntimePolicyPack`
-- `[runtime-pdp] pack loaded: 3 rules`
+- `[runtime-pdp] pack loaded: 2 rules`
 - `RuntimePDP mode: SHADOW`
+- no `unsupported kind`, parse, or compile errors.
 
-Danach mit KLShield als Standalone-KLIQ im Dry-Run starten:
+Optional KLShield dry-run:
 
 ```bash
 sudo ./bin/kliq run \
   --adapter=klshield \
-  --policy-file=/tmp/kernloom-manual/standalone-runtime-policy.yaml \
+  --policy-file=/tmp/kernloom-manual/forge/out/manual-edge-runtime-pack.yaml \
   --runtime-pdp-mode=active \
   --dry-run=true \
   --feature-profile=dos-light \
   --bootstrap=false \
   --autotune=false \
-  --state-file=/tmp/kernloom-manual/state-forge-standalone-klshield.json \
-  --db=/tmp/kernloom-manual/kliq-forge-standalone-klshield.db \
+  --state-file=/tmp/kernloom-manual/state-forge-klshield.json \
+  --db=/tmp/kernloom-manual/kliq-forge-klshield.db \
   --interval=1s
 ```
 
-Erwartet:
-- RuntimePDP ist `active`, aber wegen `--dry-run=true` wird noch nichts real in
-  KLShield geschrieben.
-- Bei passenden Signalen erscheinen `[runtime-pdp:active] DECISION ...` und
-  `ACTION-RECEIPT`-Logs.
-- Erst nach erfolgreichem Dry-Run und bewusstem Operator-Entscheid
-  `--dry-run=false` verwenden.
+Expected: RuntimePDP is active, but `--dry-run=true` prevents real PEP writes.
+Use `--dry-run=false` only after a successful dry-run.
 
-Merksatz: Forge beantwortet hier "ist mein Intent fuer dieses Target fachlich
-abdeckbar?". KLIQ beantwortet lokal "welche Runtime-Aktion soll ich jetzt fuer
-dieses konkrete Subject ausfuehren?".
+### 7.5 Managed Mode With A Signed RuntimeBundle
+
+Managed mode is more than "KLIQ can reach Forge". The important test is: KLIQ
+gets a signed `RuntimeBundle`, verifies it with `--policy-verify-key`, and
+activates the embedded registry snapshot plus `RuntimePolicyPack`.
+
+Build keys and a bundle:
+
+```bash
+cd /home/adrian/prj/ebpf-security/kernloom-forge
+
+./bin/forge keygen \
+  --private /tmp/kernloom-manual/forge/out/forge-runtime.key \
+  --public /tmp/kernloom-manual/forge/out/forge-runtime.pub
+
+./bin/forge build-runtime-bundle \
+  --policy /tmp/kernloom-manual/forge/policies/manual-edge-access.yaml \
+  --adapters examples/adapters \
+  --profiles examples/profiles \
+  --target klshield-local \
+  --node-id node-manual-1 \
+  --generation 1 \
+  --runtime-pdp-mode shadow \
+  --failover fail_static \
+  --signing-key /tmp/kernloom-manual/forge/out/forge-runtime.key \
+  --output /tmp/kernloom-manual/forge/out/manual-edge-runtime-bundle.yaml
+```
+
+Check the bundle:
+
+```bash
+grep -E 'kind: RuntimeBundle|registry_snapshot:|runtime_policy_pack:|signature:' \
+  /tmp/kernloom-manual/forge/out/manual-edge-runtime-bundle.yaml
+```
+
+Pre-register the KLIQ node and copy the printed `enroll_token`:
+
+```bash
+./bin/forge enroll-token create \
+  --store /tmp/kernloom-manual/forge/out/enroll-tokens.yaml \
+  --node-id node-manual-1 \
+  --ttl 24h
+```
+
+In a second terminal, start Forge as the control plane:
+
+```bash
+cd /home/adrian/prj/ebpf-security/kernloom-forge
+
+./bin/forge serve \
+  --addr :18443 \
+  --policy /tmp/kernloom-manual/forge/policies/manual-edge-access.yaml \
+  --adapters examples/adapters \
+  --profiles examples/profiles \
+  --target klshield-local \
+  --signing-key /tmp/kernloom-manual/forge/out/forge-runtime.key \
+  --enroll-token-store /tmp/kernloom-manual/forge/out/enroll-tokens.yaml \
+  --generation 1 \
+  --runtime-pdp-mode shadow \
+  --failover fail_static
+```
+
+Health check:
+
+```bash
+curl -fsS http://localhost:18443/healthz
+```
+
+Start KLIQ in managed mode. Replace `PASTE_ENROLL_TOKEN_HERE` with the token
+printed by `forge enroll-token create`:
+
+```bash
+cd /home/adrian/prj/ebpf-security/kernloom
+
+timeout 30s ./bin/kliq run \
+  --adapter=none \
+  --graph-node-id=node-manual-1 \
+  --mode=managed \
+  --forge-url=http://localhost:18443 \
+  --forge-enroll-token=PASTE_ENROLL_TOKEN_HERE \
+  --policy-verify-key=/tmp/kernloom-manual/forge/out/forge-runtime.pub \
+  --runtime-pdp-mode=shadow \
+  --dry-run=true \
+  --feature-profile=dos-light \
+  --bootstrap=false \
+  --autotune=false \
+  --state-file=/tmp/kernloom-manual/state-managed.json \
+  --db=/tmp/kernloom-manual/kliq-managed.db \
+  --interval=2s
+```
+
+Expected:
+- Forge logs enrollment, heartbeat, and bundle requests.
+- KLIQ logs that it applied a RuntimeBundle.
+- KLIQ rejects bundles without a valid signature or without a registry snapshot.
+- `managed/current-bundle.yaml` is written next to the state file.
+
+Note: the Forge API server is still an MVP. Enrollment tokens and session tokens
+are stored in memory while the server runs, but the enrollment token store keeps
+used/unused token state on disk.
 
 ---
 
-## 9. Integrationstest-Skripte
+## 8. Integration Test Scripts
 
-Die manuellen Schritte oben koennen durch die Integrationstest-Skripte
-abgesichert werden.
+The integration scripts can check the manual steps above.
 
-No-XDP/ohne Root fuer den RuntimePolicyPack-Pfad:
+No-XDP/no-root path for RuntimePolicyPack:
 
 ```bash
 cd /home/adrian/prj/ebpf-security/kernloom
 KLT_SCENARIOS=12 bash tests/integration/run-forge.sh
 ```
 
-Erwartet:
-- `bin/kliq` wird bei Bedarf gebaut.
-- Szenario `12_runtime_policy_pack.sh` startet `kliq run --adapter=none` mit
+Expected:
+- `bin/kliq` is built when needed.
+- Scenario `12_runtime_policy_pack.sh` starts `kliq run --adapter=none` with
   `kind: RuntimePolicyPack`.
-- Danach laufen gezielte Contract-Tests fuer Loader, Signaturpruefung,
-  `RuntimeDecision -> ActionProposal`, Broker-Revert und RuntimeBundle
-  Conformance.
+- Then focused contract tests run for loader, signature checks,
+  `RuntimeDecision -> ActionProposal`, broker revert, and RuntimeBundle
+  conformance.
 
-No-XDP Control-Plane-Gruppe:
+No-XDP control-plane group:
 
 ```bash
 make integration-forge
 ```
 
-Das fuehrt standardmaessig Szenarien 09, 10 und 12 aus. Forge wird nur fuer
-09/10 gebaut; Szenario 12 braucht keinen Forge-Server.
+By default this runs scenarios 09, 10, and 12. Forge is built only for 09/10;
+scenario 12 does not need a Forge server.
 
-Voller XDP/netns-Lauf:
+Full XDP/netns run:
 
 ```bash
 make integration
 ```
 
-Hinweis: Der volle Lauf braucht sudo, XDP/netns-faehige Linux-Umgebung und
-optional netfilter-Tools fuer Szenario 11. Artefakte landen unter
-`/tmp/kernloom-integration-artifacts-<uid>/<run-id>/`, nicht im Repository.
+Note: the full run needs sudo, a Linux environment with XDP/netns support, and
+optional netfilter tools for scenario 11. Artifacts are written under
+`/tmp/kernloom-integration-artifacts-<uid>/<run-id>/`, not into the repository.
 
 ---
 
-## 10. OpenZiti Decoder/Mapping Tests
+## 9. OpenZiti Decoder/Mapping Tests
 
-Diese Tests brauchen keinen Controller:
+These tests do not need a controller:
 
 ```bash
 cd /home/adrian/prj/ebpf-security/kernloom
@@ -965,7 +930,7 @@ go test -v ./pkg/adapters/openziti/mapping/...
 go test -v ./pkg/adapters/openziti/relationshiplearner/...
 ```
 
-Optional mit realem Controller:
+Optional with a real controller:
 
 ```bash
 cat > /tmp/openziti-test.go <<'EOF'
@@ -995,38 +960,38 @@ go run /tmp/openziti-test.go
 
 ---
 
-## 11. Was nach dem Umbau bewusst anders ist
+## 10. What Is Intentionally Different Now
 
-- KLIQ startet ueber `kliq run [flags]`; Subcommands sind explizit.
-- Der State-Store heisst `--db`; `--state-store-path` ist alt.
-- `--policy-file` akzeptiert `kind: LocalPolicyPack` und
-  `kind: RuntimePolicyPack` mit `apiVersion: kernloom.io/runtime/v1alpha1`.
-- Whitelist und Feedback matchen generische Subject-IDs. IP/CIDR ist nur eine
-  unterstuetzte Subject-Form fuer netzwerkbasierte Adapter.
-- Adapter-spezifische Telemetrie, Tuning-Details und Enforcement-Schluessel
-  gehoeren in `pkg/adapters/<adapter>/...`, nicht in `iq/cmd/kliq`.
-- Graph/Baseline-Daten sind metrisch und subject-/relationship-basiert. Neue
-  Adapter sollen eigene Metric-IDs und Dimensionen liefern, statt KLIQ auf IP,
-  Port oder PPS zu koppeln.
-- RuntimePDP-Entscheidungen werden in `active` in `ActionProposal`s gemappt und
-  durch den Action Broker mit Lease/Receipt/Revert-Pfad gefuehrt. Der alte
-  direkte Beziehungspfad ist nicht mehr der Zielpfad.
+- KLIQ starts with `kliq run [flags]`; subcommands are explicit.
+- The state store flag is `--db`; `--state-store-path` is old.
+- `--policy-file` accepts `kind: LocalPolicyPack` and
+  `kind: RuntimePolicyPack` with `apiVersion: kernloom.io/runtime/v1alpha1`.
+- Whitelist and feedback match generic subject IDs. IP/CIDR is only one
+  supported subject form for network-based adapters.
+- Adapter-specific telemetry, tuning details, and enforcement keys belong in
+  `pkg/adapters/<adapter>/...`, not in `iq/cmd/kliq`.
+- Graph/baseline data is metric-based and subject-/relationship-based. New
+  adapters should provide their own metric IDs and dimensions instead of
+  coupling KLIQ to IP, port, or PPS.
+- In `active` mode, RuntimePDP decisions are mapped to `ActionProposal`s and go
+  through the action broker with lease, receipt, and revert flow. The old direct
+  relationship path is no longer the target path.
 
 ---
 
-## 12. Haeufige Probleme
+## 11. Common Problems
 
-| Problem | Loesung |
+| Problem | Fix |
 |---|---|
-| `unknown command` oder KLIQ startet nicht | `run` fehlt: `./bin/kliq run ...` verwenden |
-| `flag provided but not defined: -state-store-path` | Neues Flag nutzen: `--db=/tmp/kernloom-manual/kliq-state.db` |
-| `timeout` liefert Exit-Code `124` | Erwartet, wenn der Smoke-Test den laufenden Agent beendet |
+| `unknown command` or KLIQ does not start | `run` is missing: use `./bin/kliq run ...` |
+| `flag provided but not defined: -state-store-path` | Use the new flag: `--db=/tmp/kernloom-manual/kliq-state.db` |
+| `timeout` returns exit code `124` | Expected when the smoke test stops the running agent |
 | `go: command not found` | `export PATH=$PATH:/usr/local/go/bin` |
 | `kliq: no such file` | `go build -o bin/kliq ./iq/cmd/kliq` |
-| `unsupported kind` bei `--policy-file` | Top-level `kind` pruefen: aktuell `LocalPolicyPack` oder `RuntimePolicyPack` |
-| `compile runtime policy file` | CEL-Ausdruck, Capability, Level oder TTL im RuntimePolicyPack pruefen |
-| `Netfilter adapter ... no backend found` | `nft`/`iptables` fehlt oder Root-Rechte fehlen; fuer Orchestrator-Smoke `--adapter=none` nutzen |
-| KLShield Maps fehlen | Erst KLShield/eBPF Setup starten oder den unprivilegierten Smoke-Test nutzen |
-| Relationships/Baselines leer | Ohne Telemetriequelle normal; Graph Learning braucht Adapter-Observations |
-| Forge-Server nicht erreichbar | Port pruefen: `lsof -i :18443` |
-| `forge compile --output yaml` laedt nicht via `--policy-file` | Das ist ein `EnforcementPlan`. Fuer Standalone-KLIQ ein `RuntimePolicyPack` mit `apiVersion: kernloom.io/runtime/v1alpha1` erstellen |
+| `unsupported kind` with `--policy-file` | Check top-level `kind`: currently `LocalPolicyPack` or `RuntimePolicyPack` |
+| `compile runtime policy file` | Check CEL expression, capability, level, or TTL in the RuntimePolicyPack |
+| `Netfilter adapter ... no backend found` | `nft`/`iptables` is missing or root rights are missing; use `--adapter=none` for orchestrator smoke tests |
+| KLShield maps are missing | Start KLShield/eBPF setup first, or use the unprivileged smoke test |
+| Relationships/Baselines are empty | Normal without a telemetry source; graph learning needs adapter observations |
+| Forge server is not reachable | Check the port: `lsof -i :18443` |
+| `forge compile --output yaml` does not load via `--policy-file` | That is an `EnforcementPlan`. For standalone KLIQ, create a `RuntimePolicyPack` with `apiVersion: kernloom.io/runtime/v1alpha1` |

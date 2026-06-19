@@ -153,14 +153,22 @@ sudo ./bin/kliq run \
 When a Forge control plane is available, KLIQ operates in managed mode:
 
 ```bash
-# Start the Forge API server (in kernloom-forge repo)
-forge serve --addr :8443
+# Pre-register the node and copy the printed enroll_token.
+forge enroll-token create \
+  --store /etc/kernloom/forge-enroll-tokens.yaml \
+  --node-id <node-id>
+
+# Start the Forge API server (in kernloom-forge repo).
+forge serve \
+  --addr :8443 \
+  --enroll-token-store /etc/kernloom/forge-enroll-tokens.yaml
 
 # Connect KLIQ to Forge
 ./bin/kliq run \
   --mode=managed \
+  --graph-node-id=<node-id> \
   --forge-url=https://forge.example.com:8443 \
-  --forge-enroll-token=<token> \
+  --forge-enroll-token=<printed-enroll-token> \
   --policy-verify-key=/etc/kernloom/forge.pub \
   --runtime-pdp-mode=shadow   # or: active
 ```
