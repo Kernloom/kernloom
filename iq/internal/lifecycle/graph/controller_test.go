@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	contracts "github.com/kernloom/kernloom-contracts"
 	"github.com/kernloom/kernloom/iq/internal/lifecycle/graph"
 	"github.com/kernloom/kernloom/pkg/core/bundle"
 )
@@ -169,7 +170,7 @@ func TestAutoAdvanceToEnforce(t *testing.T) {
 }
 
 func TestMaxAction(t *testing.T) {
-	bounds := bundle.EnforcementBounds{
+	bounds := contracts.EnforcementBounds{
 		MaxActionDuringBootstrap:     "observe",
 		MaxActionDuringFrozenObserve: "observe",
 		MaxActionDuringFrozenEnforce: "rate_limit",
@@ -191,6 +192,15 @@ func TestMaxAction(t *testing.T) {
 		if got != tt.expected {
 			t.Errorf("phase=%s: got %q, want %q", tt.phase, got, tt.expected)
 		}
+	}
+}
+
+func TestMaxActionEmptyBoundsDoNotOverridePack(t *testing.T) {
+	cfg := graph.DefaultConfig()
+	cfg.Enabled = true
+	c := graph.New(cfg, graph.PhaseLearning, time.Now())
+	if got := c.MaxAction(contracts.EnforcementBounds{}); got != "" {
+		t.Fatalf("empty bounds max action: got %q, want empty", got)
 	}
 }
 
@@ -231,25 +241,20 @@ func TestBuildProposal(t *testing.T) {
 }
 
 func TestFromBundle(t *testing.T) {
-	plan := bundle.GraphLifecyclePlan{
-		Enabled: true,
-		Mode:    "managed",
-		Learning: bundle.GraphLearningConfig{
-			MinCleanLearning:     "200h",
-			MinLearnedEdges:      10,
-			MinBaselineCoverage:  0.80,
-			RequireAutotunePhase: "steady",
-		},
-		Freeze: bundle.GraphFreezeConfig{
-			AutoFreeze: true,
-			Approval:   "forge-auto",
-		},
-		Rollout: bundle.GraphRolloutConfig{
-			ObserveAfterFreeze: "168h",
-			FinalPhase:         "frozen_enforce",
-		},
+	plan := contracts.GraphLifecycle{
+		Mode:                 "managed",
+		MinCleanLearning:     contracts.NewDuration(200 * time.Hour),
+		MinLearnedEdges:      10,
+		MinBaselineCoverage:  0.80,
+		FreezeApproval:       "forge-auto",
+		ObserveAfterFreeze:   contracts.NewDuration(168 * time.Hour),
+		FinalPhase:           "frozen_enforce",
+		IncludeEdgeBaselines: true,
 	}
 	cfg := graph.FromBundle(plan)
+	if !cfg.Enabled {
+		t.Fatal("Enabled: got false, want true")
+	}
 	if cfg.MinLearnedEdges != 10 {
 		t.Errorf("MinLearnedEdges: got %d", cfg.MinLearnedEdges)
 	}

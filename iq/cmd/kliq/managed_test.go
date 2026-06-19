@@ -7,28 +7,29 @@ import (
 	"crypto/ed25519"
 	"crypto/rand"
 	"encoding/base64"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"testing"
 	"time"
 
+	contracts "github.com/kernloom/kernloom-contracts"
+	registries "github.com/kernloom/kernloom-registries"
 	"github.com/kernloom/kernloom/iq/internal/lifecycle/bootstrapautotune"
 	lgraph "github.com/kernloom/kernloom/iq/internal/lifecycle/graph"
-	"github.com/kernloom/kernloom/pkg/core/bundle"
 	corepolicy "github.com/kernloom/kernloom/pkg/core/policy"
-	"gopkg.in/yaml.v3"
 )
 
 func TestApplyBundleUpdate_ManagedRejectsUnsignedBundle(t *testing.T) {
 	c, _, ms, bsCtl, graphCtl := managedBundleTestHarness(t)
-	unsigned := runtimeBundleFixture(t, 1)
-	unsigned.Signature = bundle.BundleSignature{}
-	raw, err := yaml.Marshal(unsigned)
+	unsigned := contractsRuntimeBundleFixture(t, 1)
+	unsigned.Signature = contracts.Signature{}
+	raw, err := json.Marshal(unsigned)
 	if err != nil {
 		t.Fatalf("marshal unsigned bundle: %v", err)
 	}
 
-	applyBundleUpdate(raw, c, &bsCtl, &graphCtl, ms, nil)
+	applyBundleUpdate(raw, c, &bsCtl, &graphCtl, ms, nil, nil)
 
 	if ms.BundleGeneration != 0 {
 		t.Fatalf("unsigned bundle applied generation=%d", ms.BundleGeneration)
@@ -40,23 +41,24 @@ func TestApplyBundleUpdate_ManagedRejectsUnsignedBundle(t *testing.T) {
 
 func TestApplyBundleUpdate_RejectsSameGenerationDifferentHash(t *testing.T) {
 	c, priv, ms, bsCtl, graphCtl := managedBundleTestHarness(t)
-	first := signRuntimeBundleFixture(t, runtimeBundleFixture(t, 1), priv)
+	first := signContractsRuntimeBundleFixture(t, contractsRuntimeBundleFixture(t, 1), priv)
 
-	applyBundleUpdate(first, c, &bsCtl, &graphCtl, ms, nil)
+	applyBundleUpdate(first, c, &bsCtl, &graphCtl, ms, nil, nil)
 
 	if ms.BundleGeneration != 1 {
 		t.Fatalf("first bundle did not apply generation=%d", ms.BundleGeneration)
 	}
 	firstHash := ms.BundleHash
+	firstMaxAction := c.PolicyMaxAction
 
-	mutated := runtimeBundleFixture(t, 1)
+	mutated := contractsRuntimeBundleFixture(t, 1)
 	mutated.Spec.EnforcementBounds.MaxActionDuringBootstrap = "block"
-	applyBundleUpdate(signRuntimeBundleFixture(t, mutated, priv), c, &bsCtl, &graphCtl, ms, nil)
+	applyBundleUpdate(signContractsRuntimeBundleFixture(t, mutated, priv), c, &bsCtl, &graphCtl, ms, nil, nil)
 
 	if ms.BundleHash != firstHash {
 		t.Fatalf("same-generation mutation changed hash: got %s want %s", ms.BundleHash, firstHash)
 	}
-	if c.PolicyMaxAction != "observe" {
+	if c.PolicyMaxAction != firstMaxAction {
 		t.Fatalf("same-generation mutation changed max action: got %q", c.PolicyMaxAction)
 	}
 }
@@ -64,16 +66,54 @@ func TestApplyBundleUpdate_RejectsSameGenerationDifferentHash(t *testing.T) {
 func TestApplyBundleUpdate_AppliesSignedNewGeneration(t *testing.T) {
 	c, priv, ms, bsCtl, graphCtl := managedBundleTestHarness(t)
 
-	applyBundleUpdate(signRuntimeBundleFixture(t, runtimeBundleFixture(t, 1), priv), c, &bsCtl, &graphCtl, ms, nil)
-	next := runtimeBundleFixture(t, 2)
+	applyBundleUpdate(signContractsRuntimeBundleFixture(t, contractsRuntimeBundleFixture(t, 1), priv), c, &bsCtl, &graphCtl, ms, nil, nil)
+	next := contractsRuntimeBundleFixture(t, 2)
 	next.Spec.EnforcementBounds.MaxActionDuringBootstrap = "rate_limit"
-	applyBundleUpdate(signRuntimeBundleFixture(t, next, priv), c, &bsCtl, &graphCtl, ms, nil)
+	applyBundleUpdate(signContractsRuntimeBundleFixture(t, next, priv), c, &bsCtl, &graphCtl, ms, nil, nil)
 
 	if ms.BundleGeneration != 2 {
 		t.Fatalf("new generation did not apply: got %d", ms.BundleGeneration)
 	}
 	if c.PolicyMaxAction != "rate_limit" {
 		t.Fatalf("new generation max action: got %q", c.PolicyMaxAction)
+	}
+}
+
+func TestApplyBundleUpdate_AppliesSignedContractsRuntimeBundle(t *testing.T) {
+	c, priv, ms, bsCtl, graphCtl := managedBundleTestHarness(t)
+	updates := make(chan contracts.RuntimePolicyPack, 1)
+
+	raw := signContractsRuntimeBundleFixture(t, contractsRuntimeBundleFixture(t, 1), priv)
+	applyBundleUpdate(raw, c, &bsCtl, &graphCtl, ms, nil, updates)
+
+	if ms.BundleGeneration != 1 {
+		t.Fatalf("contracts bundle did not apply generation=%d", ms.BundleGeneration)
+	}
+	if c.HasPolicyPack != true {
+		t.Fatalf("contracts bundle did not mark policy pack active")
+	}
+	if c.PolicyMaxAction != "rate_limit_hard" {
+		t.Fatalf("runtime pack max action: got %q", c.PolicyMaxAction)
+	}
+	if c.ProfileName != "contracts-runtime" {
+		t.Fatalf("runtime PDP profile not applied: got %q", c.ProfileName)
+	}
+	if c.Adapters != "klshield" {
+		t.Fatalf("adapter selector not applied: got %q", c.Adapters)
+	}
+	if c.FailMode != "fail_static" {
+		t.Fatalf("failover not applied: got %q", c.FailMode)
+	}
+	if graphCtl.Phase() != lgraph.PhaseLearning {
+		t.Fatalf("graph lifecycle phase: got %q", graphCtl.Phase())
+	}
+	select {
+	case pack := <-updates:
+		if len(pack.Spec.Rules) != 1 {
+			t.Fatalf("queued pack rule count=%d", len(pack.Spec.Rules))
+		}
+	case <-time.After(time.Second):
+		t.Fatal("runtime policy pack was not queued")
 	}
 }
 
@@ -97,39 +137,94 @@ func managedBundleTestHarness(t *testing.T) (*cfg, ed25519.PrivateKey, *managedS
 	return c, priv, ms, bsCtl, graphCtl
 }
 
-func runtimeBundleFixture(t *testing.T, generation int) *bundle.RuntimeBundle {
+func contractsRuntimeBundleFixture(t *testing.T, generation int) contracts.RuntimeBundle {
 	t.Helper()
 	issued := time.Now().UTC().Add(-time.Hour)
-	return &bundle.RuntimeBundle{
-		APIVersion: bundle.BundleAPIVersion,
-		Kind:       bundle.BundleKind,
-		Metadata: bundle.BundleMetadata{
+	return contracts.RuntimeBundle{
+		TypeMeta: contracts.TypeMeta{
+			APIVersion: contracts.RuntimeAPIVersion,
+			Kind:       contracts.KindRuntimeBundle,
+		},
+		Metadata: contracts.ObjectMeta{
+			Name:       "contracts-fixture",
 			NodeID:     "node-test",
 			Generation: generation,
-			IssuedAt:   issued.Add(time.Duration(generation) * time.Minute).Format(time.RFC3339),
-			ExpiresAt:  issued.Add(24 * time.Hour).Format(time.RFC3339),
+			IssuedAt:   issued,
+			ExpiresAt:  issued.Add(24 * time.Hour),
 		},
-		Spec: bundle.BundleSpec{
-			EnforcementBounds: bundle.EnforcementBounds{
-				MaxActionDuringBootstrap: "observe",
+		Spec: contracts.RuntimeBundleSpec{
+			Registry:         registrySnapshotFixture(t).Ref,
+			RegistrySnapshot: registrySnapshotFixture(t),
+			RuntimePDPProfile: contracts.RuntimePDPProfile{
+				Name: "contracts-runtime",
+				Mode: "active",
 			},
+			AdapterSelector: contracts.AdapterSelector{
+				PreferredAdapters: []string{"klshield"},
+				RequiredCapabilities: []string{
+					"enforce.traffic.rate_limit",
+				},
+			},
+			RuntimePolicyPack: contracts.RuntimePolicyPack{
+				TypeMeta: contracts.TypeMeta{
+					APIVersion: contracts.RuntimeAPIVersion,
+					Kind:       contracts.KindRuntimePolicyPack,
+				},
+				Metadata: contracts.ObjectMeta{Name: "contracts-pack", IssuedAt: issued},
+				Spec: contracts.RuntimePolicyPackSpec{
+					CapabilitiesRequired: []string{"enforce.traffic.rate_limit"},
+					DefaultEffect:        "deny",
+					Rules: []contracts.RuntimePolicyRule{{
+						ID:   "risk-high",
+						When: "risk.level in ['high', 'critical']",
+						Then: contracts.RuntimeActionSpec{
+							Capability: "enforce.traffic.rate_limit",
+							Level:      "hard",
+							TTL:        contracts.NewDuration(time.Minute),
+						},
+					}},
+				},
+			},
+			BaselineLifecycle: contracts.BaselineLifecycle{
+				Mode:           "managed",
+				LearningWindow: contracts.NewDuration(48 * time.Hour),
+			},
+			GraphLifecycle: contracts.GraphLifecycle{
+				Mode:                "managed",
+				MinCleanLearning:    contracts.NewDuration(12 * time.Hour),
+				MinLearnedEdges:     5,
+				ObserveAfterFreeze:  contracts.NewDuration(24 * time.Hour),
+				FinalPhase:          lgraph.PhaseFrozenEnforce,
+				FreezeApproval:      "forge-auto",
+				RequireNoBlockFor:   contracts.NewDuration(time.Hour),
+				MinBaselineCoverage: 0.7,
+			},
+			EnforcementBounds: contracts.EnforcementBounds{
+				AllowBlock: false,
+			},
+			Failover: contracts.FailoverConfig{Behavior: "fail_static"},
 		},
 	}
 }
 
-func signRuntimeBundleFixture(t *testing.T, b *bundle.RuntimeBundle, priv ed25519.PrivateKey) []byte {
+func registrySnapshotFixture(t *testing.T) contracts.RegistrySnapshot {
 	t.Helper()
-	payload, err := b.SigningPayload()
+	snapshot, err := registries.EmbeddedSnapshot()
 	if err != nil {
-		t.Fatalf("signing payload: %v", err)
+		t.Fatalf("registry snapshot: %v", err)
 	}
-	b.Signature = bundle.BundleSignature{
-		Algorithm: "ed25519",
-		Value:     base64.StdEncoding.EncodeToString(ed25519.Sign(priv, payload)),
-	}
-	raw, err := yaml.Marshal(b)
+	return snapshot
+}
+
+func signContractsRuntimeBundleFixture(t *testing.T, b contracts.RuntimeBundle, priv ed25519.PrivateKey) []byte {
+	t.Helper()
+	signed, err := contracts.SignRuntimeBundle(b, "test-key", priv)
 	if err != nil {
-		t.Fatalf("marshal signed bundle: %v", err)
+		t.Fatalf("sign contracts bundle: %v", err)
+	}
+	raw, err := json.Marshal(signed)
+	if err != nil {
+		t.Fatalf("marshal contracts bundle: %v", err)
 	}
 	return raw
 }

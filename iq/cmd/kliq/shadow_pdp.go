@@ -239,10 +239,16 @@ func runtimeSignalGroupFacts(sigs []signal.Signal) map[string]any {
 	types := map[string]int{}
 	reasons := map[string]bool{}
 	maxScore := 0
+	dropRate := 0.0
 	for _, sig := range sigs {
 		types[string(sig.Type)]++
 		if sig.Score > maxScore {
 			maxScore = sig.Score
+		}
+		if sig.Type == signal.SignalRateLimitDropsSustained {
+			if value := firstSignalAttrFloat(sig, "drop_rate", "drop_rl_rate"); value > dropRate {
+				dropRate = value
+			}
 		}
 		for _, reason := range sig.ReasonCodes {
 			reasons[reason] = true
@@ -256,5 +262,5 @@ func runtimeSignalGroupFacts(sigs []signal.Signal) map[string]any {
 	out["types"] = types
 	out["max_score"] = maxScore
 	out["reason_codes"] = reasonList
-	return out
+	return mergeFactMaps(out, enforcementSignalFactMap(dropRate, dropRate, 0, 0))
 }

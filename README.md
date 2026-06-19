@@ -171,7 +171,19 @@ forge serve --addr :8443
 
 RuntimePDP policy rules can use generic fact maps such as `risk`, `metrics`, `signals`, `baseline`, `graph`, `adapter`, `fsm`, `device`, `session`, and `features`. `risk` is produced through the local risk aggregator; `baseline` can include learned metric profiles from SQLite as well as active thresholds; `graph` can include learned relationships for the subject. For example, a network rule can compare `metrics.network.packets_per_second` with `baseline.network.packets_per_second` without making KLShield the decision owner.
 
-When an adapter reports canonical enforcement feedback such as `signals.enforcement_feedback_rate`, KLIQ treats it as evidence that an active mitigation is still doing work. RuntimePolicyPacks should include a hold rule before broad high-risk rules, for example `fsm.current_level in ['soft', 'hard', 'block'] && signals.enforcement_feedback_rate > 0` with a renewed `enforce.traffic.rate_limit` TTL. This prevents post-mitigation telemetry from looking falsely clean while packets, denies, or equivalent PEP feedback are still being produced.
+When an adapter reports canonical enforcement feedback, KLIQ treats it as evidence that an active mitigation is still doing work. RuntimePolicyPacks can include a hold rule before broad high-risk rules, for example `fsm.current_level in ['soft', 'hard', 'block'] && signals.enforcement.active` with a renewed `enforce.traffic.rate_limit` TTL. This prevents post-mitigation telemetry from looking falsely clean while packets, denies, or equivalent PEP feedback are still being produced.
+
+RuntimePDP exposes enforcement feedback under `signals.enforcement.*`:
+
+| Fact | Meaning |
+|---|---|
+| `signals.enforcement.feedback_rate` | Generic feedback rate across enforcement-side evidence |
+| `signals.enforcement.drop_rate` | Drop rate; for KLShield this is `network.rate_limit_drop_rate` |
+| `signals.enforcement.deny_rate` | Deny/reject rate; currently `0` until an adapter reports it |
+| `signals.enforcement.throttle_rate` | Throttle/backpressure rate; currently `0` until an adapter reports it |
+| `signals.enforcement.active` | `true` when any enforcement feedback rate is greater than zero |
+
+`signals.enforcement_feedback_rate` remains as a backward-compatible alias for `signals.enforcement.feedback_rate`.
 
 The current risk model is implemented in code: adapter/analyzer signals are aggregated into a `LocalRiskAssessment` with score, level, confidence, domains and contributions. A separately signed/declarative `RuntimeRiskModel` artifact is not implemented yet; that remains a follow-up to make risk semantics fully policy-managed.
 

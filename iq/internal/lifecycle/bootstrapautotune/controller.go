@@ -18,8 +18,10 @@
 package bootstrapautotune
 
 import (
+	"strings"
 	"time"
 
+	contracts "github.com/kernloom/kernloom-contracts"
 	"github.com/kernloom/kernloom/pkg/core/bundle"
 )
 
@@ -172,6 +174,30 @@ func FromBundle(plan bundle.BootstrapAutotunePlan) Config {
 		}
 	}
 	return c
+}
+
+// FromBaselineLifecycle derives a Config from a contracts RuntimeBundle
+// baseline lifecycle. The contracts schema intentionally exposes lifecycle
+// intent, while KLIQ keeps detailed autotune phase defaults locally.
+func FromBaselineLifecycle(plan contracts.BaselineLifecycle) Config {
+	c := DefaultConfig()
+	c.Enabled = baselineLifecycleEnabled(plan.Mode)
+	if plan.LearningWindow.Duration > 0 {
+		c.Window = plan.LearningWindow.Duration
+	}
+	if plan.MinCleanRuntime.Duration > c.Window {
+		c.Window = plan.MinCleanRuntime.Duration
+	}
+	return c
+}
+
+func baselineLifecycleEnabled(mode string) bool {
+	switch strings.TrimSpace(strings.ToLower(mode)) {
+	case "", "disabled", "off", "none":
+		return false
+	default:
+		return true
+	}
 }
 
 // State is the mutable lifecycle state, persisted across restarts.

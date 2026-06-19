@@ -146,7 +146,7 @@ KLShield/XDP is attached to the host-side client veth interfaces. This lets KLIQ
 | 09 | `09_managed_enrollment.sh` | Forge API | Managed enrollment, bundle pull, ACKs, receipts, findings, proposals |
 | 10 | `10_adapter_definition.sh` | Forge Compiler | Adapter manifests, AccessPolicy validation, profile compilation |
 | 11 | `11_netfilter_adapter.sh` | Netfilter | KLIQ without XDP, deny/restore, idempotent rules, safe cleanup |
-| 12 | `12_runtime_policy_pack.sh` | RuntimePDP | `--policy-file` RuntimePolicyPack loading, compile, mapper/broker/conformance fixtures |
+| 12 | `12_runtime_policy_pack.sh` | RuntimePDP | `--policy-file` RuntimePolicyPack loading, signed RuntimeBundle handoff, mapper/broker/conformance fixtures |
 
 ## Scenario Details
 
@@ -425,7 +425,7 @@ Flow:
 Expected result:
 
 - Standalone `--policy-file` accepts the contracts `RuntimePolicyPack` schema.
-- RuntimePolicyPack rules can include an enforcement-feedback hold rule using `signals.enforcement_feedback_rate`.
+- RuntimePolicyPack rules can include an enforcement-feedback hold rule using `signals.enforcement.active` or `signals.enforcement.feedback_rate`.
 - Runtime PDP shadow mode can load the policy without changing enforcement.
 - The active-mode plumbing remains covered at the mapper/broker/conformance boundary.
 

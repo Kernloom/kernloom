@@ -19,7 +19,6 @@ var Manifest = adapterruntime.AdapterManifest{
 	Consumes: adapterruntime.AdapterConsumes{
 		Actions: []string{
 			"enforce.network.deny",
-			"enforce.network.allow",
 			"enforce.network.rate_limit",
 		},
 	},

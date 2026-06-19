@@ -5,7 +5,8 @@ go 1.25.1
 require (
 	github.com/cilium/ebpf v0.19.0
 	github.com/google/cel-go v0.28.1
-	github.com/kernloom/kernloom-contracts v0.1.0
+	github.com/kernloom/kernloom-contracts v0.2.0
+	github.com/kernloom/kernloom-registries v0.2.0
 	gopkg.in/yaml.v3 v3.0.1
 	modernc.org/sqlite v1.50.1
 )
@@ -28,3 +29,6 @@ require (
 	modernc.org/mathutil v1.7.1 // indirect
 	modernc.org/memory v1.11.0 // indirect
 )
+
+replace github.com/kernloom/kernloom-registries => ../kernloom-registries
+replace github.com/kernloom/kernloom-contracts => ../kernloom-contracts

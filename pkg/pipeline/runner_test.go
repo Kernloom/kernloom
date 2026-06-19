@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	registries "github.com/kernloom/kernloom-registries"
 	"github.com/kernloom/kernloom/pkg/adapterruntime"
 	"github.com/kernloom/kernloom/pkg/core/metric"
 	"github.com/kernloom/kernloom/pkg/core/observation"
@@ -63,7 +64,7 @@ func TestRunner_SubmitAndProcess(t *testing.T) {
 
 	r := pipeline.New(pipeline.Options{
 		Config:     cfg,
-		Registry:   registry.DefaultBundle(),
+		Registry:   testRegistry(t),
 		Extractors: []featureextractor.Extractor{&fakeExtractor{}},
 	})
 
@@ -85,6 +86,19 @@ func TestRunner_SubmitAndProcess(t *testing.T) {
 	if status.Ticks == 0 {
 		t.Error("expected at least one processing tick")
 	}
+}
+
+func testRegistry(t *testing.T) *registry.Bundle {
+	t.Helper()
+	snapshot, err := registries.EmbeddedSnapshot()
+	if err != nil {
+		t.Fatalf("EmbeddedSnapshot: %v", err)
+	}
+	b, err := registry.FromSnapshot(snapshot)
+	if err != nil {
+		t.Fatalf("FromSnapshot: %v", err)
+	}
+	return b
 }
 
 func TestRunner_UnknownMetric_Dropped(t *testing.T) {

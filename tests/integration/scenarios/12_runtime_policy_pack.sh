@@ -37,7 +37,7 @@ spec:
     - enforce.traffic.rate_limit
   rules:
     - id: hold-enforcement-while-drops
-      when: "fsm.current_level in ['soft', 'hard', 'block'] && signals.enforcement_feedback_rate > 0"
+      when: "fsm.current_level in ['soft', 'hard', 'block'] && signals.enforcement.active"
       then:
         capability: enforce.traffic.rate_limit
         level: hard
@@ -94,7 +94,7 @@ assert_cmd_success "$KLT_GO" version
 
 run_contract_tests() {
   local go_cache="$RESULTS_DIR/go-build"
-  local test_regex='TestLoadPolicyBytesRecognizesRuntimePolicyPack|TestLoadPolicyBytesVerifiesSignedRuntimePolicyPack|TestRuntimeDecisionToActionProposal|TestBrokeredRelationshipApplyAndRevert|TestBrokeredSourceFencingPreventsOlderLeaseRevertingNewerLevel|TestApplyRenewsMatchingActiveLease|TestValidateRuntimeBundle|TestValidateOfflineLastKnownGood'
+  local test_regex='TestLoadPolicyBytesRecognizesRuntimePolicyPack|TestLoadPolicyBytesVerifiesSignedRuntimePolicyPack|TestApplyBundleUpdate_AppliesSignedContractsRuntimeBundle|TestRuntimeDecisionToActionProposal|TestBrokeredRelationshipApplyAndRevert|TestBrokeredSourceFencingPreventsOlderLeaseRevertingNewerLevel|TestApplyRenewsMatchingActiveLease|TestValidateRuntimeBundle|TestValidateOfflineLastKnownGood'
 
   if [[ "$(id -u)" -eq 0 && -n "${SUDO_UID:-}" && -n "${SUDO_GID:-}" ]]; then
     chown -R "$SUDO_UID:$SUDO_GID" "$RESULTS_DIR"

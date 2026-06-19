@@ -100,15 +100,19 @@ type ManifestValidationResult struct {
 	// UnknownActions are capability IDs declared in Consumes but absent from the registry.
 	UnknownActions []string
 
+	// DisallowedActions are known capabilities that are not allowed in the runtime path.
+	DisallowedActions []string
+
 	// ForbiddenLabels are default_selected_labels that the registry disallows.
 	ForbiddenLabels []string
 }
 
 // Validate checks the manifest against a registry bundle.
-// If bundle is nil, validation is skipped and Valid=true is returned (standalone mode).
+// If bundle is nil, validation fails closed.
 func (m *AdapterManifest) Validate(b *registry.Bundle) ManifestValidationResult {
 	res := ManifestValidationResult{Valid: true}
 	if b == nil {
+		res.Valid = false
 		return res
 	}
 
@@ -125,6 +129,10 @@ func (m *AdapterManifest) Validate(b *registry.Bundle) ManifestValidationResult 
 	for _, id := range m.Consumes.Actions {
 		if !b.HasCapability(id) {
 			res.UnknownActions = append(res.UnknownActions, id)
+			continue
+		}
+		if !b.HasRuntimeActionCapability(id) {
+			res.DisallowedActions = append(res.DisallowedActions, id)
 		}
 	}
 	for _, label := range m.LabelPolicy.DefaultSelectedLabels {
@@ -136,6 +144,7 @@ func (m *AdapterManifest) Validate(b *registry.Bundle) ManifestValidationResult 
 	res.Valid = len(res.UnknownMetrics) == 0 &&
 		len(res.UnknownSignals) == 0 &&
 		len(res.UnknownActions) == 0 &&
+		len(res.DisallowedActions) == 0 &&
 		len(res.ForbiddenLabels) == 0
 	return res
 }
@@ -165,7 +174,7 @@ var KLShieldManifest = AdapterManifest{
 		},
 	},
 	Consumes: AdapterConsumes{
-		Actions: []string{"enforce.network.rate_limit", "enforce.network.deny", "enforce.network.allow"},
+		Actions: []string{"enforce.network.rate_limit", "enforce.network.deny"},
 	},
 	LabelPolicy: AdapterLabelPolicy{
 		DefaultSelectedLabels: []string{}, // cardinality-safe default

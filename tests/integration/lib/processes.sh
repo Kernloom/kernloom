@@ -100,7 +100,7 @@ spec:
       reason_codes:
         - integration_fsm_intent_block
     - id: hold-enforcement-while-drops
-      when: "fsm.current_level in ['soft', 'hard', 'block'] && signals.enforcement_feedback_rate > 0"
+      when: "fsm.current_level in ['soft', 'hard', 'block'] && signals.enforcement.active"
       then:
         capability: enforce.traffic.rate_limit
         level: hard

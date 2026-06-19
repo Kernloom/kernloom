@@ -338,7 +338,7 @@ func levelToCapability(level fsm.Level) string {
 	case fsm.LevelSoft, fsm.LevelHard:
 		return "enforce.network.rate_limit"
 	default:
-		return "enforce.network.allow"
+		return ""
 	}
 }
 
@@ -351,12 +351,6 @@ func buildCapabilities(p ProbeResult, cfg Config) []*capability.Capability {
 		"enforce.network.deny", "v1",
 		capability.TypeEnforcement, capability.LayerL3L4, capability.DirectionOutput,
 		"Drop traffic from a source IP or CIDR via Netfilter",
-	).AddTag("network").AddTag("enforcement").AddTag("netfilter"))
-
-	caps = append(caps, capability.NewCapability(
-		"enforce.network.allow", "v1",
-		capability.TypeEnforcement, capability.LayerL3L4, capability.DirectionOutput,
-		"Allow or return traffic from a source IP or CIDR via Netfilter",
 	).AddTag("network").AddTag("enforcement").AddTag("netfilter"))
 
 	if cfg.Enforcement.EnableRateLimit {

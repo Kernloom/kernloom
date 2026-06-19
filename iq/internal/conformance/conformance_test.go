@@ -11,6 +11,7 @@ import (
 	"time"
 
 	contracts "github.com/kernloom/kernloom-contracts"
+	registries "github.com/kernloom/kernloom-registries"
 	"github.com/kernloom/kernloom/iq/internal/conformance"
 )
 
@@ -102,6 +103,16 @@ func TestValidateRuntimePolicyPackAcceptsGenericFactVariables(t *testing.T) {
 	}
 }
 
+func TestValidateRuntimePolicyPackRejectsUnknownContextKey(t *testing.T) {
+	pack := validBundle("active", "enforce.traffic.rate_limit", "soft", "fail_static").Spec.RuntimePolicyPack
+	pack.Spec.Rules[0].When = "device.magic.foo == true"
+
+	err := conformance.ValidateRuntimePolicyPack(pack, nodeRuntime("rate_limit"))
+	if err == nil || !strings.Contains(err.Error(), "unknown context key") {
+		t.Fatalf("expected unknown context key error, got %v", err)
+	}
+}
+
 func TestValidateOfflineLastKnownGoodRequiresFailStatic(t *testing.T) {
 	pub, priv := keypair(t)
 	good := signBundle(t, validBundle("shadow", "enforce.traffic.rate_limit", "soft", "fail_static"), priv)
@@ -126,6 +137,10 @@ func keypair(t *testing.T) (ed25519.PublicKey, ed25519.PrivateKey) {
 }
 
 func nodeRuntime(maxAction string) conformance.NodeRuntime {
+	snapshot, err := registries.EmbeddedSnapshot()
+	if err != nil {
+		panic(err)
+	}
 	return conformance.NodeRuntime{
 		NodeID: "node-1",
 		Capabilities: map[string]bool{
@@ -133,6 +148,7 @@ func nodeRuntime(maxAction string) conformance.NodeRuntime {
 		},
 		MaxAction:         maxAction,
 		SupportedPDPModes: map[string]bool{"shadow": true, "active": true},
+		RegistrySnapshot:  snapshot,
 		Now:               time.Date(2026, 6, 19, 10, 0, 0, 0, time.UTC),
 	}
 }
@@ -152,6 +168,8 @@ func validBundle(mode, capability, level, failover string) contracts.RuntimeBund
 			ExpiresAt:  now.Add(24 * time.Hour),
 		},
 		Spec: contracts.RuntimeBundleSpec{
+			Registry:         snapshotForTest().Ref,
+			RegistrySnapshot: snapshotForTest(),
 			RuntimePDPProfile: contracts.RuntimePDPProfile{
 				Name: "fixture-profile",
 				Mode: mode,
@@ -180,6 +198,14 @@ func validBundle(mode, capability, level, failover string) contracts.RuntimeBund
 			Failover: contracts.FailoverConfig{Behavior: failover},
 		},
 	}
+}
+
+func snapshotForTest() contracts.RegistrySnapshot {
+	snapshot, err := registries.EmbeddedSnapshot()
+	if err != nil {
+		panic(err)
+	}
+	return snapshot
 }
 
 func signBundle(t *testing.T, bundle contracts.RuntimeBundle, priv ed25519.PrivateKey) contracts.RuntimeBundle {

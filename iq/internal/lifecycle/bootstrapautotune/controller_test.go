@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	contracts "github.com/kernloom/kernloom-contracts"
 	"github.com/kernloom/kernloom/iq/internal/lifecycle/bootstrapautotune"
 	"github.com/kernloom/kernloom/pkg/core/bundle"
 )
@@ -152,6 +153,22 @@ func TestController_FromBundle(t *testing.T) {
 	}
 	if cfg.SteadyInterval != 48*time.Hour {
 		t.Errorf("SteadyInterval: got %v, want 48h", cfg.SteadyInterval)
+	}
+}
+
+func TestController_FromBaselineLifecycle(t *testing.T) {
+	plan := contracts.BaselineLifecycle{
+		Mode:            "managed",
+		LearningWindow:  contracts.NewDuration(48 * time.Hour),
+		MinCleanRuntime: contracts.NewDuration(72 * time.Hour),
+	}
+	cfg := bootstrapautotune.FromBaselineLifecycle(plan)
+
+	if !cfg.Enabled {
+		t.Fatal("Enabled: got false, want true")
+	}
+	if cfg.Window != 72*time.Hour {
+		t.Errorf("Window: got %v, want 72h", cfg.Window)
 	}
 }
 

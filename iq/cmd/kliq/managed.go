@@ -19,14 +19,15 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
-	"gopkg.in/yaml.v3"
-
+	contracts "github.com/kernloom/kernloom-contracts"
 	"github.com/kernloom/kernloom/iq/internal/lifecycle/bootstrapautotune"
 	lgraph "github.com/kernloom/kernloom/iq/internal/lifecycle/graph"
 	"github.com/kernloom/kernloom/pkg/core/bundle"
 	corepolicy "github.com/kernloom/kernloom/pkg/core/policy"
+	"gopkg.in/yaml.v3"
 )
 
 // managedState holds the bundle-related runtime state that is persisted
@@ -50,6 +51,7 @@ func applyBundleUpdate(
 	graphCtl **lgraph.Controller,
 	ms *managedState,
 	stFile *stateFile,
+	runtimePolicyUpdates chan<- contracts.RuntimePolicyPack,
 ) {
 	// Skip if the bundle hasn't changed — prevents repeated log spam every heartbeat.
 	newHash := fmt.Sprintf("%x", hashBundleBytes(rawBundle))[:16]
@@ -57,17 +59,9 @@ func applyBundleUpdate(
 		return
 	}
 
-	b, err := parseTrustedRuntimeBundle(rawBundle, c)
+	b, runtimePack, err := parseTrustedRuntimeBundle(rawBundle, c)
 	if err != nil {
 		kliqLog.Printf("BUNDLE apply: trust/parse failed: %v", err)
-		return
-	}
-	if err := b.Validate(); err != nil {
-		kliqLog.Printf("BUNDLE apply: validation failed: %v", err)
-		return
-	}
-	if b.IsExpired() {
-		kliqLog.Printf("BUNDLE apply: bundle generation=%d is expired — ignoring", b.Metadata.Generation)
 		return
 	}
 	// Rollback protection: reject bundles with an older generation.
@@ -81,50 +75,35 @@ func applyBundleUpdate(
 		return
 	}
 
-	// Apply bootstrap autotune plan.
-	if b.Spec.BootstrapAutotune.Enabled {
-		newBsCfg := bootstrapautotune.FromBundle(b.Spec.BootstrapAutotune)
-		// Apply floor values back to cfg so existing autotune math uses them.
-		if newBsCfg.FloorPPS > 0 {
-			c.AutoFloorPPS = newBsCfg.FloorPPS
-		}
-		if newBsCfg.FloorSYN > 0 {
-			c.AutoFloorSyn = newBsCfg.FloorSYN
-		}
-		if newBsCfg.FloorScan > 0 {
-			c.AutoFloorScan = newBsCfg.FloorScan
-		}
-		if newBsCfg.FloorBPS > 0 {
-			c.AutoFloorBPS = newBsCfg.FloorBPS
-		}
+	if runtimePack != nil {
+		applyRuntimePolicyPackToCfg(*runtimePack, c)
+	}
+
+	// Apply baseline lifecycle.
+	if baselineLifecycleConfigured(b.Spec.BaselineLifecycle) {
+		newBsCfg := bootstrapautotune.FromBaselineLifecycle(b.Spec.BaselineLifecycle)
 		// Rebuild controller with new config, preserving accumulated state.
 		savedState := (*bsCtl).SaveState()
 		*bsCtl = bootstrapautotune.New(newBsCfg, &savedState)
-		kliqLog.Printf("BUNDLE: bootstrap autotune plan applied (window=%v)", newBsCfg.Window)
+		kliqLog.Printf("BUNDLE: baseline lifecycle applied (window=%v)", newBsCfg.Window)
 	}
 
-	// Apply enforcement bounds.
-	bounds := b.Spec.EnforcementBounds
 	graphPhase := (*graphCtl).Phase()
-	if maxAct := (*graphCtl).MaxAction(bounds); maxAct != "" {
-		c.PolicyMaxAction = maxAct
-	}
 
 	// Apply graph lifecycle plan.
-	if b.Spec.GraphLifecycle.Enabled {
+	if graphLifecycleConfigured(b.Spec.GraphLifecycle) {
 		newGraphCfg := lgraph.FromBundle(b.Spec.GraphLifecycle)
+		persistedPhase := graphPhase
+		if persistedPhase == lgraph.PhaseDisabled && newGraphCfg.Enabled {
+			persistedPhase = ""
+		}
 		// Rebuild graph controller with new config, preserving current phase.
-		*graphCtl = lgraph.New(newGraphCfg, graphPhase, (*graphCtl).StartedAt())
-		kliqLog.Printf("BUNDLE: graph lifecycle plan applied (phase=%s)", graphPhase)
+		*graphCtl = lgraph.New(newGraphCfg, persistedPhase, (*graphCtl).StartedAt())
+		kliqLog.Printf("BUNDLE: graph lifecycle plan applied (phase=%s)", (*graphCtl).Phase())
 	}
 
-	// Apply managed exemptions to cfg (whitelist/feedback are reloaded from managed bundle).
-	if len(b.Spec.ManagedExemptions.Whitelist) > 0 || len(b.Spec.ManagedExemptions.Feedback) > 0 {
-		kliqLog.Printf("BUNDLE: %d managed whitelist + %d feedback exemptions received",
-			len(b.Spec.ManagedExemptions.Whitelist), len(b.Spec.ManagedExemptions.Feedback))
-		// Exemptions are stored for status reporting; actual enforcement is via
-		// the existing whitelist/feedback reload mechanisms.
-	}
+	applyEnforcementBoundsToCfg(b.Spec.EnforcementBounds, *graphCtl, c)
+	applyFailoverToCfg(b.Spec.Failover, c)
 
 	// Persist the last-known-good bundle.
 	bundleHash := fmt.Sprintf("%x", hashBundleBytes(rawBundle))[:16]
@@ -139,17 +118,28 @@ func applyBundleUpdate(
 		}
 	}
 
-	if b.Spec.PDPProfile != "" {
-		c.ProfileName = b.Spec.PDPProfile
+	if profileName := runtimeBundlePDPProfileName(b); profileName != "" {
+		c.ProfileName = profileName
 	}
 
-	if b.Spec.Adapters != "" {
-		c.Adapters = b.Spec.Adapters
+	if adapters := runtimeBundleAdapters(b); adapters != "" {
+		c.Adapters = adapters
+	}
+
+	if runtimePack != nil {
+		if runtimePolicyUpdates != nil {
+			select {
+			case runtimePolicyUpdates <- *runtimePack:
+				kliqLog.Printf("BUNDLE: runtime policy pack queued for RuntimePDP (rules=%d)", len(runtimePack.Spec.Rules))
+			default:
+				kliqLog.Printf("BUNDLE: runtime policy update channel full; dropping bundle pack")
+			}
+		}
 	}
 
 	kliqLog.Printf("BUNDLE applied: node=%s gen=%d feature_profile=%s pdp_profile=%s adapters=%s max_action=%s hash=%s",
 		b.Metadata.NodeID, b.Metadata.Generation,
-		b.Spec.FeatureProfile, c.ProfileName, c.Adapters, c.PolicyMaxAction, bundleHash)
+		c.FeatureProfile, c.ProfileName, c.Adapters, c.PolicyMaxAction, bundleHash)
 }
 
 // loadLastKnownGoodBundle attempts to read the persisted bundle from
@@ -166,18 +156,94 @@ func loadLastKnownGoodBundle(statePath string) []byte {
 	return data
 }
 
-func parseTrustedRuntimeBundle(rawBundle []byte, c *cfg) (*bundle.RuntimeBundle, error) {
-	if c.Mode != string(corepolicy.ModeManaged) {
-		return bundle.Parse(rawBundle)
-	}
-	if c.PolicyVerifyKeyPath == "" {
-		return nil, fmt.Errorf("managed mode requires --policy-verify-key to verify runtime bundle signature")
-	}
-	pubKey, err := corepolicy.LoadPublicKey(c.PolicyVerifyKeyPath)
+func parseTrustedRuntimeBundle(rawBundle []byte, c *cfg) (*contracts.RuntimeBundle, *contracts.RuntimePolicyPack, error) {
+	jsonBytes, err := yamlBytesToJSON(rawBundle)
 	if err != nil {
-		return nil, fmt.Errorf("load runtime bundle verify key: %w", err)
+		return nil, nil, fmt.Errorf("parse contracts runtime bundle: %w", err)
 	}
-	return bundle.VerifyRuntimeBundle(rawBundle, pubKey)
+	var rb contracts.RuntimeBundle
+	if err := json.Unmarshal(jsonBytes, &rb); err != nil {
+		return nil, nil, fmt.Errorf("parse contracts runtime bundle: %w", err)
+	}
+
+	now := time.Now().UTC()
+	if c.Mode == string(corepolicy.ModeManaged) || c.PolicyVerifyKeyPath != "" {
+		if c.PolicyVerifyKeyPath == "" {
+			return nil, nil, fmt.Errorf("managed mode requires --policy-verify-key to verify runtime bundle signature")
+		}
+		pubKey, err := corepolicy.LoadPublicKey(c.PolicyVerifyKeyPath)
+		if err != nil {
+			return nil, nil, fmt.Errorf("load runtime bundle verify key: %w", err)
+		}
+		if err := contracts.VerifyRuntimeBundle(rb, pubKey, now); err != nil {
+			return nil, nil, err
+		}
+	} else if err := contracts.ValidateRuntimeBundle(rb, now); err != nil {
+		return nil, nil, err
+	}
+	if rb.Spec.RegistrySnapshot.Ref.Name == "" {
+		return nil, nil, fmt.Errorf("contracts runtime bundle registry snapshot is required")
+	}
+	capabilitySeverityKLIQ = capabilitySeverityFromSnapshot(rb.Spec.RegistrySnapshot)
+
+	pack := rb.Spec.RuntimePolicyPack
+	return &rb, &pack, nil
+}
+
+func baselineLifecycleConfigured(plan contracts.BaselineLifecycle) bool {
+	return strings.TrimSpace(plan.Mode) != ""
+}
+
+func graphLifecycleEnabled(plan contracts.GraphLifecycle) bool {
+	return lifecycleModeEnabled(plan.Mode)
+}
+
+func graphLifecycleConfigured(plan contracts.GraphLifecycle) bool {
+	return strings.TrimSpace(plan.Mode) != ""
+}
+
+func lifecycleModeEnabled(mode string) bool {
+	switch strings.TrimSpace(strings.ToLower(mode)) {
+	case "", "disabled", "off", "none":
+		return false
+	default:
+		return true
+	}
+}
+
+func runtimeBundlePDPProfileName(b *contracts.RuntimeBundle) string {
+	if b == nil {
+		return ""
+	}
+	return b.Spec.RuntimePDPProfile.Name
+}
+
+func runtimeBundleAdapters(b *contracts.RuntimeBundle) string {
+	if b == nil {
+		return ""
+	}
+	return strings.Join(b.Spec.AdapterSelector.PreferredAdapters, ",")
+}
+
+func applyEnforcementBoundsToCfg(bounds contracts.EnforcementBounds, graphCtl *lgraph.Controller, c *cfg) {
+	if !bounds.AllowBlock && c.PolicyMaxAction == "" {
+		c.PolicyMaxAction = "rate_limit_hard"
+	}
+	if !bounds.AllowBlock {
+		c.GraphFreezeAllowBlock = false
+	}
+	if graphCtl == nil {
+		return
+	}
+	if maxAct := graphCtl.MaxAction(bounds); maxAct != "" {
+		c.PolicyMaxAction = maxAct
+	}
+}
+
+func applyFailoverToCfg(failover contracts.FailoverConfig, c *cfg) {
+	if failover.Behavior != "" {
+		c.FailMode = failover.Behavior
+	}
 }
 
 // buildRuntimeStatus assembles the rich heartbeat payload for Forge.

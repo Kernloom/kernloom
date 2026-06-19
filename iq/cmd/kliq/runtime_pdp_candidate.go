@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"math"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -147,19 +148,19 @@ func runtimePDPInputForSignal(nodeID string, sig signal.Signal, facts runtimePDP
 			adapterFacts["fact_lookup_error"] = err.Error()
 		}
 	}
+	signalFacts := enforcementSignalFactMapForSignal(sig)
+	signalFacts["type"] = string(sig.Type)
+	signalFacts["score"] = score
+	signalFacts["confidence"] = risk.Confidence
+	signalFacts["reason_codes"] = append([]string(nil), sig.ReasonCodes...)
+	signalFacts["attributes"] = attrs
+
 	return runtimepdp.Input{
 		NodeID:  nodeID,
 		Subject: subject,
 		Risk:    risk,
 		Context: runtimepdp.ContextSnapshot{
-			Signals: map[string]any{
-				"type":                      string(sig.Type),
-				"score":                     score,
-				"confidence":                risk.Confidence,
-				"enforcement_feedback_rate": 0.0,
-				"reason_codes":              append([]string(nil), sig.ReasonCodes...),
-				"attributes":                attrs,
-			},
+			Signals:  signalFacts,
 			Baseline: baselineFacts,
 			Graph:    graphFacts,
 			Adapter:  adapterFacts,
@@ -453,16 +454,54 @@ func thresholdFactMap(t adapterruntime.TuningThresholds) map[string]any {
 }
 
 func signalFactMap(m metrics) map[string]any {
+	feedbackRate := m.enforcementFeedbackRate()
 	out := map[string]any{
-		"score":                     m.score(),
-		"severity":                  m.score(),
-		"enforcement_feedback_rate": m.enforcementFeedbackRate(),
+		"score":    m.score(),
+		"severity": m.score(),
 	}
+	out = mergeFactMaps(out, enforcementSignalFactMap(feedbackRate, feedbackRate, 0, 0))
 	for key, value := range m.Signals {
 		out[key] = value
 		insertNestedFact(out, key, value)
 	}
 	return out
+}
+
+func enforcementSignalFactMapForSignal(sig signal.Signal) map[string]any {
+	dropRate := 0.0
+	if sig.Type == signal.SignalRateLimitDropsSustained {
+		dropRate = firstSignalAttrFloat(sig, "drop_rate", "drop_rl_rate")
+	}
+	return enforcementSignalFactMap(dropRate, dropRate, 0, 0)
+}
+
+func enforcementSignalFactMap(feedbackRate, dropRate, denyRate, throttleRate float64) map[string]any {
+	active := feedbackRate > 0 || dropRate > 0 || denyRate > 0 || throttleRate > 0
+	return map[string]any{
+		// Backward-compatible alias used by existing RuntimePolicyPacks.
+		"enforcement_feedback_rate": feedbackRate,
+		"enforcement": map[string]any{
+			"feedback_rate": feedbackRate,
+			"drop_rate":     dropRate,
+			"deny_rate":     denyRate,
+			"throttle_rate": throttleRate,
+			"active":        active,
+		},
+	}
+}
+
+func firstSignalAttrFloat(sig signal.Signal, keys ...string) float64 {
+	for _, key := range keys {
+		raw := strings.TrimSpace(sig.Attributes[key])
+		if raw == "" {
+			continue
+		}
+		value, err := strconv.ParseFloat(raw, 64)
+		if err == nil {
+			return value
+		}
+	}
+	return 0
 }
 
 func graphFactMap(values map[string]float64) map[string]any {

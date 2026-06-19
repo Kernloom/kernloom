@@ -16,8 +16,10 @@
 package graph
 
 import (
+	"strings"
 	"time"
 
+	contracts "github.com/kernloom/kernloom-contracts"
 	"github.com/kernloom/kernloom/pkg/core/bundle"
 )
 
@@ -49,7 +51,7 @@ type GraphStats struct {
 	AvgConfidence         float64
 }
 
-// Config is derived from a RuntimeBundle.GraphLifecyclePlan.
+// Config is derived from a RuntimeBundle graph lifecycle.
 type Config struct {
 	Enabled              bool
 	Mode                 string // managed | local-auto
@@ -85,44 +87,47 @@ func DefaultConfig() Config {
 	}
 }
 
-// FromBundle derives a Config from a RuntimeBundle graph lifecycle plan.
-func FromBundle(plan bundle.GraphLifecyclePlan) Config {
+// FromBundle derives a Config from a contracts RuntimeBundle graph lifecycle.
+func FromBundle(plan contracts.GraphLifecycle) Config {
 	c := DefaultConfig()
-	c.Enabled = plan.Enabled
+	c.Enabled = lifecycleModeEnabled(plan.Mode)
 	if plan.Mode != "" {
 		c.Mode = plan.Mode
 	}
-	l := plan.Learning
-	if d, err := time.ParseDuration(l.MinCleanLearning); err == nil && d > 0 {
-		c.MinCleanLearning = d
+	if plan.MinCleanLearning.Duration > 0 {
+		c.MinCleanLearning = plan.MinCleanLearning.Duration
 	}
-	if l.MinLearnedEdges > 0 {
-		c.MinLearnedEdges = l.MinLearnedEdges
+	if plan.MinLearnedEdges > 0 {
+		c.MinLearnedEdges = plan.MinLearnedEdges
 	}
-	if l.MinBaselineCoverage > 0 {
-		c.MinBaselineCoverage = l.MinBaselineCoverage
+	if plan.MinBaselineCoverage > 0 {
+		c.MinBaselineCoverage = plan.MinBaselineCoverage
 	}
-	if l.RequireAutotunePhase != "" {
-		c.RequireAutotunePhase = l.RequireAutotunePhase
+	if plan.RequireNoBlockFor.Duration > 0 {
+		c.RequireNoBlockFor = plan.RequireNoBlockFor.Duration
 	}
-	if d, err := time.ParseDuration(l.RequireNoBlockEventsFor); err == nil && d > 0 {
-		c.RequireNoBlockFor = d
+	if plan.FreezeApproval != "" {
+		c.Approval = plan.FreezeApproval
 	}
-	f := plan.Freeze
-	c.AutoFreeze = f.AutoFreeze
-	if f.Approval != "" {
-		c.Approval = f.Approval
+	if plan.IncludeEdgeBaselines {
+		c.IncludeEdgeBaselines = true
 	}
-	c.ProposalUpload = f.ProposalUpload
-	c.IncludeEdgeBaselines = f.IncludeEdgeBaselines
-	r := plan.Rollout
-	if d, err := time.ParseDuration(r.ObserveAfterFreeze); err == nil && d > 0 {
-		c.ObserveAfterFreeze = d
+	if plan.ObserveAfterFreeze.Duration > 0 {
+		c.ObserveAfterFreeze = plan.ObserveAfterFreeze.Duration
 	}
-	if r.FinalPhase != "" {
-		c.FinalPhase = r.FinalPhase
+	if plan.FinalPhase != "" {
+		c.FinalPhase = plan.FinalPhase
 	}
 	return c
+}
+
+func lifecycleModeEnabled(mode string) bool {
+	switch strings.TrimSpace(strings.ToLower(mode)) {
+	case "", "disabled", "off", "none":
+		return false
+	default:
+		return true
+	}
 }
 
 // Controller manages the graph lifecycle state machine.
@@ -237,32 +242,26 @@ func (c *Controller) ApplyEnforce() {
 	}
 }
 
-// MaxAction returns the enforcement ceiling for the current lifecycle phase.
+// MaxAction returns the configured enforcement ceiling for the current lifecycle phase.
 // Values match the action names used by the ActionResolver.
-func (c *Controller) MaxAction(bounds bundle.EnforcementBounds) string {
+func (c *Controller) MaxAction(bounds contracts.EnforcementBounds) string {
 	switch c.phase {
 	case PhaseDisabled, PhaseLearning, PhaseFreezeReady, PhaseFreezePending:
-		if bounds.MaxActionDuringBootstrap != "" {
-			return bounds.MaxActionDuringBootstrap
-		}
-		return "observe"
+		return bounds.MaxActionDuringBootstrap
 	case PhaseFrozenObserve:
-		if bounds.MaxActionDuringFrozenObserve != "" {
-			return bounds.MaxActionDuringFrozenObserve
-		}
-		return "observe"
+		return bounds.MaxActionDuringFrozenObserve
 	case PhaseFrozenEnforce:
-		if bounds.MaxActionDuringFrozenEnforce != "" {
-			return bounds.MaxActionDuringFrozenEnforce
-		}
-		return "rate_limit"
+		return bounds.MaxActionDuringFrozenEnforce
 	default:
-		return "observe"
+		return ""
 	}
 }
 
 // StartedAt returns when this lifecycle session began.
 func (c *Controller) StartedAt() time.Time { return c.startedAt }
+
+// ProposalUpload reports whether freeze-ready proposals should be uploaded.
+func (c *Controller) ProposalUpload() bool { return c.cfg.ProposalUpload }
 
 // KLIQGraphMode maps the current lifecycle phase to the kliq --graph-mode value.
 func (c *Controller) KLIQGraphMode() string {

@@ -4,16 +4,16 @@
 // Package registry provides a lightweight runtime view of the Kernloom registries
 // that KLIQ uses for adapter manifest validation and metric pipeline validation.
 //
-// The authoritative source for signals and capabilities is Forge (signals.yaml,
-// capabilities.yaml). The authoritative source for metrics and label policies is
-// Forge (metrics.yaml, label_policies.yaml). This package provides runtime views of
-// those registries — not a second independent copy.
+// The authoritative source is kernloom-registries. Forge pins and signs a
+// compact RegistrySnapshot; KLIQ turns that snapshot into this runtime view.
 //
-// In standalone mode, embedded defaults cover the core Kernloom metric IDs.
-// In managed mode, KLIQ should prefer a Forge-delivered registry snapshot.
 package registry
 
-import "strings"
+import (
+	"strings"
+
+	contracts "github.com/kernloom/kernloom-contracts"
+)
 
 // MetricEntry describes one canonical metric ID.
 type MetricEntry struct {
@@ -21,7 +21,8 @@ type MetricEntry struct {
 	Domain              string
 	ValueType           string // rate|ratio|count|percentile|gauge
 	Unit                string
-	AllowedScopes       []string
+	EntityScopes        []string
+	VisibilityScopes    []string
 	BaselineAllowed     bool
 	HighCardinalityRisk string // low|medium|high
 }
@@ -38,21 +39,26 @@ type LabelPolicyEntry struct {
 
 // SignalView is a minimal runtime view of a signal entry from Forge signals.yaml.
 type SignalView struct {
-	ID            string
-	Domain        string
-	AllowedScopes []string
+	ID               string
+	Domain           string
+	EntityScopes     []string
+	VisibilityScopes []string
 }
 
 // CapabilityView is a minimal runtime view of a capability entry from Forge capabilities.yaml.
 type CapabilityView struct {
-	ID       string
-	Category string
-	Domain   string
+	ID            string
+	Category      string
+	Domain        string
+	RuntimeAction bool
+	Severity      int
 }
 
 // Bundle is the runtime registry available to KLIQ for validation.
-// It is populated either from embedded defaults or from a Forge registry snapshot.
+// It is populated from a RegistrySnapshot, not from independent local defaults.
 type Bundle struct {
+	Ref contracts.RegistryRef
+
 	// Metrics holds canonical metric IDs by metric ID string.
 	Metrics map[string]*MetricEntry
 
@@ -64,6 +70,56 @@ type Bundle struct {
 
 	// Capabilities holds capability views by capability ID (from Forge capabilities.yaml).
 	Capabilities map[string]*CapabilityView
+}
+
+func FromSnapshot(snapshot contracts.RegistrySnapshot) (*Bundle, error) {
+	b := &Bundle{
+		Ref:           snapshot.Ref,
+		Metrics:       make(map[string]*MetricEntry, len(snapshot.Metrics)),
+		LabelPolicies: make(map[string]*LabelPolicyEntry, len(snapshot.LabelPolicies)),
+		Signals:       make(map[string]*SignalView, len(snapshot.Signals)),
+		Capabilities:  make(map[string]*CapabilityView, len(snapshot.Capabilities)),
+	}
+	for _, m := range snapshot.Metrics {
+		b.Metrics[m.ID] = &MetricEntry{
+			ID:                  m.ID,
+			Domain:              m.Domain,
+			ValueType:           m.ValueType,
+			Unit:                m.Unit,
+			EntityScopes:        append([]string(nil), m.EntityScopes...),
+			VisibilityScopes:    append([]string(nil), m.VisibilityScopes...),
+			BaselineAllowed:     m.BaselineAllowed,
+			HighCardinalityRisk: m.HighCardinalityRisk,
+		}
+	}
+	for _, p := range snapshot.LabelPolicies {
+		b.LabelPolicies[p.ID] = &LabelPolicyEntry{
+			ID:                    p.ID,
+			Allowed:               p.Allowed,
+			Cardinality:           p.Cardinality,
+			PIIRisk:               p.PIIRisk,
+			RequiresNormalization: p.RequiresNormalization,
+			Reason:                p.Reason,
+		}
+	}
+	for _, s := range snapshot.Signals {
+		b.Signals[s.ID] = &SignalView{
+			ID:               s.ID,
+			Domain:           s.Domain,
+			EntityScopes:     append([]string(nil), s.EntityScopes...),
+			VisibilityScopes: append([]string(nil), s.VisibilityScopes...),
+		}
+	}
+	for _, c := range snapshot.Capabilities {
+		b.Capabilities[c.ID] = &CapabilityView{
+			ID:            c.ID,
+			Category:      c.Category,
+			Domain:        c.Domain,
+			RuntimeAction: c.RuntimeAction,
+			Severity:      c.Severity,
+		}
+	}
+	return b, nil
 }
 
 // ── Lookup helpers ────────────────────────────────────────────────────────────
@@ -80,13 +136,13 @@ func (b *Bundle) HasMetric(id string) bool {
 // MetricScopeAllowed returns true when scope is valid for the given metric.
 func (b *Bundle) MetricScopeAllowed(metricID, scope string) bool {
 	if b == nil {
-		return true // permissive when no registry
+		return false
 	}
 	m, ok := b.Metrics[metricID]
 	if !ok {
 		return false
 	}
-	for _, s := range m.AllowedScopes {
+	for _, s := range m.EntityScopes {
 		if s == scope {
 			return true
 		}
@@ -125,6 +181,16 @@ func (b *Bundle) HasCapability(id string) bool {
 	return ok
 }
 
+// HasRuntimeActionCapability returns true only for registered capabilities that
+// are allowed in the runtime enforcement path.
+func (b *Bundle) HasRuntimeActionCapability(id string) bool {
+	if b == nil {
+		return false
+	}
+	c, ok := b.Capabilities[id]
+	return ok && c.RuntimeAction
+}
+
 // ── Validation mode ───────────────────────────────────────────────────────────
 
 // UnknownBehavior controls how unknown metric/signal IDs are handled.
@@ -142,16 +208,7 @@ type ValidationConfig struct {
 	UnknownCapabilities UnknownBehavior
 }
 
-// DefaultValidationConfig returns the recommended defaults for standalone mode.
-func DefaultValidationConfig() ValidationConfig {
-	return ValidationConfig{
-		UnknownMetrics:      UnknownWarn,
-		UnknownSignals:      UnknownWarn,
-		UnknownCapabilities: UnknownDrop,
-	}
-}
-
-// StrictValidationConfig is used in managed mode where all IDs must be known.
+// StrictValidationConfig is used where all IDs must be known.
 func StrictValidationConfig() ValidationConfig {
 	return ValidationConfig{
 		UnknownMetrics:      UnknownDrop,
@@ -164,10 +221,9 @@ func StrictValidationConfig() ValidationConfig {
 
 // ValidateSelectedLabels returns labels from the requested list that are allowed
 // by the registry. Unknown or forbidden labels are excluded.
-// When bundle is nil, all labels are allowed (standalone permissive mode).
 func ValidateSelectedLabels(b *Bundle, requested []string) (allowed []string, rejected []string) {
 	if b == nil {
-		return requested, nil
+		return nil, requested
 	}
 	for _, l := range requested {
 		if b.IsLabelAllowed(l) {

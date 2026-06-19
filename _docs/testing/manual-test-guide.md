@@ -115,7 +115,7 @@ spec:
     - enforce.traffic.rate_limit
   rules:
     - id: hold-enforcement-while-drops
-      when: "fsm.current_level in ['soft', 'hard', 'block'] && signals.enforcement_feedback_rate > 0"
+      when: "fsm.current_level in ['soft', 'hard', 'block'] && signals.enforcement.active"
       then:
         capability: enforce.traffic.rate_limit
         level: hard
@@ -163,6 +163,21 @@ Hinweis: Ohne Adapter-Signale gibt es meist keine RuntimePDP-Entscheidungen.
 Dieser Test prueft bewusst nur Laden, Validierung und Kompilierung des Packs.
 `--runtime-pdp-mode=active` sollte erst genutzt werden, wenn das Policy Pack
 fachlich passt und `--dry-run=false` wirklich gewollt ist.
+
+`signals.enforcement.*` sind generische RuntimePDP-Facts fuer laufendes
+PEP-Feedback:
+- `signals.enforcement.feedback_rate`: generische Feedback-Rate.
+- `signals.enforcement.drop_rate`: Drop-Rate; bei KLShield aktuell
+  `network.rate_limit_drop_rate`.
+- `signals.enforcement.deny_rate`: Deny-/Reject-Rate, aktuell `0` bis ein
+  Adapter sie liefert.
+- `signals.enforcement.throttle_rate`: Throttle-/Backpressure-Rate, aktuell `0`
+  bis ein Adapter sie liefert.
+- `signals.enforcement.active`: `true`, wenn eine dieser Raten groesser als
+  `0` ist.
+
+`signals.enforcement_feedback_rate` bleibt als alter Alias fuer
+`signals.enforcement.feedback_rate` verwendbar.
 
 ---
 
@@ -345,7 +360,7 @@ spec:
       reason_codes:
         - manual_k6_fsm_block
     - id: hold-enforcement-while-drops
-      when: "fsm.current_level in ['soft', 'hard', 'block'] && signals.enforcement_feedback_rate > 0"
+      when: "fsm.current_level in ['soft', 'hard', 'block'] && signals.enforcement.active"
       then:
         capability: enforce.traffic.rate_limit
         level: hard
@@ -664,7 +679,240 @@ Falls keine Aktionen passiert sind, ist eine leere Result-Menge normal.
 
 ---
 
-## 8. Integrationstest-Skripte
+## 8. Forge als Policy-Builder fuer Standalone-KLIQ
+
+Dieser Pfad nutzt Forge nicht als laufenden Control-Plane-Server, sondern als
+Policy-Compiler fuer einen lokalen Operator-Workflow:
+
+1. Enterprise-Intent als `AccessPolicy` schreiben.
+2. Forge gegen Adapter-Manifeste und Target-Profile kompilieren lassen.
+3. Den Forge-Plan pruefen: deployable, compensating controls, downgrades,
+   unsupported requirements.
+4. Daraus ein lokales KLIQ-`RuntimePolicyPack` bauen und mit
+   `kliq run --policy-file=...` laden.
+
+Wichtig: `forge compile --output yaml` erzeugt aktuell einen
+`kind: EnforcementPlan`. Das ist ein Governance-/Compiler-Report und noch
+nicht direkt das Datei-Format fuer `kliq --policy-file`. Standalone-KLIQ laedt
+lokal:
+
+```yaml
+apiVersion: kernloom.io/runtime/v1alpha1
+kind: RuntimePolicyPack
+```
+
+Forge ist in diesem Ablauf also der sichere Compiler/Validator, der zeigt,
+welche Anforderungen fuer ein Target nativ, partiell, delegiert oder als
+Runtime-Kompensation umgesetzt werden sollen. Die finale Standalone-Datei ist
+danach ein KLIQ-`RuntimePolicyPack`.
+
+Forge bauen:
+
+```bash
+cd /home/adrian/prj/ebpf-security/kernloom-forge
+export PATH=$PATH:/usr/local/go/bin
+mkdir -p bin
+go build -o bin/forge ./cmd/forge
+```
+
+Ein minimales Standalone-Intent fuer einen Edge-/Router-Node anlegen:
+
+```bash
+mkdir -p /tmp/kernloom-manual/forge-profiles
+cp examples/profiles/klshield-local.yaml /tmp/kernloom-manual/forge-profiles/
+
+cat > /tmp/kernloom-manual/standalone-edge-access.yaml <<'EOF'
+apiVersion: kernloom.io/v1
+kind: AccessPolicy
+metadata:
+  name: standalone-edge-access
+  owner: lab-operator
+spec:
+  subject:
+    type: role
+    ref: edge-clients
+  action: access
+  resource:
+    type: service
+    ref: public-edge
+  conditions:
+    - id: require-low-risk
+      type: risk_level
+      signal: subject.risk.level
+      operator: eq
+      value: low
+  effect: allow
+EOF
+```
+
+Intent und KLShield-Adaptermanifest validieren:
+
+```bash
+./bin/forge validate \
+  --policy /tmp/kernloom-manual/standalone-edge-access.yaml
+
+./bin/forge validate-adapter \
+  --adapter examples/adapters/klshield/capability.yaml
+```
+
+Policy gegen das lokale KLShield-Target kompilieren:
+
+```bash
+./bin/forge compile \
+  --policy /tmp/kernloom-manual/standalone-edge-access.yaml \
+  --adapters examples/adapters \
+  --profiles /tmp/kernloom-manual/forge-profiles \
+  --output summary
+
+./bin/forge compile \
+  --policy /tmp/kernloom-manual/standalone-edge-access.yaml \
+  --adapters examples/adapters \
+  --profiles /tmp/kernloom-manual/forge-profiles \
+  --output yaml \
+  > /tmp/kernloom-manual/forge-standalone-plan.yaml
+```
+
+Erwartet:
+- Die Summary enthaelt `standalone-edge-access -> klshield-local`.
+- `deployable` bedeutet: alle Requirements sind mindestens implementiert,
+  partiell, delegiert oder als kompensierender Runtime-Control abgedeckt.
+- `compensating=require-low-risk` bedeutet: Forge erwartet fuer diese
+  Anforderung eine RuntimePDP-Regel in KLIQ.
+- `unsupported=...` bedeutet: nicht blind weitermachen. Erst entscheiden, ob
+  das Intent, das Target-Profil oder die Adapter-Faehigkeiten angepasst werden
+  muessen.
+- `partial`/`downgraded` bedeutet: die Semantik wurde vereinfacht, z.B. Rolle
+  oder Service wird bei KLShield auf lokale Netzwerk-/Cgroup-Sicht reduziert.
+
+Den Plan inspizieren:
+
+```bash
+grep -E 'target:|deployable:|status:|capability:|action:|unsupported|downgrade' \
+  /tmp/kernloom-manual/forge-standalone-plan.yaml
+```
+
+Fuer Standalone-KLIQ daraus ein lokales RuntimePolicyPack erstellen:
+
+```bash
+cat > /tmp/kernloom-manual/standalone-runtime-policy.yaml <<'EOF'
+apiVersion: kernloom.io/runtime/v1alpha1
+kind: RuntimePolicyPack
+metadata:
+  name: standalone-klshield-runtime-policy
+  issued_at: "2026-06-19T10:00:00Z"
+spec:
+  default_effect: deny
+  capabilities_required:
+    - enforce.traffic.rate_limit
+    - enforce.access.deny
+  rules:
+    - id: hold-active-enforcement
+      when: "fsm.current_level in ['soft', 'hard', 'block'] && signals.enforcement.active"
+      then:
+        capability: enforce.traffic.rate_limit
+        level: hard
+        ttl: "30s"
+        params:
+          rate_pps: 100
+      reason_codes:
+        - forge_standalone_hold
+        - enforcement_feedback_active
+
+    - id: critical-risk-deny
+      when: "risk.level == 'critical'"
+      then:
+        capability: enforce.access.deny
+        level: block
+        ttl: "30s"
+      reason_codes:
+        - forge_compensating_control
+        - risk_critical
+
+    - id: high-risk-rate-limit
+      when: "risk.level == 'high'"
+      then:
+        capability: enforce.traffic.rate_limit
+        level: hard
+        ttl: "30s"
+        params:
+          rate_pps: 100
+      reason_codes:
+        - forge_compensating_control
+        - risk_high
+EOF
+```
+
+Warum diese drei Regeln:
+- `hold-active-enforcement` verhindert Oszillation. Wenn der PEP weiterhin
+  Drops/Deny/Throttle-Feedback meldet, erneuert KLIQ die Lease, auch wenn die
+  Post-Enforcement-Telemetrie sauberer aussieht.
+- `critical-risk-deny` ist die harte Kompensation fuer kritisches Risiko.
+- `high-risk-rate-limit` ist die konservative Kompensation fuer hohes Risiko.
+
+Regel-Reihenfolge ist relevant: RuntimePDP nimmt die erste passende Regel.
+Darum steht Hold vor neuen Eskalationen und `critical` vor `high`.
+
+Hinweis zu Capability-Namen:
+- Forge-Adapterkataloge koennen adapterseitige Action-IDs wie
+  `network.flow_rate_limit` oder `network.flow_deny` zeigen.
+- Das Standalone-`RuntimePolicyPack` fuer KLIQ sollte die contracts-basierten
+  Runtime-Capabilities verwenden: `enforce.traffic.rate_limit` und
+  `enforce.access.deny`.
+
+Policy lokal ohne PEP-Effekt pruefen:
+
+```bash
+cd /home/adrian/prj/ebpf-security/kernloom
+
+timeout 12s ./bin/kliq run \
+  --adapter=none \
+  --policy-file=/tmp/kernloom-manual/standalone-runtime-policy.yaml \
+  --runtime-pdp-mode=shadow \
+  --dry-run=true \
+  --feature-profile=dos-light \
+  --bootstrap=false \
+  --autotune=false \
+  --state-file=/tmp/kernloom-manual/state-forge-standalone-shadow.json \
+  --db=/tmp/kernloom-manual/kliq-forge-standalone-shadow.db \
+  --interval=2s
+```
+
+Erwartet:
+- `Policy loaded: ... kind=RuntimePolicyPack`
+- `[runtime-pdp] pack loaded: 3 rules`
+- `RuntimePDP mode: SHADOW`
+
+Danach mit KLShield als Standalone-KLIQ im Dry-Run starten:
+
+```bash
+sudo ./bin/kliq run \
+  --adapter=klshield \
+  --policy-file=/tmp/kernloom-manual/standalone-runtime-policy.yaml \
+  --runtime-pdp-mode=active \
+  --dry-run=true \
+  --feature-profile=dos-light \
+  --bootstrap=false \
+  --autotune=false \
+  --state-file=/tmp/kernloom-manual/state-forge-standalone-klshield.json \
+  --db=/tmp/kernloom-manual/kliq-forge-standalone-klshield.db \
+  --interval=1s
+```
+
+Erwartet:
+- RuntimePDP ist `active`, aber wegen `--dry-run=true` wird noch nichts real in
+  KLShield geschrieben.
+- Bei passenden Signalen erscheinen `[runtime-pdp:active] DECISION ...` und
+  `ACTION-RECEIPT`-Logs.
+- Erst nach erfolgreichem Dry-Run und bewusstem Operator-Entscheid
+  `--dry-run=false` verwenden.
+
+Merksatz: Forge beantwortet hier "ist mein Intent fuer dieses Target fachlich
+abdeckbar?". KLIQ beantwortet lokal "welche Runtime-Aktion soll ich jetzt fuer
+dieses konkrete Subject ausfuehren?".
+
+---
+
+## 9. Integrationstest-Skripte
 
 Die manuellen Schritte oben koennen durch die Integrationstest-Skripte
 abgesichert werden.
@@ -705,7 +953,7 @@ optional netfilter-Tools fuer Szenario 11. Artefakte landen unter
 
 ---
 
-## 9. OpenZiti Decoder/Mapping Tests
+## 10. OpenZiti Decoder/Mapping Tests
 
 Diese Tests brauchen keinen Controller:
 
@@ -747,7 +995,7 @@ go run /tmp/openziti-test.go
 
 ---
 
-## 10. Was nach dem Umbau bewusst anders ist
+## 11. Was nach dem Umbau bewusst anders ist
 
 - KLIQ startet ueber `kliq run [flags]`; Subcommands sind explizit.
 - Der State-Store heisst `--db`; `--state-store-path` ist alt.
@@ -766,7 +1014,7 @@ go run /tmp/openziti-test.go
 
 ---
 
-## 11. Haeufige Probleme
+## 12. Haeufige Probleme
 
 | Problem | Loesung |
 |---|---|
@@ -781,3 +1029,4 @@ go run /tmp/openziti-test.go
 | KLShield Maps fehlen | Erst KLShield/eBPF Setup starten oder den unprivilegierten Smoke-Test nutzen |
 | Relationships/Baselines leer | Ohne Telemetriequelle normal; Graph Learning braucht Adapter-Observations |
 | Forge-Server nicht erreichbar | Port pruefen: `lsof -i :18443` |
+| `forge compile --output yaml` laedt nicht via `--policy-file` | Das ist ein `EnforcementPlan`. Fuer Standalone-KLIQ ein `RuntimePolicyPack` mit `apiVersion: kernloom.io/runtime/v1alpha1` erstellen |

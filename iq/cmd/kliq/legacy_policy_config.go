@@ -7,6 +7,8 @@ import (
 	"strconv"
 	"strings"
 
+	registries "github.com/kernloom/kernloom-registries"
+	contracts "github.com/kernloom/kernloom-contracts"
 	"github.com/kernloom/kernloom/pkg/adapterruntime"
 	"github.com/kernloom/kernloom/pkg/core/fsm"
 	"github.com/kernloom/kernloom/pkg/core/pdp"
@@ -185,27 +187,26 @@ func parseRatePPS(params map[string]string) uint64 {
 	return v
 }
 
-// capabilitySeverityKLIQ maps Forge capability IDs to enforcement severity.
-// 0=observe, 1=soft, 2=hard, 3=block. Mirrors render.go's capabilitySeverity
-// so KLIQ can derive ceilings from action_authorization.allowed_capabilities.
-var capabilitySeverityKLIQ = map[string]int{
-	"enforce.access.allow": 0,
+// capabilitySeverityKLIQ maps Forge capability IDs to enforcement severity:
+// 0=observe, 1=soft, 2=hard, 3=block. Values come from kernloom-registries.
+var capabilitySeverityKLIQ = loadCapabilitySeverityRegistry()
 
-	"enforce.traffic.rate_limit":       1,
-	"enforce.traffic.connection_limit": 1,
-	"enforce.traffic.bandwidth_limit":  1,
-	"enforce.network.rate_limit":       1,
-	"enforce.network.syn_protect":      1,
+func loadCapabilitySeverityRegistry() map[string]int {
+	snapshot, err := registries.EmbeddedSnapshot()
+	if err != nil {
+		panic("load kernloom registry snapshot: " + err.Error())
+	}
+	return capabilitySeverityFromSnapshot(snapshot)
+}
 
-	"enforce.traffic.tarpit": 2,
-
-	"enforce.access.deny":          3,
-	"enforce.access.default_deny":  3,
-	"enforce.traffic.drop":         3,
-	"enforce.traffic.quarantine":   3,
-	"enforce.network.deny":         3,
-	"enforce.network.default_deny": 3,
-	"enforce.network.quarantine":   3,
+func capabilitySeverityFromSnapshot(snapshot contracts.RegistrySnapshot) map[string]int {
+	out := make(map[string]int, len(snapshot.Capabilities))
+	for _, cap := range snapshot.Capabilities {
+		if cap.RuntimeAction {
+			out[cap.ID] = cap.Severity
+		}
+	}
+	return out
 }
 
 // deriveMaxAction returns the PolicyMaxAction string for the highest-severity

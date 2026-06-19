@@ -6,22 +6,36 @@ package adapterruntime_test
 import (
 	"testing"
 
+	registries "github.com/kernloom/kernloom-registries"
 	"github.com/kernloom/kernloom/pkg/adapterruntime"
 	"github.com/kernloom/kernloom/pkg/core/metric"
 	"github.com/kernloom/kernloom/pkg/core/observation"
 	"github.com/kernloom/kernloom/pkg/registry"
 )
 
-func TestKLShieldManifest_ValidatesAgainstDefaultBundle(t *testing.T) {
-	b := registry.DefaultBundle()
+func testRegistry(t *testing.T) *registry.Bundle {
+	t.Helper()
+	snapshot, err := registries.EmbeddedSnapshot()
+	if err != nil {
+		t.Fatalf("EmbeddedSnapshot: %v", err)
+	}
+	b, err := registry.FromSnapshot(snapshot)
+	if err != nil {
+		t.Fatalf("FromSnapshot: %v", err)
+	}
+	return b
+}
+
+func TestKLShieldManifest_ValidatesAgainstRegistrySnapshot(t *testing.T) {
+	b := testRegistry(t)
 	result := adapterruntime.KLShieldManifest.Validate(b)
 	if !result.Valid {
-		t.Errorf("KLShield manifest should be valid against default bundle: unknownMetrics=%v unknownSignals=%v unknownActions=%v forbiddenLabels=%v",
-			result.UnknownMetrics, result.UnknownSignals, result.UnknownActions, result.ForbiddenLabels)
+		t.Errorf("KLShield manifest should be valid against registry snapshot: unknownMetrics=%v unknownSignals=%v unknownActions=%v disallowedActions=%v forbiddenLabels=%v",
+			result.UnknownMetrics, result.UnknownSignals, result.UnknownActions, result.DisallowedActions, result.ForbiddenLabels)
 	}
 }
 
-func TestManifest_NilBundle_AlwaysValid(t *testing.T) {
+func TestManifest_NilBundle_FailsClosed(t *testing.T) {
 	m := adapterruntime.AdapterManifest{
 		ID:   "test",
 		Type: adapterruntime.ManifestTypeObservation,
@@ -30,13 +44,13 @@ func TestManifest_NilBundle_AlwaysValid(t *testing.T) {
 		},
 	}
 	result := m.Validate(nil)
-	if !result.Valid {
-		t.Error("nil bundle should always produce Valid=true (standalone permissive mode)")
+	if result.Valid {
+		t.Error("nil bundle should fail closed")
 	}
 }
 
 func TestManifest_DetectsUnknownMetric(t *testing.T) {
-	b := registry.DefaultBundle()
+	b := testRegistry(t)
 	m := adapterruntime.AdapterManifest{
 		ID:   "bad-adapter",
 		Type: adapterruntime.ManifestTypeExtractor,
@@ -54,7 +68,7 @@ func TestManifest_DetectsUnknownMetric(t *testing.T) {
 }
 
 func TestManifest_DetectsForbiddenLabel(t *testing.T) {
-	b := registry.DefaultBundle()
+	b := testRegistry(t)
 	m := adapterruntime.AdapterManifest{
 		ID:   "careless-adapter",
 		Type: adapterruntime.ManifestTypeExtractor,
@@ -72,7 +86,7 @@ func TestManifest_DetectsForbiddenLabel(t *testing.T) {
 }
 
 func TestManifest_DetectsUnknownAction(t *testing.T) {
-	b := registry.DefaultBundle()
+	b := testRegistry(t)
 	m := adapterruntime.AdapterManifest{
 		ID:   "pep-adapter",
 		Type: adapterruntime.ManifestTypePEP,
@@ -89,8 +103,26 @@ func TestManifest_DetectsUnknownAction(t *testing.T) {
 	}
 }
 
+func TestManifest_DetectsDisallowedRuntimeAction(t *testing.T) {
+	b := testRegistry(t)
+	m := adapterruntime.AdapterManifest{
+		ID:   "granting-pep",
+		Type: adapterruntime.ManifestTypePEP,
+		Consumes: adapterruntime.AdapterConsumes{
+			Actions: []string{"enforce.network.allow"},
+		},
+	}
+	result := m.Validate(b)
+	if result.Valid {
+		t.Error("expected validation failure for config-only grant action")
+	}
+	if len(result.DisallowedActions) != 1 || result.DisallowedActions[0] != "enforce.network.allow" {
+		t.Errorf("unexpected disallowed actions: %v", result.DisallowedActions)
+	}
+}
+
 func TestManifest_EmptyProvides_IsValid(t *testing.T) {
-	b := registry.DefaultBundle()
+	b := testRegistry(t)
 	m := adapterruntime.AdapterManifest{
 		ID:   "minimal",
 		Type: adapterruntime.ManifestTypeExport,

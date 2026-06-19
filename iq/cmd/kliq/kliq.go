@@ -228,14 +228,14 @@ func main() {
 		// In managed mode: LKG bundle may override pdp_profile and adapters.
 		if c.Mode == string(corepolicy.ModeManaged) {
 			if lkgBytes := loadLastKnownGoodBundle(c.StatePath); lkgBytes != nil {
-				if b, err := parseTrustedRuntimeBundle(lkgBytes, &c); err == nil {
-					if b.Spec.PDPProfile != "" {
-						kliqLog.Printf("PDP profile from bundle: %s (was: %s)", b.Spec.PDPProfile, c.ProfileName)
-						c.ProfileName = b.Spec.PDPProfile
+				if b, _, err := parseTrustedRuntimeBundle(lkgBytes, &c); err == nil {
+					if profileName := runtimeBundlePDPProfileName(b); profileName != "" {
+						kliqLog.Printf("PDP profile from bundle: %s (was: %s)", profileName, c.ProfileName)
+						c.ProfileName = profileName
 					}
-					if b.Spec.Adapters != "" {
-						kliqLog.Printf("Adapters from bundle: %s (was: %s)", b.Spec.Adapters, c.Adapters)
-						c.Adapters = b.Spec.Adapters
+					if adapters := runtimeBundleAdapters(b); adapters != "" {
+						kliqLog.Printf("Adapters from bundle: %s (was: %s)", adapters, c.Adapters)
+						c.Adapters = adapters
 					}
 				} else {
 					kliqLog.Printf("MANAGED: ignoring untrusted last-known-good bundle for profile/adapters: %v", err)
@@ -297,15 +297,16 @@ func main() {
 	c.Cooldown = c.adapterParams.Cooldown
 
 	// Resolve runtime feature profile.
-	// Priority: --feature-profile flag > LKG bundle > --graph flag > dos-light default.
-	// The LKG bundle is read here (before adapters start) so its feature_profile takes
-	// effect on startup rather than being applied too late after adapters are already
-	// initialized with the wrong profile.
+	// Priority: --feature-profile flag > LKG graph lifecycle > --graph flag > dos-light default.
+	// The LKG bundle is read here (before adapters start) so graph-enabled bundles
+	// activate graph learning before adapters are initialized.
 	if c.FeatureProfile == "" {
 		if lkgBytes := loadLastKnownGoodBundle(c.StatePath); lkgBytes != nil {
-			if b, err := parseTrustedRuntimeBundle(lkgBytes, &c); err == nil && b.Spec.FeatureProfile != "" {
-				c.FeatureProfile = b.Spec.FeatureProfile
-				kliqLog.Printf("Feature profile from bundle: %s", c.FeatureProfile)
+			if b, _, err := parseTrustedRuntimeBundle(lkgBytes, &c); err == nil {
+				if graphLifecycleEnabled(b.Spec.GraphLifecycle) {
+					c.GraphEnabled = true
+					kliqLog.Printf("Graph feature profile requested by bundle graph lifecycle")
+				}
 			} else if err != nil {
 				kliqLog.Printf("MANAGED: ignoring untrusted last-known-good bundle for feature profile: %v", err)
 			}
@@ -680,7 +681,7 @@ func main() {
 	// Apply last-known-good bundle on startup (fail_static).
 	if lkg := loadLastKnownGoodBundle(c.StatePath); lkg != nil {
 		kliqLog.Printf("MANAGED: applying last-known-good bundle from disk")
-		applyBundleUpdate(lkg, &c, &bsCtl, &graphCtl, &ms, stFile)
+		applyBundleUpdate(lkg, &c, &bsCtl, &graphCtl, &ms, stFile, runtimePolicyUpdateCh)
 	}
 
 	// Pre-set HasPolicyPack from persisted state so the startup INVENTORY log
@@ -1214,7 +1215,7 @@ func main() {
 		// Process pending bundle update (non-blocking; delivered by heartbeat goroutine).
 		select {
 		case rawBundle := <-bundleUpdateCh:
-			applyBundleUpdate(rawBundle, &c, &bsCtl, &graphCtl, &ms, stFile)
+			applyBundleUpdate(rawBundle, &c, &bsCtl, &graphCtl, &ms, stFile, runtimePolicyUpdateCh)
 			// Persist updated managed state immediately.
 			if stFile != nil {
 				stFile.Active.ForgeBundleGeneration = ms.BundleGeneration
@@ -1402,7 +1403,7 @@ func main() {
 					_ = writeStateAtomic(c.StatePath, stFile)
 				}
 				// Upload proposal when reaching freeze_ready.
-				if graphCtl.Phase() == lgraph.PhaseFreezeReady && forgeC != nil && graphCfg.ProposalUpload {
+				if graphCtl.Phase() == lgraph.PhaseFreezeReady && forgeC != nil && graphCtl.ProposalUpload() {
 					go func() {
 						id := uploadBaselineProposal(context.Background(), forgeC, nodeID,
 							graphCtl, bsCtl, gStats, &c)

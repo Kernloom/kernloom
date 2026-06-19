@@ -40,7 +40,7 @@ type Runner struct {
 // Options configures the Runner at construction time.
 type Options struct {
 	Config     Config
-	Registry   *registry.Bundle // nil = use embedded defaults
+	Registry   *registry.Bundle
 	Baseline   *metricbaseline.Engine
 	Guards     []adapterruntime.LearningGuard
 	Extractors []featureextractor.Extractor
@@ -52,9 +52,6 @@ type Options struct {
 // Returns a no-op runner when cfg.Enabled is false.
 func New(opts Options) *Runner {
 	reg := opts.Registry
-	if reg == nil {
-		reg = registry.DefaultBundle()
-	}
 
 	baseline := opts.Baseline
 	if baseline == nil {
@@ -236,10 +233,12 @@ func (r *Runner) process(ctx context.Context, obs []observation.Observation) {
 }
 
 func (r *Runner) validateMetrics(batch metric.Batch) metric.Batch {
-	if r.registry == nil {
-		return batch
-	}
 	out := metric.NewBatch(batch.Source, batch.From, batch.To)
+	if r.registry == nil {
+		r.status.UnknownMetricsDropped += uint64(batch.Len())
+		r.logger.Printf("[pipeline] registry snapshot missing; dropping %d metrics", batch.Len())
+		return out
+	}
 	for _, m := range batch.Metrics {
 		if !r.registry.HasMetric(string(m.ID)) {
 			r.status.UnknownMetricsDropped++

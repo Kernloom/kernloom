@@ -18,6 +18,7 @@ import (
 	"github.com/kernloom/kernloom/pkg/core/fsm"
 	"github.com/kernloom/kernloom/pkg/core/observation"
 	"github.com/kernloom/kernloom/pkg/core/relationship"
+	"github.com/kernloom/kernloom/pkg/core/signal"
 	sstore "github.com/kernloom/kernloom/pkg/statestore/sqlite"
 )
 
@@ -252,6 +253,25 @@ func TestRuntimePDPInputTreatsEnforcementFeedbackAsHighRiskWhenEnforced(t *testi
 	if got := input.Context.Signals["enforcement_feedback_rate"]; got != 2.0 {
 		t.Fatalf("enforcement feedback fact = %#v, want 2", got)
 	}
+	enforcement, ok := input.Context.Signals["enforcement"].(map[string]any)
+	if !ok {
+		t.Fatalf("missing nested enforcement facts: %#v", input.Context.Signals)
+	}
+	if got := enforcement["feedback_rate"]; got != 2.0 {
+		t.Fatalf("enforcement.feedback_rate = %#v, want 2", got)
+	}
+	if got := enforcement["drop_rate"]; got != 2.0 {
+		t.Fatalf("enforcement.drop_rate = %#v, want 2", got)
+	}
+	if got := enforcement["deny_rate"]; got != 0.0 {
+		t.Fatalf("enforcement.deny_rate = %#v, want 0", got)
+	}
+	if got := enforcement["throttle_rate"]; got != 0.0 {
+		t.Fatalf("enforcement.throttle_rate = %#v, want 0", got)
+	}
+	if got := enforcement["active"]; got != true {
+		t.Fatalf("enforcement.active = %#v, want true", got)
+	}
 }
 
 func TestRuntimePDPInputDoesNotPromoteIdleFeedbackToHighRisk(t *testing.T) {
@@ -277,6 +297,44 @@ func TestRuntimePDPInputDoesNotPromoteIdleFeedbackToHighRisk(t *testing.T) {
 
 	if input.Risk.Level == contracts.RiskHigh || input.Risk.Level == contracts.RiskCritical {
 		t.Fatalf("observe-only feedback should not promote risk, got level=%s score=%d", input.Risk.Level, input.Risk.Score)
+	}
+}
+
+func TestRuntimePDPInputForSignalIncludesNestedEnforcementFacts(t *testing.T) {
+	now := time.Date(2026, 6, 19, 13, 25, 0, 0, time.UTC)
+	sig := signal.NewSignal(signal.ProducerKLIQ, signal.ScopeLocal, signal.SignalRateLimitDropsSustained, observation.EntityRef{
+		Kind: observation.KindIP,
+		ID:   "10.0.0.1",
+	}).
+		SetScore(75).
+		SetConfidence(90).
+		SetAttribute("drop_rl_rate", "3.5")
+
+	input := runtimePDPInputForSignal("node-test", *sig, nil, now)
+	if got := input.Context.Signals["enforcement_feedback_rate"]; got != 3.5 {
+		t.Fatalf("enforcement feedback fact = %#v, want 3.5", got)
+	}
+	enforcement, ok := input.Context.Signals["enforcement"].(map[string]any)
+	if !ok {
+		t.Fatalf("missing nested enforcement facts: %#v", input.Context.Signals)
+	}
+	if got := enforcement["feedback_rate"]; got != 3.5 {
+		t.Fatalf("enforcement.feedback_rate = %#v, want 3.5", got)
+	}
+	if got := enforcement["drop_rate"]; got != 3.5 {
+		t.Fatalf("enforcement.drop_rate = %#v, want 3.5", got)
+	}
+	if got := enforcement["active"]; got != true {
+		t.Fatalf("enforcement.active = %#v, want true", got)
+	}
+
+	groupFacts := runtimeSignalGroupFacts([]signal.Signal{*sig})
+	groupEnforcement, ok := groupFacts["enforcement"].(map[string]any)
+	if !ok {
+		t.Fatalf("missing signal-group enforcement facts: %#v", groupFacts)
+	}
+	if got := groupEnforcement["drop_rate"]; got != 3.5 {
+		t.Fatalf("group enforcement.drop_rate = %#v, want 3.5", got)
 	}
 }
 
