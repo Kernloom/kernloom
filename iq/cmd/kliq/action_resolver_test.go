@@ -5,9 +5,7 @@ package main
 
 import (
 	"testing"
-	"time"
 
-	"github.com/kernloom/kernloom/pkg/adapters/catalog"
 	"github.com/kernloom/kernloom/pkg/core/decision"
 	"github.com/kernloom/kernloom/pkg/core/fsm"
 	"github.com/kernloom/kernloom/pkg/core/policy"
@@ -142,66 +140,5 @@ func TestResolveDecisionAction_ManagedWithPack_RateLimitCap(t *testing.T) {
 	got = c.resolveDecisionAction(decision.ActionRateLimit)
 	if got != decision.ActionRateLimit {
 		t.Errorf("rate_limit cap: rate_limit stays → %s", got)
-	}
-}
-
-// ── Integration: source FSM with managed mode ─────────────────────────────────
-
-// managedTestCfg builds a cfg that simulates a managed-mode KLIQ node.
-func managedTestCfg(maxAction string, hasPack bool) cfg {
-	c := cfg{
-		Mode:            string(policy.ModeManaged),
-		HasPolicyPack:   hasPack,
-		PolicyMaxAction: maxAction,
-		SevStep1:        1.0, SevStep2: 50.0, SevStep3: 75.0,
-		SevDelta1: 1, SevDelta2: 2, SevDelta3: 3,
-		SoftAt: 1, HardAt: 2, BlockAt: 3,
-		SoftTTL: time.Minute, HardTTL: time.Minute, BlockTTL: time.Minute,
-	}
-	c.adapterParams = catalog.DefaultCapabilityParams(catalog.DefaultAdapterID)
-	return c
-}
-
-func TestProcessCandidate4_ManagedNoPack_AlwaysObserve(t *testing.T) {
-	// Managed mode without a policy pack → NO enforcement, even under attack traffic.
-	c := managedTestCfg("", false)
-	st := runFSM(10, c)
-	if st.Level != fsm.LevelObserve {
-		t.Errorf("managed mode without pack: expected LevelObserve, got %s", st.Level)
-	}
-}
-
-func TestProcessCandidate4_ManagedWithPack_BlockAllowed(t *testing.T) {
-	// Managed mode WITH a pack and no max_action cap → block is allowed.
-	c := managedTestCfg("", true)
-	st := runFSM(5, c)
-	if st.Level < fsm.LevelHard {
-		t.Errorf("managed mode with pack, no cap: expected at least LevelHard, got %s", st.Level)
-	}
-}
-
-func TestProcessCandidate4_ManagedWithPack_RateLimitCap(t *testing.T) {
-	// Managed mode WITH a pack and max_action=rate_limit → never above soft.
-	c := managedTestCfg("rate_limit", true)
-	st := runFSM(10, c)
-	if st.Level > fsm.LevelSoft {
-		t.Errorf("managed mode rate_limit cap: expected ≤ LevelSoft, got %s", st.Level)
-	}
-}
-
-func TestProcessCandidate4_StandaloneNoPackNeeded(t *testing.T) {
-	// Standalone mode works without a pack — no enforcement restriction.
-	c := cfg{
-		Mode:          string(policy.ModeStandalone),
-		HasPolicyPack: false, // no pack, but standalone → no restriction
-		SevStep1:      1.0, SevStep2: 50.0, SevStep3: 75.0,
-		SevDelta1: 1, SevDelta2: 2, SevDelta3: 3,
-		SoftAt: 1, HardAt: 2, BlockAt: 3,
-		SoftTTL: time.Minute, HardTTL: time.Minute, BlockTTL: time.Minute,
-	}
-	c.adapterParams = catalog.DefaultCapabilityParams(catalog.DefaultAdapterID)
-	st := runFSM(5, c)
-	if st.Level < fsm.LevelHard {
-		t.Errorf("standalone without pack: expected enforcement to proceed, got %s", st.Level)
 	}
 }

@@ -6,16 +6,17 @@ package main
 // runtimePDPRunner manages the new contracts-based RuntimePDP path.
 //
 // Modes:
-//   - shadow (default): evaluates alongside the FSM, logs decisions, no enforcement.
-//   - active: RuntimePDP decisions become real ActionProposals fed into the broker path.
+//   - shadow (default): evaluates and logs RuntimePDP decisions, no enforcement.
+//   - active: RuntimePDP is authoritative; decisions become real ActionProposals
+//     fed into the broker path.
 //
-// The FSM remains active in both modes as the network-defense layer.
-// RuntimePDP adds the risk-policy layer on top.
+// The FSM remains available as a signal/hysteresis fact producer. It does not
+// own network enforcement decisions; it supplies proposed levels to RuntimePDP.
 //
 // Cutover sequence (Step 5):
-//  1. Run in shadow mode and compare decisions to FSM.
-//  2. Validate parity in staging.
-//  3. Set --runtime-pdp-mode=active to promote to primary enforcement.
+//  1. Run in shadow mode to observe RuntimePDP decisions without PEP effects.
+//  2. Validate policy coverage in staging.
+//  3. Set --runtime-pdp-mode=active to let RuntimePDP emit broker actions.
 
 import (
 	"context"
@@ -35,9 +36,9 @@ import (
 type runtimePDPMode string
 
 const (
-	// PDPModeShadow — evaluate but do not enforce; log decisions for parity comparison.
+	// PDPModeShadow — evaluate and log only; no enforcement action is emitted.
 	PDPModeShadow runtimePDPMode = "shadow"
-	// PDPModeActive — evaluate and emit ActionProposals; FSM remains for network defense.
+	// PDPModeActive — evaluate and emit ActionProposals; FSM supplies facts only.
 	PDPModeActive runtimePDPMode = "active"
 )
 

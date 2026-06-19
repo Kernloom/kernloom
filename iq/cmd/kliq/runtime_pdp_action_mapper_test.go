@@ -83,6 +83,28 @@ func TestRuntimeDecisionToActionProposalRelationship(t *testing.T) {
 	}
 }
 
+func TestRuntimeDecisionToActionProposalObserve(t *testing.T) {
+	now := time.Date(2026, 6, 19, 10, 0, 0, 0, time.UTC)
+	dec := contracts.RuntimeDecision{
+		Subject: contracts.EntityRef{Kind: "ip", ID: "source-1"},
+		Effect:  "apply",
+		Action: contracts.RuntimeActionSpec{
+			Level: "observe",
+		},
+	}
+
+	prop, ok, reason := runtimeDecisionToActionProposal(dec, "", 0.8, now)
+	if !ok {
+		t.Fatalf("mapper rejected observe decision: %s", reason)
+	}
+	if prop.DesiredLevel != "observe" || prop.DesiredAction != "" {
+		t.Fatalf("bad observe proposal: %#v", prop)
+	}
+	if prop.Target.Granularity != actions.TargetGranularitySource || prop.Target.Value != "source-1" {
+		t.Fatalf("bad observe target: %#v", prop.Target)
+	}
+}
+
 func TestRuntimeDecisionToActionProposalSkipsNonApplyEffect(t *testing.T) {
 	_, ok, reason := runtimeDecisionToActionProposal(contracts.RuntimeDecision{
 		Effect: "deny",

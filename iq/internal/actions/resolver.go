@@ -9,11 +9,12 @@ import (
 	"github.com/kernloom/kernloom/pkg/core/fsm"
 )
 
-// PolicyResolver is the central enforcement authority in KLIQ.
-// It applies Forge policy rules to every ActionProposal before any PEP is touched.
+// PolicyResolver is the final safety gate before any PEP is touched.
+// RuntimePDP owns the decision; the resolver applies deployment ceilings and
+// capability allowlists to the resulting ActionProposal.
 //
 // Rules applied in order:
-//  1. Standalone mode: all actions pass through (backward compatible).
+//  1. Standalone mode: actions pass through unless a local ceiling is configured elsewhere.
 //  2. Managed mode, no valid policy pack: observe only (fail-safe).
 //  3. PolicyMaxAction ceiling: downgrade if proposed action exceeds the pack limit.
 //  4. CapabilitiesAllowed: deny if the executable action is not in the pack's allowlist.
@@ -47,7 +48,7 @@ func (r *PolicyResolver) Resolve(p ActionProposal) ActionResolution {
 		TTL:             p.TTL,
 	}
 
-	// Rule 1: standalone mode — full pass-through (preserves existing behavior).
+	// Rule 1: standalone mode — full pass-through.
 	if r.Mode != "managed" {
 		base.Allowed = true
 		base.ExecutableAction = p.DesiredAction

@@ -1,10 +1,9 @@
 #!/usr/bin/env bash
-# Scenario 08: FSM stepdown after attack stops.
+# Scenario 08: RuntimePDP stepdown after attack stops.
 #
 # Verifies that a blocked/rate-limited source recovers to OBSERVE after
-# the enforcement TTL expires and enough clean ticks pass.
-# Without the maintenance sweep fix, sources stayed stuck in HARD/BLOCK
-# forever once traffic stopped (Advance() was never called).
+# the enforcement TTL expires and enough clean ticks pass. The FSM supplies
+# recovery intent facts; RuntimePDP owns the observe/downscale action.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -22,13 +21,15 @@ sudo "$KLT_KLSHIELD" reset 2>/dev/null || true
 sudo rm -f "$KLT_STATE_DIR/state.json"
 
 STEPDOWN_LOG="$KLT_ARTIFACT_DIR/kliq-08.log"
+POLICY="$(write_runtime_network_policy "$KLT_STATE_DIR/runtime-network-policy-08.yaml")"
 
 # Start kliq with very short TTLs so stepdown happens within the test window.
 #   soft-ttl=5s hard-ttl=5s block-ttl=5s down-need=2 min-hold-hard=0
 start_kliq_with_args "$STEPDOWN_LOG" \
   --adapter=klshield \
+  --policy-file="$POLICY" \
   --feature-profile=dos-light \
-  --runtime-pdp-mode=shadow \
+  --runtime-pdp-mode=active \
   --dry-run=false \
   --bootstrap=false \
   --autotune=false \
@@ -88,16 +89,15 @@ for _ in $(seq 1 5); do
 done
 
 echo "[08] recovery checks: $RECOVER_OK/5 succeeded"
-grep -E -- "STATE|OBSERVE|stepdown|decay|fsm" "$STEPDOWN_LOG" | tail -10 || true
+grep -E -- "STATE|OBSERVE|stepdown|decay|fsm|runtime-pdp" "$STEPDOWN_LOG" | tail -10 || true
 
 # At least 4/5 requests must succeed after recovery.
 [[ "$RECOVER_OK" -ge 4 ]] \
   || fail "08: bad source did not recover after attack stopped ($RECOVER_OK/5 requests succeeded)"
 
-# Log must show a downward FSM transition (e.g. HARD->SOFT or SOFT->OBSERVE or BLOCK->HARD).
-# Log shows RATE_SOFT->OBSERVE or RATE_HARD->OBSERVE on stepdown.
+# Log must show RuntimePDP/broker recovery to OBSERVE.
 assert_contains "$STEPDOWN_LOG" "->OBSERVE"
 
 stop_kliq
 
-pass "08: FSM stepped down after attack stopped — source recovered in ~$(( 5 + 2 ))s"
+pass "08: RuntimePDP stepped down after attack stopped — source recovered in ~$(( 5 + 2 ))s"

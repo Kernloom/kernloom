@@ -364,7 +364,7 @@ func PackHash(packBytes []byte) string {
 }
 
 // applyForgePack optionally verifies the received pack bytes and applies either
-// a legacy LocalPolicyPack or a contracts-based RuntimePolicyPack to cfg. This
+// a LocalPolicyPack or a contracts-based RuntimePolicyPack to cfg. This
 // mirrors the --policy-file path in main().
 //
 // activeIssuedAt tracks the IssuedAt of the currently running pack. If non-nil

@@ -54,10 +54,10 @@ func graphSignal(subjectID string, score int) signal.Signal {
 /* ---- EvaluateSignal tests ---- */
 
 // EvaluateSignal is always audit-only: it returns a Decision for the audit trail
-// but never calls a PEP directly. Enforcement is handled by the main tick loop
-// via FSM strike injection (graphStrikeCh). The enforcement_via attribute indicates
-// whether the signal will trigger normal FSM strike accumulation (fsm_strikes) or
-// an immediate forced BLOCK transition (fsm_force_block).
+// but never calls a PEP directly. Enforcement intent is represented as
+// RuntimePDP facts. The enforcement_via attribute indicates whether the signal
+// will trigger normal FSM strike accumulation (fsm_strikes) or an immediate
+// forced BLOCK intent (fsm_force_block).
 
 func TestEvaluateSignal_GraphFreezeRateLimit(t *testing.T) {
 	pol := basePolicy()

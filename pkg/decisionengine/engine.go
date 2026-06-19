@@ -3,8 +3,8 @@
 
 // Package decisionengine bridges signals and FSM state to auditable Decisions.
 // The engine is audit-only: it produces Decision records and logs them, but
-// performs no PEP enforcement. All enforcement is handled by the ActionResolver
-// → ActionExecutor pipeline in iq/internal/actions.
+// performs no PEP enforcement. RuntimePDP owns enforcement decisions; the
+// ActionResolver -> ActionExecutor pipeline applies authorized actions.
 package decisionengine
 
 import (
@@ -23,17 +23,16 @@ import (
 
 var logger = log.New(os.Stderr, "[decision-engine] ", log.LstdFlags)
 
-// LocalPolicy is the pre-Forge, config-driven policy used by the engine.
-// When Forge arrives it will populate this from a signed PolicyPack instead of
-// CLI flags; the struct is intentionally forward-compatible.
+// LocalPolicy is the config snapshot used by the audit engine to classify
+// local signals. It is not an enforcement policy authority.
 type LocalPolicy struct {
 	NodeID string
 	DryRun bool
 
-	// MaxAction caps what the engine may enforce locally.
+	// MaxAction caps the audit action classification.
 	MaxAction decision.ActionType
 
-	// Per-level action mapping for FSM transitions.
+	// Per-level action mapping for FSM transition audit records.
 	LevelSoft  decision.ActionType
 	LevelHard  decision.ActionType
 	LevelBlock decision.ActionType
@@ -47,7 +46,7 @@ type LocalPolicy struct {
 	GraphFreezeAction decision.ActionType
 	GraphFreezeTTL    time.Duration
 
-	// AllowLocalBlock gates whether block decisions are permitted without Forge approval.
+	// AllowLocalBlock gates whether audit block classifications are emitted.
 	// When false, MaxAction is effectively capped at rate_limit.
 	AllowLocalBlock bool
 
@@ -56,10 +55,9 @@ type LocalPolicy struct {
 	MinSeverityForBlock int
 }
 
-// Engine is KLIQ's local decision engine.
+// Engine is KLIQ's local audit decision engine.
 // It translates Signals and FSM transitions into auditable Decisions.
-// Enforcement is not performed here — the ActionResolver → ActionExecutor
-// pipeline in iq/internal/actions is the single enforcement authority.
+// Enforcement is not performed here.
 type Engine struct {
 	mu     sync.RWMutex
 	policy LocalPolicy
@@ -75,10 +73,9 @@ func New(policy LocalPolicy) *Engine {
 // EvaluateSignal handles a signal from the event bus.
 //
 // For graph.new_edge_after_freeze signals the engine produces an audit Decision.
-// Enforcement is always handled by the main tick loop via FSM strike injection
-// (graphStrikeCh). The FSM is the single enforcement authority for both modes:
-//   - frozen-observe (score=70): normal strike accumulation → gradual escalation.
-//   - frozen-enforce (score=95): forceBlock flag set → FSM jumps to BLOCK in next tick.
+// Enforcement intent is represented as facts in the RuntimePDP candidate path:
+//   - frozen-observe (score=70): normal strike accumulation.
+//   - frozen-enforce (score=95): forceBlock fact proposes BLOCK.
 //
 // Returns nil, nil, nil for unhandled signal types.
 func (e *Engine) EvaluateSignal(_ context.Context, sig signal.Signal) (*decision.Decision, *decision.EnforcementReceipt, error) {
@@ -123,9 +120,8 @@ func (e *Engine) EvaluateSignal(_ context.Context, sig signal.Signal) (*decision
 	return dec, nil, nil
 }
 
-// RecordFSMTransition produces a Decision for audit purposes when the FSM changes level.
-// It does NOT call the PEP — the caller drives enforcement via
-// its existing doTransition callback. This method adds the audit trail only.
+// RecordFSMTransition produces a Decision for audit purposes when FSM signal
+// state changes level. It does NOT call a PEP.
 func (e *Engine) RecordFSMTransition(
 	subject observation.EntityRef,
 	from, to fsm.Level,

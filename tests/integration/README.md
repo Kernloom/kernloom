@@ -137,12 +137,12 @@ KLShield/XDP is attached to the host-side client veth interfaces. This lets KLIQ
 | 00 | `00_smoke_build.sh` | Build/CLI | Binaries, BPF object, and important KLIQ CLI flags |
 | 01 | `01_attach_stats.sh` | XDP/Traffic | Netns topology, HTTP reachability, XDP attach, packet counters |
 | 02 | `02_dryrun_detection.sh` | Detection | Bad traffic is detected, but not enforced |
-| 03 | `03_enforce_rate_limit_or_block.sh` | Enforcement | Bad source escalates in the FSM and creates XDP drops |
+| 03 | `03_enforce_rate_limit_or_block.sh` | Enforcement | RuntimePDP active mode escalates a bad source and creates XDP drops |
 | 04 | `04_graph_learn_freeze.sh` | Graph | Learn good edge, freeze graph, signal new bad edge |
 | 05 | `05_restart_recovery.sh` | Recovery | KLIQ restart and XDP detach/attach without traffic loss |
 | 06 | `06_autotune_bootstrap.sh` | Autotune | Bootstrap tuning uses max-down without EWMA regression |
 | 07 | `07_good_bad_isolation.sh` | Isolation | Good source stays reachable while bad source is enforced |
-| 08 | `08_fsm_stepdown.sh` | FSM Recovery | Enforced source returns to OBSERVE after the attack stops |
+| 08 | `08_runtime_pdp_stepdown.sh` | RuntimePDP Recovery | Enforced source returns to OBSERVE after the attack stops |
 | 09 | `09_managed_enrollment.sh` | Forge API | Managed enrollment, bundle pull, ACKs, receipts, findings, proposals |
 | 10 | `10_adapter_definition.sh` | Forge Compiler | Adapter manifests, AccessPolicy validation, profile compilation |
 | 11 | `11_netfilter_adapter.sh` | Netfilter | KLIQ without XDP, deny/restore, idempotent rules, safe cleanup |
@@ -206,14 +206,16 @@ Flow:
 5. The KLIQ log must contain the bad source.
 6. The log must not contain any real action with `dry_run=false`.
 
-Important: `runtime-pdp-mode=shadow` only means that Runtime PDP decisions are logged. `--dry-run=true` prevents the local FSM/PEP enforcement effect in this scenario.
+Important: `runtime-pdp-mode=shadow` is observe-only: RuntimePDP decisions may be logged, but no action is emitted to a PEP. `--dry-run=true` is still used by this scenario to guard adapter effects while testing, but KLIQ's decision authority is the same model in both modes: analyzers/FSM produce facts and RuntimePDP owns enforcement in `active`.
 
 ### 03 Enforce Rate-Limit Or Block
 
 Goal: prove that real local enforcement through KLShield works.
 
-KLIQ starts in a similar way to scenario 02, but with:
+KLIQ starts in active RuntimePDP mode with a local `RuntimePolicyPack` that maps
+generic `fsm.proposed_level` facts to source actions:
 
+- `--runtime-pdp-mode=active`
 - `--dry-run=false`
 - low FSM thresholds (`soft-at=2`, `hard-at=4`, `block-at=6`)
 
@@ -221,11 +223,11 @@ Flow:
 
 1. Good traffic stays clean.
 2. Bad source bursts 300 requests.
-3. KLIQ should log FSM states such as `RATE_SOFT`, `RATE_HARD`, or `BLOCK`.
+3. KLIQ should log RuntimePDP/broker actions such as `RATE_SOFT`, `RATE_HARD`, or `BLOCK`.
 4. Good source must stay reachable.
 5. `klshield stats` must show `drop_rl` or `drop_deny` greater than 0.
 
-Important: The Runtime PDP can still run in shadow mode. Local FSM enforcement is still active because `--dry-run=false` is set.
+Important: `shadow` is observe-only. Real enforcement in this scenario requires `--runtime-pdp-mode=active`.
 
 ### 04 Graph Learn Freeze
 
@@ -308,16 +310,16 @@ Flow:
 
 Expected result:
 
-- The KLIQ log contains a bad-source FSM transition or action receipt.
+- The KLIQ log contains a bad-source RuntimePDP action or action receipt.
 - The good source has 10/10 successful HTTP checks.
 
 This scenario protects against map keys that are too broad, global drops, or enforcement actions sent to the wrong target.
 
-### 08 FSM Stepdown
+### 08 RuntimePDP Stepdown
 
 Goal: check that a source leaves enforcement again after the attack stops.
 
-KLIQ starts with short TTLs:
+KLIQ starts in active RuntimePDP mode with short TTLs:
 
 - `soft-ttl=5s`
 - `hard-ttl=5s`
@@ -337,7 +339,7 @@ Expected result:
 - At least 4 out of 5 requests from the bad source work after recovery.
 - The KLIQ log contains a transition to `OBSERVE`.
 
-This scenario mainly protects the maintenance-sweep logic: even quiet sources must continue to age in the FSM, so they do not stay in `RATE_HARD` or `BLOCK` forever.
+This scenario mainly protects the maintenance-sweep logic: even quiet sources must continue to produce downscale/observe intent facts, so RuntimePDP can release `RATE_HARD` or `BLOCK`.
 
 ### 09 Forge Managed Enrollment
 

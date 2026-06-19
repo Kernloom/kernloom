@@ -68,8 +68,8 @@ func paramsWithSidecarTTL(params adapterruntime.EnforcementParams, level fsm.Lev
 }
 
 // resolveLevel is a thin cfg-level wrapper around the PolicyResolver.
-// It is used in legacy code paths (housekeeping doT) that don't yet carry
-// a full resolver instance, and in tests. New code should use the resolver directly.
+// It is used by focused resolver tests. Runtime enforcement paths should use
+// RuntimePDP decisions resolved through the broker pipeline.
 func (c cfg) resolveLevel(proposed fsm.Level) (level fsm.Level, reason string) {
 	r := c.buildPolicyResolver()
 	res := r.Resolve(actions.ActionProposal{

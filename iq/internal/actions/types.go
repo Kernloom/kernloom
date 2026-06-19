@@ -6,7 +6,7 @@
 //
 // Architecture:
 //
-//	Analyzer/FSM → ActionProposal → PolicyResolver → ActionResolution → ActionExecutor → PEP
+//	RuntimePDP → ActionProposal → PolicyResolver → ActionResolution → ActionExecutor → PEP
 //
 // In managed mode, no component may write to a PEP directly. All enforcement
 // must be authorized by the PolicyResolver before an ActionExecutor applies it.
@@ -30,14 +30,14 @@ const (
 )
 
 // PEPSidecar is an additional Policy Enforcement Point that runs alongside the
-// primary enforcement adapter. Every authorized FSM transition is also delivered
+// primary enforcement adapter. Every authorized source transition is also delivered
 // to all registered sidecars so they can mirror the enforcement.
 //
 // Sidecars must be non-blocking (they run synchronously in the tick loop).
 // Errors are logged but never propagate back to the caller — a failed sidecar
 // must not prevent the primary enforcement path from completing.
 type PEPSidecar interface {
-	// NotifySourceTransition is called after every authorized source FSM transition.
+	// NotifySourceTransition is called after every authorized source transition.
 	// prev is the level before the transition, next is the level after.
 	// ttl is how long the new level should be maintained (0 = adapter default).
 	NotifySourceTransition(target adapterruntime.SourceTarget, prev, next fsm.Level, ttl time.Duration)
@@ -50,8 +50,8 @@ type ActionTarget struct {
 	Attributes  map[string]string `json:"attributes,omitempty"`
 }
 
-// ActionProposal is a request for enforcement produced by an analyzer, FSM,
-// or graph engine. It carries the desired action in Forge vocabulary.
+// ActionProposal is a request for enforcement produced by RuntimePDP.
+// It carries the desired action in Forge vocabulary.
 // Only the PolicyResolver may authorize or downgrade this proposal.
 type ActionProposal struct {
 	ID            string         `json:"id"`

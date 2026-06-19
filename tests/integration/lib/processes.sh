@@ -77,6 +77,55 @@ prepare_kliq_runtime() {
   sudo cp "$KLT_ROOT/tests/integration/testdata/feedback.json" "$KLT_STATE_DIR/feedback.json"
 }
 
+write_runtime_network_policy() {
+  local policy="${1:-$KLT_STATE_DIR/runtime-network-policy.yaml}"
+  sudo mkdir -p "$(dirname "$policy")"
+  sudo tee "$policy" >/dev/null <<'YAML'
+apiVersion: kernloom.io/runtime/v1alpha1
+kind: RuntimePolicyPack
+metadata:
+  name: integration-network-runtime-policy
+spec:
+  default_effect: deny
+  capabilities_required:
+    - enforce.traffic.rate_limit
+    - enforce.access.deny
+  rules:
+    - id: fsm-intent-block
+      when: "fsm.proposed_level == 'block'"
+      then:
+        capability: enforce.access.deny
+        level: block
+        ttl: "30s"
+      reason_codes:
+        - integration_fsm_intent_block
+    - id: fsm-intent-hard
+      when: "fsm.proposed_level == 'hard'"
+      then:
+        capability: enforce.traffic.rate_limit
+        level: hard
+        ttl: "30s"
+      reason_codes:
+        - integration_fsm_intent_hard
+    - id: fsm-intent-soft
+      when: "fsm.proposed_level == 'soft'"
+      then:
+        capability: enforce.traffic.rate_limit
+        level: soft
+        ttl: "30s"
+      reason_codes:
+        - integration_fsm_intent_soft
+    - id: fsm-intent-observe
+      when: "fsm.proposed_level == 'observe' && fsm.current_level != 'observe'"
+      then:
+        level: observe
+        ttl: "30s"
+      reason_codes:
+        - integration_fsm_intent_observe
+YAML
+  echo "$policy"
+}
+
 kliq_base_args() {
   KLIQ_BASE_ARGS=(
     "--state-file=$KLT_STATE_DIR/state.json"
@@ -128,12 +177,15 @@ start_kliq_dryrun() {
 
 start_kliq_enforce() {
   local logfile="${1:-$KLT_LOG_KLIQ}"
-  echo "[proc] starting kliq (enforce mode, fast thresholds) → $logfile"
+  local policy
+  policy="$(write_runtime_network_policy "$KLT_STATE_DIR/runtime-network-policy.yaml")"
+  echo "[proc] starting kliq (RuntimePDP active, fast thresholds) → $logfile"
 
   start_kliq_with_args "$logfile" \
     --adapter=klshield \
+    --policy-file="$policy" \
     --feature-profile=dos-light \
-    --runtime-pdp-mode=shadow \
+    --runtime-pdp-mode=active \
     --dry-run=false \
     --bootstrap=false \
     --autotune=false \
@@ -149,7 +201,7 @@ start_kliq_enforce() {
     --soft-ttl=30s \
     --hard-ttl=30s \
     --block-ttl=30s
-  echo "[proc] kliq running (enforce) pid=$(cat "$KLT_ARTIFACT_DIR/kliq.pid")"
+  echo "[proc] kliq running (RuntimePDP active) pid=$(cat "$KLT_ARTIFACT_DIR/kliq.pid")"
 }
 
 start_kliq_graph() {

@@ -74,7 +74,7 @@ DEFAULT_SCENARIOS=(
   tests/integration/scenarios/05_restart_recovery.sh
   tests/integration/scenarios/06_autotune_bootstrap.sh
   tests/integration/scenarios/07_good_bad_isolation.sh
-  tests/integration/scenarios/08_fsm_stepdown.sh
+  tests/integration/scenarios/08_runtime_pdp_stepdown.sh
   # Forge control-plane scenarios — no XDP required.
   tests/integration/scenarios/09_managed_enrollment.sh
   tests/integration/scenarios/10_adapter_definition.sh

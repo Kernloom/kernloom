@@ -19,6 +19,15 @@ type ContextSnapshot struct {
 	Device   map[string]any
 	Session  map[string]any
 	Features map[string]any
+
+	// Generic decision facts. Adapters/analyzers own the semantics of these
+	// values; RuntimePDP only exposes them to CEL policy rules.
+	Metrics  map[string]any
+	Signals  map[string]any
+	Baseline map[string]any
+	Graph    map[string]any
+	Adapter  map[string]any
+	FSM      map[string]any
 }
 
 type Input struct {
@@ -81,6 +90,12 @@ func (p *PDP) Decide(input Input) (contracts.RuntimeDecision, bool, error) {
 		"device":   safeMap(input.Context.Device),
 		"session":  safeMap(input.Context.Session),
 		"features": safeMap(input.Context.Features),
+		"metrics":  safeMap(input.Context.Metrics),
+		"signals":  safeMap(input.Context.Signals),
+		"baseline": safeMap(input.Context.Baseline),
+		"graph":    safeMap(input.Context.Graph),
+		"adapter":  safeMap(input.Context.Adapter),
+		"fsm":      safeMap(input.Context.FSM),
 	}
 	for _, rule := range p.rules {
 		out, _, err := rule.program.Eval(vars)
@@ -159,6 +174,12 @@ func celEnv() (*cel.Env, error) {
 		cel.Variable("device", cel.MapType(cel.StringType, cel.DynType)),
 		cel.Variable("session", cel.MapType(cel.StringType, cel.DynType)),
 		cel.Variable("features", cel.MapType(cel.StringType, cel.DynType)),
+		cel.Variable("metrics", cel.MapType(cel.StringType, cel.DynType)),
+		cel.Variable("signals", cel.MapType(cel.StringType, cel.DynType)),
+		cel.Variable("baseline", cel.MapType(cel.StringType, cel.DynType)),
+		cel.Variable("graph", cel.MapType(cel.StringType, cel.DynType)),
+		cel.Variable("adapter", cel.MapType(cel.StringType, cel.DynType)),
+		cel.Variable("fsm", cel.MapType(cel.StringType, cel.DynType)),
 	)
 	if err != nil {
 		return nil, fmt.Errorf("runtimepdp: create cel env: %w", err)

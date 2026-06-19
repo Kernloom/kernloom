@@ -81,6 +81,46 @@ func TestDecideDefaultWhenNoRuleMatches(t *testing.T) {
 	}
 }
 
+func TestDecideMatchesGenericMetricFacts(t *testing.T) {
+	now := time.Date(2026, 6, 19, 12, 0, 0, 0, time.UTC)
+	pdp, err := runtimepdp.Compile(testPack("metrics.network.packets_per_second > baseline.network.packets_per_second * 2.0 && fsm.proposed_level == 'hard'"))
+	if err != nil {
+		t.Fatalf("compile: %v", err)
+	}
+
+	decision, matched, err := pdp.Decide(runtimepdp.Input{
+		NodeID:  "node-1",
+		Subject: contracts.EntityRef{Kind: "ip", ID: "10.0.0.1"},
+		Risk: contracts.LocalRiskAssessment{
+			Subject:      contracts.EntityRef{Kind: "ip", ID: "10.0.0.1"},
+			Level:        contracts.RiskHigh,
+			Score:        72,
+			Confidence:   0.9,
+			Completeness: 1.0,
+			ValidUntil:   now.Add(time.Minute),
+		},
+		Context: runtimepdp.ContextSnapshot{
+			Metrics: map[string]any{
+				"network": map[string]any{"packets_per_second": 3000.0},
+			},
+			Baseline: map[string]any{
+				"network": map[string]any{"packets_per_second": 1000.0},
+			},
+			FSM: map[string]any{"proposed_level": "hard"},
+		},
+		Now: now,
+	})
+	if err != nil {
+		t.Fatalf("decide: %v", err)
+	}
+	if !matched {
+		t.Fatal("expected metric fact rule to match")
+	}
+	if decision.Action.Level != "soft" {
+		t.Fatalf("action level: %s", decision.Action.Level)
+	}
+}
+
 func TestCompileRejectsInvalidCEL(t *testing.T) {
 	_, err := runtimepdp.Compile(testPack("risk.level in ["))
 	if err == nil {

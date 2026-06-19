@@ -285,9 +285,9 @@ func TestApplyPolicyPackToCfg_DryRun(t *testing.T) {
 	}
 }
 
-// ── Integration: processCandidate with PolicyMaxAction ─────────────────────────
+// ── FSM intent facts ──────────────────────────────────────────────────────────
 
-// newTestCfg builds a minimal cfg for processCandidate integration tests.
+// newTestCfg builds a minimal cfg for FSM intent and RuntimePDP integration tests.
 // SevStep/Delta thresholds are set so that Severity=99 adds 3 strikes per tick.
 // With BlockAt=3, a single tick is enough to reach LevelBlock (no cap).
 func newTestCfg(maxAction string) cfg {
@@ -311,29 +311,8 @@ func newTestCfg(maxAction string) cfg {
 	return c
 }
 
-// runFSM drives processCandidate n times with high-severity metrics and
-// returns the final FSM state. No primary PEP is needed; the executor updates
-// FSM state in-memory when no adapter is attached.
-func runFSM(n int, c cfg) fsm.State {
-	resolver := c.buildPolicyResolver()
-	executor := buildExecutor(nil)
-	wl := sourcefilters.NewWhitelist("")
-	fb := sourcefilters.NewFeedback("")
-	tuner, err := catalog.NewTuner(catalog.DefaultAdapterID,
-		adapterruntime.TuningThresholds{
-			PacketsPerSecond:       c.TrigPPS,
-			SynRate:                c.TrigSyn,
-			DestinationPortChanges: c.TrigScan,
-			BytesPerSecond:         c.TrigBPS,
-		},
-		adapterruntime.TuningConfig{MinSamples: 10, FloorPPS: 50, FloorSyn: 50, FloorScan: 5},
-		16,
-	)
-	if err != nil {
-		panic(err)
-	}
-
-	m := metrics{
+func highSeverityMetrics() metrics {
+	return metrics{
 		Target: adapterruntime.SourceTarget{SourceID: "source-1"},
 		Score:  99,
 		Signals: map[string]float64{
@@ -341,53 +320,35 @@ func runFSM(n int, c cfg) fsm.State {
 			adapterruntime.MetricNetworkSynRate:          5000,
 		},
 	}
+}
+
+func runFSMIntent(n int, c cfg) fsmIntent {
+	m := highSeverityMetrics()
 	st := fsm.State{Level: fsm.LevelObserve}
 	now := time.Now()
+	intent := fsmIntent{SignalState: st, ProposedLevel: st.Level}
 
 	for i := 0; i < n; i++ {
-		st = processCandidate(m, st, now, c, wl, fb, resolver, executor, tuner, false)
+		intent = evaluateFSMIntent(m, st, now, c)
+		st = intent.SignalState
 		now = now.Add(time.Second)
 	}
-	return st
+	return intent
 }
 
-func TestProcessCandidate_DefaultAllowsBlock(t *testing.T) {
-	// Without PolicyMaxAction the FSM can reach LevelBlock.
+func TestFSMIntentSuggestsBlockForHighSeverity(t *testing.T) {
 	c := newTestCfg("")
-	st := runFSM(10, c)
-	if st.Level < fsm.LevelHard {
-		t.Errorf("expected FSM to reach at least LevelHard with no cap, got %s", st.Level)
+	intent := runFSMIntent(3, c)
+	if intent.ProposedLevel != fsm.LevelBlock {
+		t.Errorf("expected FSM intent to propose block, got %s", intent.ProposedLevel)
 	}
 }
 
-func TestProcessCandidate_RateLimitCapPreventsBlock(t *testing.T) {
-	// With max_action=rate_limit the FSM must not exceed LevelSoft.
-	c := newTestCfg("rate_limit")
-	st := runFSM(10, c)
-	if st.Level > fsm.LevelSoft {
-		t.Errorf("expected FSM capped at LevelSoft, got %s", st.Level)
-	}
-}
-
-func TestProcessCandidate4_ObserveCapPreventsEnforcement(t *testing.T) {
-	// With max_action=observe the FSM must stay at LevelObserve.
+func TestFSMIntentDoesNotApplyPolicyCeiling(t *testing.T) {
 	c := newTestCfg("observe")
-	st := runFSM(10, c)
-	if st.Level != fsm.LevelObserve {
-		t.Errorf("expected FSM at LevelObserve, got %s", st.Level)
-	}
-}
-
-func TestProcessCandidate4_ExistingBehaviourUnchanged(t *testing.T) {
-	// Regression: existing tests that depend on no PolicyMaxAction still pass.
-	c := newTestCfg("")
-	c.BootstrapActive = true
-	c.BootstrapAllowBlock = false
-
-	st := runFSM(10, c)
-	// Bootstrap safety: block is capped at hard even without PolicyMaxAction.
-	if st.Level == fsm.LevelBlock {
-		t.Error("bootstrap safety should prevent LevelBlock when BootstrapAllowBlock=false")
+	intent := runFSMIntent(3, c)
+	if intent.ProposedLevel != fsm.LevelBlock {
+		t.Errorf("expected FSM to provide raw signal intent before policy resolution, got %s", intent.ProposedLevel)
 	}
 }
 
@@ -398,6 +359,9 @@ func TestGraphBaselineStrikeProcessesSyntheticCandidate(t *testing.T) {
 	c.UpNeed = 1
 	c.BlockMinSev = 0
 	c.BlockMinDur = 0
+	c.SoftTTL = 0
+	c.HardTTL = 0
+	c.BlockTTL = 0
 
 	sources := newSourceStates()
 	cands := []metrics{}
@@ -412,16 +376,19 @@ func TestGraphBaselineStrikeProcessesSyntheticCandidate(t *testing.T) {
 	}
 
 	resolver := c.buildPolicyResolver()
-	executor := buildExecutor(nil)
+	executor := newBrokeredActionExecutor(buildExecutor(nil), nil, nil, nil, nil, nil, "node-test")
 	wl := sourcefilters.NewWhitelist("")
 	fb := sourcefilters.NewFeedback("")
-	processed := sources.processCandidates(cands, now, c, wl, fb, resolver, executor, nil, false)
+	processed := sources.processCandidates(cands, now, c, wl, fb, resolver, executor, nil, false, nil, "node-test")
 	if !processed["source-1"] {
 		t.Fatal("expected source-1 to be processed")
 	}
 	entry := sources.entries["source-1"]
-	if entry.state.Level == fsm.LevelObserve {
-		t.Fatalf("expected graph baseline signal to escalate FSM, got %s", entry.state.Level)
+	if entry.state.Level != fsm.LevelObserve {
+		t.Fatalf("shadow/no-pdp processing must not enforce graph baseline signal, got %s", entry.state.Level)
+	}
+	if entry.state.Strikes == 0 {
+		t.Fatal("expected graph baseline signal to update FSM intent facts")
 	}
 }
 

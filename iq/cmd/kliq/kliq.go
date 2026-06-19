@@ -73,17 +73,17 @@ Examples:
   kliq graph edges --sort=state
   kliq status`
 
-// graphStrikeMsg carries graph-derived escalation hints to the source FSM
-// boundary.
-// forceBlock=true overrides n and sets strikes to BlockAt+1 so the FSM
-// transitions directly to BLOCK in the next tick (frozen-enforce mode).
+// graphStrikeMsg carries graph-derived severity hints into the generic
+// source-candidate fact path.
+// forceBlock=true overrides n and sets strikes to BlockAt+1 so the FSM intent
+// facts propose BLOCK on the next tick.
 type graphStrikeMsg struct {
 	sourceID    string
 	n           int // strike credits to add before FSM processing
 	signalScore int // graph signal score, mapped to FSM severity when addToCands is true
 	forceBlock  bool
-	// addToCands: when true the source is added to cands so it gets FSM-processed
-	// this tick even without source-level adapter telemetry.
+	// addToCands: when true the source is added to cands so RuntimePDP receives
+	// source-level graph/FSM facts this tick.
 	addToCands bool
 }
 
@@ -96,7 +96,7 @@ type graphStrikeMsg struct {
 //	§5 Decision pipeline    (bus, signal engine, decision engine)
 //	§6 Forge agent          (enrollment, heartbeat, bundle delivery)
 //	§7 Tick-loop prep       (ticker, signals, runtime PDP, shadow pipeline)
-//	§8 Main tick loop       (FSM evaluation, autotune — core of KLIQ)
+//	§8 Main tick loop       (fact evaluation, autotune — core of KLIQ)
 func main() {
 	// ── §1 Subcommand dispatch ───────────────────────────────────────────────
 	// kliq requires an explicit first argument:
@@ -252,7 +252,7 @@ func main() {
 
 	// Policy: abstract enforcement rules (autonomy, when/then, exports).
 	// Optional — without a policy file, profile defaults + CLI flags apply.
-	// --policy-file accepts both legacy LocalPolicyPack and contracts-based
+	// --policy-file accepts both LocalPolicyPack and contracts-based
 	// RuntimePolicyPack files; the top-level kind selects the loader path.
 	if c.PolicyFile != "" {
 		var loaded loadedPolicyFile
@@ -541,8 +541,8 @@ func main() {
 	// only component authorized to call the source PEP, through the action broker
 	// for TTL-bounded actions.
 	resolver := c.buildPolicyResolver()
-	legacyExecutor := buildExecutor(sourcePEP)
-	brokerPEP := newBrokeredFSMPEP(legacyExecutor, func() adapterruntime.EnforcementParams {
+	sourceExecutor := buildExecutor(sourcePEP)
+	brokerPEP := newBrokeredSourcePEP(sourceExecutor, func() adapterruntime.EnforcementParams {
 		return c.toPEPParams()
 	})
 	actionBroker, abErr := actionbroker.New(actionbroker.Config{
@@ -569,7 +569,7 @@ func main() {
 			log.Fatalf("relationship action broker init: %v", rbErr)
 		}
 	}
-	executor := newBrokeredActionExecutor(legacyExecutor, actionBroker, brokerPEP, relationshipBroker, relationshipBrokerPEP, stateStore, nodeID)
+	executor := newBrokeredActionExecutor(sourceExecutor, actionBroker, brokerPEP, relationshipBroker, relationshipBrokerPEP, stateStore, nodeID)
 	for _, sidecar := range sourcePEPSidecars {
 		sidecar := sidecar
 		executor.AddSidecar(sourcePEPSidecar{
@@ -861,7 +861,7 @@ func main() {
 	}
 
 	// ── §5 Decision pipeline ────────────────────────────────────────────────
-	// Decision engine: adds audit trail for FSM transitions and enforces graph-freeze signals.
+	// Decision engine: classifies local signals for audit/risk context.
 	// LocalPolicy MaxAction is resolved via the Action Resolver so that
 	// managed-no-pack and PolicyMaxAction rules apply to the decision engine path too.
 	decPolicy := decisionengine.LocalPolicy{
@@ -914,32 +914,31 @@ func main() {
 
 	netfilterruntime.StartTopologyFallbackObserver(context.Background(), mainBus, nodeID, c.GraphEnabled, primaryActive, nfAdapter, kliqLog)
 
-	// graphStrikeCh bridges graph.new_edge_after_freeze signals to the source
-	// FSM boundary so it remains the single enforcement authority.
+	// graphStrikeCh bridges graph.new_edge_after_freeze signals to the generic
+	// RuntimePDP candidate path. The graph contributes facts; it does not own
+	// enforcement.
 	graphStrikeCh := make(chan graphStrikeMsg, 512)
 
 	// RuntimePDP path: shadow (observe only) or active (enforce via action broker).
-	// Default: shadow. Set --runtime-pdp-mode=active after shadow parity is confirmed.
+	// Default: shadow. In active mode RuntimePDP is the policy authority for
+	// candidate enforcement; analyzers/FSM provide facts and intent only.
 	shadowRunner := newShadowPDPRunner(nodeID, log.New(os.Stderr, "[runtime-pdp] ", log.LstdFlags))
 	if c.RuntimePDPMode == string(PDPModeActive) {
-		// In active mode the RuntimePDP emits proposals via a channel.
-		// A goroutine drains them through the resolver and generic executor.
 		rpdpProposalCh := make(chan actions.ActionProposal, 256)
 		shadowRunner.SetMode(PDPModeActive, rpdpProposalCh)
 		go func() {
-			pepParams := c.toPEPParams()
 			for prop := range rpdpProposalCh {
 				res := resolver.Resolve(prop)
 				if !res.Allowed {
 					kliqLog.Printf("[runtime-pdp:active] proposal denied: %s", res.DenyReason)
 					continue
 				}
-				if !applyResolvedAction(res, executor, pepParams, time.Now()) {
+				if !applyResolvedAction(res, executor, c.toPEPParams(), time.Now()) {
 					kliqLog.Printf("[runtime-pdp:active] proposal skipped: unsupported target %s:%q", res.Target.Granularity, res.Target.Value)
 				}
 			}
 		}()
-		kliqLog.Printf("RuntimePDP mode: ACTIVE — decisions will be enforced via action broker")
+		kliqLog.Printf("RuntimePDP mode: ACTIVE — RuntimePDP is authoritative; FSM/analyzers provide facts only")
 	} else {
 		shadowRunner.SetMode(PDPModeShadow, nil)
 		kliqLog.Printf("RuntimePDP mode: SHADOW — decisions logged only (--runtime-pdp-mode=active to enforce)")
@@ -965,7 +964,7 @@ func main() {
 	}()
 	startShadowPDP(shadowCtx, mainBus, shadowRunner)
 
-	// Signal consumer: logs signals, injects graph strikes into FSM state.
+	// Signal consumer: logs signals and turns graph anomalies into RuntimePDP facts.
 	// Use a dedicated subscriber channel — the bus fans signals out to every
 	// subscriber, so both this loop and the graphlearner see every signal.
 	sigCtx, sigCancel := context.WithCancel(context.Background())
@@ -998,49 +997,68 @@ func main() {
 					kliqLog.Printf("SIGNAL decision error: %v", err)
 				}
 
-				// Graph freeze violation → FSM strike credits.
+				// Graph freeze violation -> source-candidate strike credits.
 				// score >= 90 (frozen-enforce): forceBlock skips accumulation.
 				// score < 90 (frozen-observe): normal strike accumulation.
-				// Graph freeze violation: source is actively sending → add to cands
-				// so the FSM is processed this tick with real metrics.
+				// Graph freeze violation: source is actively sending -> add to cands
+				// so RuntimePDP receives real metric facts this tick.
 				if sig.Type == signal.SignalGraphNewEdgeAfterFreeze && sig.Subject.ID != "" {
 					sendStrike(graphStrikeCh, sig.Subject.ID, graphStrikesFromScore(sig.Score), sig.Score >= 90, true, sig.Score)
 
-					// Tuple enforcement (graph-enforce profile): deny the specific
-					// relationship tuple via the ActionResolver.
+					// Tuple enforcement (graph-enforce profile): RuntimePDP must
+					// authorize the specific relationship action. In shadow mode the
+					// signal is observed only.
 					if features.TupleEnforcement && sig.Score >= 90 && relationshipPEP != nil && relationshipPEP.RelationshipAvailable() {
 						if relTarget, ok := relationshipActionTargetFromSignal(sig); ok {
-							proposal := actions.ActionProposal{
-								Source:        "graph",
-								Reason:        "graph_new_edge_after_freeze",
-								DesiredAction: "enforce.access.deny",
-								DesiredLevel:  "block",
-								Target:        relTarget.Proposal,
-								TTL:           c.GraphFreezeTTL,
-								Confidence:    float64(sig.Confidence) / 100.0,
-								CreatedAt:     time.Now(),
-							}
-							res := resolver.Resolve(proposal)
-							if res.DenyReason != "" {
-								kliqLog.Printf("ACTION-RESOLVER relationship %s %s→%s reason=%q",
-									relTarget.Label,
-									proposal.DesiredLevel, res.ExecutableLevel, res.DenyReason)
-							}
-							result := executor.ApplyRelationship(relTarget.PEP, res, time.Now())
-							switch result.Status {
-							case "applied":
-								kliqLog.Printf("RELATIONSHIP deny edge: %s (freeze violation)", relTarget.Label)
-							case "failed":
-								kliqLog.Printf("RELATIONSHIP deny edge %s failed: %s", relTarget.Label, result.Reason)
+							now := time.Now()
+							if c.RuntimePDPMode == string(PDPModeActive) {
+								input := runtimePDPInputForSignal(nodeID, sig, now)
+								dec, matched, loaded, err := shadowRunner.decide(input)
+								if err != nil {
+									kliqLog.Printf("[runtime-pdp:active] graph relationship decide error %s: %v", relTarget.Label, err)
+								} else if !loaded {
+									kliqLog.Printf("[runtime-pdp:active] graph relationship held %s: no policy pack loaded", relTarget.Label)
+								} else if matched {
+									fallback := relTarget.Proposal
+									prop, ok, reason := runtimeDecisionToActionProposalWithFallbackTarget(dec, sig.Subject.ID, &fallback, float64(sig.Confidence)/100.0, now)
+									if !ok {
+										kliqLog.Printf("[runtime-pdp:active] graph relationship decision skipped %s reason=%s", relTarget.Label, reason)
+									} else {
+										res := resolver.Resolve(prop)
+										if res.DenyReason != "" {
+											kliqLog.Printf("ACTION-RESOLVER runtime-pdp relationship %s %s→%s reason=%q",
+												relTarget.Label,
+												prop.DesiredLevel, res.ExecutableLevel, res.DenyReason)
+										}
+										result := executor.ApplyRelationship(relTarget.PEP, res, now)
+										switch result.Status {
+										case "applied":
+											kliqLog.Printf("RELATIONSHIP deny edge: %s (runtime-pdp graph decision)", relTarget.Label)
+										case "failed":
+											kliqLog.Printf("RELATIONSHIP deny edge %s failed: %s", relTarget.Label, result.Reason)
+										}
+									}
+								}
+							} else {
+								input := runtimePDPInputForSignal(nodeID, sig, now)
+								dec, matched, loaded, err := shadowRunner.decide(input)
+								switch {
+								case err != nil:
+									kliqLog.Printf("[runtime-pdp:shadow] graph relationship decide error %s: %v", relTarget.Label, err)
+								case !loaded:
+									kliqLog.Printf("[runtime-pdp:shadow] graph relationship observed %s (no policy pack)", relTarget.Label)
+								case matched:
+									kliqLog.Printf("[runtime-pdp:shadow] graph relationship decision %s effect=%s reasons=%v (observe-only)",
+										relTarget.Label, dec.Effect, dec.ReasonCodes)
+								}
 							}
 						}
 					}
 				}
 
 				// Edge baseline deviation (EWMA) and peak-exceeded signals:
-				// process the source through the FSM as a graph-derived high-severity
-				// candidate. This keeps graph anomalies visible in the normal
-				// progressive source enforcement logs.
+				// process the source as a graph-derived high-severity candidate.
+				// This keeps graph anomalies visible to RuntimePDP.
 				if isGraphBaselineSignal(sig.Type) && sig.Subject.ID != "" {
 					sendStrike(graphStrikeCh, sig.Subject.ID, 0, false, true, sig.Score)
 				}
@@ -1069,7 +1087,7 @@ func main() {
 			decPolicy.MaxAction = decision.ActionBlock
 			decPolicy.MinSeverityForBlock = 90
 			decisionEng.UpdatePolicy(decPolicy)
-			kliqLog.Printf("Graph: frozen-enforce active — unknown edges will be blocked via PEP directly")
+			kliqLog.Printf("Graph: frozen-enforce active — unknown edges produce RuntimePDP block-intent facts")
 		default:
 			log.Fatalf("unknown --graph-mode %q (valid: learn, frozen-observe, frozen-enforce)", c.GraphMode)
 		}
@@ -1293,7 +1311,7 @@ func main() {
 	// This loop is the core of KLIQ. Each tick:
 	//   a) drains pending bundle/signal updates
 	//   b) reads eBPF map telemetry (v4+v6)
-	//   c) evaluates FSM per opaque source
+	//   c) evaluates source facts/intent per opaque source
 	//   d) runs autotune when due
 	// The loop runs on a single goroutine — no locking needed for shared state.
 	for {
@@ -1389,9 +1407,9 @@ func main() {
 		// Applied after TopN cap so graph-violated IPs are always evaluated.
 		// UpStreak is set to UpNeed to bypass the anti-flap guard — a behavioral
 		// violation is deliberate, not metric noise.
-		// forceBlock=true (frozen-enforce): set strikes to BlockAt+1 so the FSM
-		// transitions to BLOCK immediately. The FSM then owns the deny-map entry
-		// and its TTL, preventing conflicts with FSM-level downgrades.
+		// forceBlock=true (frozen-enforce): set strikes to BlockAt+1 so FSM intent
+		// proposes BLOCK immediately. RuntimePDP still decides whether an action
+		// is emitted.
 	drainGraphStrikes:
 		for {
 			select {
@@ -1439,14 +1457,12 @@ func main() {
 			}
 		}
 
-		processed := sources.processCandidates(cands, nowWall, c, wl, fb, resolver, executor, tuner, clean)
+		processed := sources.processCandidates(cands, nowWall, c, wl, fb, resolver, executor, tuner, clean, shadowRunner, nodeID)
 
-		// Maintenance sweep: advance FSM for non-OBSERVE sources that had no
-		// qualifying observation this tick.
-		// Without this, a source that goes quiet after being rate-limited stays in
-		// RATE_HARD/BLOCK forever because the FSM is never advanced for it and
-		// TTL-based de-escalation never fires.
-		sources.sweepInactive(processed, nowWall, c, resolver, executor, pepParams)
+		// Maintenance sweep: advance source intent for non-OBSERVE sources that
+		// had no qualifying observation this tick. RuntimePDP decides whether the
+		// resulting downscale/observe intent becomes an action.
+		sources.sweepInactive(processed, nowWall, c, resolver, executor, pepParams, shadowRunner, nodeID)
 
 		tickN++
 		if tickN%30 == 1 {
@@ -1535,7 +1551,7 @@ func main() {
 			c.BootstrapAlpha1, c.BootstrapAlpha2, c.BootstrapAlpha3,
 			steadyEveryEff, c.AutoK, steadyUp, steadyDown, c.AutoAlpha)
 
-		// Keep BootstrapActive in sync so the FSM block cap is applied correctly.
+		// Keep BootstrapActive in sync so RuntimePDP receives current bootstrap facts.
 		c.BootstrapActive = pol.Active
 
 		if c.AutoTune {

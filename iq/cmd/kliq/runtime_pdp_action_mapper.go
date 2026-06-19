@@ -18,19 +18,34 @@ func runtimeDecisionToActionProposal(
 	confidence float64,
 	now time.Time,
 ) (actions.ActionProposal, bool, string) {
+	return runtimeDecisionToActionProposalWithFallbackTarget(dec, fallbackSubjectID, nil, confidence, now)
+}
+
+func runtimeDecisionToActionProposalWithFallbackTarget(
+	dec contracts.RuntimeDecision,
+	fallbackSubjectID string,
+	fallbackTarget *actions.ActionTarget,
+	confidence float64,
+	now time.Time,
+) (actions.ActionProposal, bool, string) {
 	if dec.Effect != "apply" && dec.Effect != "restrict" {
 		return actions.ActionProposal{}, false, "runtime_decision_effect_not_enforcing"
 	}
 
-	capability := normalizeCapabilityID(dec.Action.Capability)
-	if capability == "" {
-		return actions.ActionProposal{}, false, "runtime_decision_missing_capability"
-	}
 	level := runtimeActionLevel(dec.Action)
-	if level == "" || level == "observe" {
+	if level == "" {
 		return actions.ActionProposal{}, false, "runtime_decision_non_enforcing_level"
 	}
+	capability := normalizeCapabilityID(dec.Action.Capability)
+	if capability == "" && level != "observe" {
+		return actions.ActionProposal{}, false, "runtime_decision_missing_capability"
+	}
 	target, ok, reason := runtimeDecisionTarget(dec, fallbackSubjectID)
+	if fallbackTarget != nil && shouldUseRuntimeFallbackTarget(dec, target, ok) {
+		target = *fallbackTarget
+		ok = true
+		reason = ""
+	}
 	if !ok {
 		return actions.ActionProposal{}, false, reason
 	}
@@ -52,6 +67,17 @@ func runtimeDecisionToActionProposal(
 		Confidence:    confidence,
 		CreatedAt:     now,
 	}, true, ""
+}
+
+func shouldUseRuntimeFallbackTarget(dec contracts.RuntimeDecision, target actions.ActionTarget, targetOK bool) bool {
+	if !targetOK {
+		return true
+	}
+	if strings.ToLower(stringParam(dec.Action.Params, "target_granularity")) == actions.TargetGranularityRelationship {
+		return target.Granularity != actions.TargetGranularityRelationship
+	}
+	capability := normalizeCapabilityID(dec.Action.Capability)
+	return capability == "enforce.access.deny" && target.Granularity != actions.TargetGranularityRelationship
 }
 
 func runtimeActionLevel(action contracts.RuntimeActionSpec) string {

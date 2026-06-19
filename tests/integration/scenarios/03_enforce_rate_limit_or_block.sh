@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Scenario 03: kliq enforce mode — bad source triggers FSM escalation.
+# Scenario 03: RuntimePDP active mode — bad source triggers enforcement.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -15,7 +15,7 @@ start_kliq_enforce
 # Good traffic — should remain clean.
 good_http_many 5
 
-# Bad burst to trigger FSM escalation (trig-pps=5, soft-at=2).
+# Bad burst to trigger RuntimePDP enforcement via generic FSM intent facts.
 bad_http_burst 300
 
 # Give kliq multiple ticks to escalate.
@@ -38,4 +38,4 @@ DN=$(grep -oE "drop_deny=[0-9]+" "$STATS" | cut -d= -f2 || echo 0)
 [[ "$RL" -gt 0 || "$DN" -gt 0 ]] \
   || fail "expected drop_rl or drop_deny > 0, got drop_rl=$RL drop_deny=$DN"
 
-pass "03: enforce mode — bad source escalated, good source unaffected"
+pass "03: RuntimePDP active mode — bad source escalated, good source unaffected"

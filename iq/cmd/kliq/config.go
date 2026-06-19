@@ -48,8 +48,8 @@ type cfg struct {
 	PDPConfig  string // path to PDPConfig YAML (kliq signal engine + FSM behavior)
 
 	// RuntimePDPMode controls the new contracts-based Runtime PDP path.
-	// "shadow" (default): evaluates alongside FSM, logs decisions only.
-	// "active": RuntimePDP decisions become ActionProposals; FSM stays for network defense.
+	// "shadow" (default): evaluates and logs decisions only.
+	// "active": RuntimePDP is authoritative; analyzers/FSM supply facts/intent only.
 	RuntimePDPMode string
 
 	// Adapters is the comma-separated list of PEP adapters to activate.
@@ -96,9 +96,9 @@ type cfg struct {
 	BootstrapAlpha2   float64
 	BootstrapAlpha3   float64
 
-	// Bootstrap safety guards (Sprint 2).
-	// BootstrapAllowBlock: when false (default), the FSM caps BLOCK → RATE_HARD
-	// during the active bootstrap window to avoid premature hard blocks on quiet starts.
+	// Bootstrap policy facts.
+	// BootstrapAllowBlock is exposed to RuntimePDP as features.bootstrap.allow_block.
+	// KLIQ no longer applies an implicit FSM block cap.
 	BootstrapAllowBlock bool
 	// BootstrapMinWindowsBeforeDownscale: autotune will not lower triggers until
 	// at least this many active autotune windows have been completed. Prevents
@@ -108,8 +108,8 @@ type cfg struct {
 	// at least this many distinct source IPs have been seen in the learning window.
 	BootstrapMinSourcesBeforeDownscale int
 
-	// BootstrapActive is set at runtime (not a CLI flag) to indicate the
-	// current bootstrap phase is still active. Used by FSM to cap BLOCK level.
+	// BootstrapActive is set at runtime (not a CLI flag) and exposed to RuntimePDP
+	// as features.bootstrap.active.
 	BootstrapActive bool
 
 	// Feature profile (Sprint 1) — controls which subsystems are active.
@@ -178,7 +178,7 @@ type cfg struct {
 	// PolicyPack (autonomy.max_action). Applied to ALL enforcement transitions.
 	//   ""            = no cap, full enforcement allowed (default)
 	//   "rate_limit"  = cap at LevelSoft; no hard or block transitions
-	//   "observe"     = no enforcement (equivalent to dry_run for FSM)
+	//   "observe"     = resolver downgrades enforcement actions to observe
 	PolicyMaxAction string
 
 	// HasPolicyPack is true when a valid LocalPolicyPack was loaded at startup.
@@ -205,8 +205,7 @@ type cfg struct {
 
 	// Directive rates (Phase 6b): explicit req/s from the PolicyPack's then.params.
 	// Priority: Directive > Adaptive > Static.
-	// When set, the pack is in access-control mode — FSM still runs but the rate
-	// limit strength is fixed by policy, not derived locally.
+	// When set, the rate-limit strength is fixed by policy, not derived locally.
 	SoftDirectiveRatePPS uint64
 	HardDirectiveRatePPS uint64
 
@@ -584,7 +583,7 @@ AGENT FLAGS
 	flag.StringVar(&c.ComponentConfigPath, "component-config", "", "path to a KliqComponentConfig YAML (enabled adapters and analyzers); reserved for future use")
 	flag.StringVar(&c.PolicyVerifyKeyPath, "policy-verify-key", "", "path to Ed25519 public key for verifying LocalPolicyPack signatures; required in managed mode")
 	flag.StringVar(&c.ForgeURL, "forge-url", "", "forge serve base URL (e.g. https://forge.example.com:8443); enables enrollment and heartbeat when set")
-	flag.StringVar(&c.RuntimePDPMode, "runtime-pdp-mode", "shadow", "runtime PDP mode: shadow (log only) or active (enforce via action broker)")
+	flag.StringVar(&c.RuntimePDPMode, "runtime-pdp-mode", "shadow", "runtime PDP mode: shadow (log only) or active (authoritative decisions via action broker)")
 	flag.StringVar(&c.ForgeEnrollToken, "forge-enroll-token", "", "one-time enrollment token issued by 'forge token create' (consumed on first enrollment)")
 	flag.StringVar(&c.ForgeCAPath, "forge-ca", "", "path to PEM CA certificate for TLS verification of forge serve; empty = system roots")
 	flag.DurationVar(&c.ForgeHeartbeat, "forge-heartbeat", 5*time.Minute, "heartbeat interval to forge serve")
@@ -636,7 +635,7 @@ AGENT FLAGS
 	flag.Float64Var(&c.BootstrapAlpha3, "bootstrap-alpha3", 0.20, "phase3 smoothing alpha")
 
 	// Bootstrap safety guards.
-	flag.BoolVar(&c.BootstrapAllowBlock, "bootstrap-allow-block", false, "allow BLOCK enforcement during bootstrap (default false — caps at RATE_HARD)")
+	flag.BoolVar(&c.BootstrapAllowBlock, "bootstrap-allow-block", false, "set features.bootstrap.allow_block=true for RuntimePDP policies")
 	// bootstrap-min-windows=0 disables the downscale guard (default). The floor
 	// (autotune-floor-pps) is the primary protection against threshold collapse.
 	// Set > 0 only on nodes that start during dead-quiet periods and you want

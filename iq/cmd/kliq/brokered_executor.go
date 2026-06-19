@@ -25,9 +25,9 @@ type receiptStore interface {
 }
 
 type brokeredActionExecutor struct {
-	legacy             *actions.SourceActionExecutor
+	sourceExecutor     *actions.SourceActionExecutor
 	sourceBroker       *actionbroker.Broker
-	sourcePEP          *brokeredFSMPEP
+	sourcePEP          *brokeredSourcePEP
 	relationshipBroker *actionbroker.Broker
 	relationshipPEP    *brokeredRelationshipPEP
 	store              receiptStore // may be nil when running without a state store
@@ -35,16 +35,16 @@ type brokeredActionExecutor struct {
 }
 
 func newBrokeredActionExecutor(
-	legacy *actions.SourceActionExecutor,
+	sourceExecutor *actions.SourceActionExecutor,
 	sourceBroker *actionbroker.Broker,
-	sourcePEP *brokeredFSMPEP,
+	sourcePEP *brokeredSourcePEP,
 	relationshipBroker *actionbroker.Broker,
 	relationshipPEP *brokeredRelationshipPEP,
 	store *sqlite.Store,
 	nodeID string,
 ) *brokeredActionExecutor {
 	return &brokeredActionExecutor{
-		legacy:             legacy,
+		sourceExecutor:     sourceExecutor,
 		sourceBroker:       sourceBroker,
 		sourcePEP:          sourcePEP,
 		relationshipBroker: relationshipBroker,
@@ -55,18 +55,18 @@ func newBrokeredActionExecutor(
 }
 
 func (e *brokeredActionExecutor) AddSidecar(s actions.PEPSidecar) {
-	e.legacy.AddSidecar(s)
+	e.sourceExecutor.AddSidecar(s)
 }
 
 func (e *brokeredActionExecutor) ApplySource(target adapterruntime.SourceTarget, st fsm.State, r actions.ActionResolution, params adapterruntime.EnforcementParams, now time.Time) (fsm.State, actions.ActionResult) {
 	if !shouldBrokerLease(r) {
-		return e.legacy.ApplySource(target, st, r, params, now)
+		return e.sourceExecutor.ApplySource(target, st, r, params, now)
 	}
 	return e.applyBrokered(applyContext{target: target, state: st, resolution: r, params: params, now: now})
 }
 
 func (e *brokeredActionExecutor) ApplyDeEnforceSource(target adapterruntime.SourceTarget, st fsm.State, params adapterruntime.EnforcementParams, now time.Time) fsm.State {
-	return e.legacy.ApplyDeEnforceSource(target, st, params, now)
+	return e.sourceExecutor.ApplyDeEnforceSource(target, st, params, now)
 }
 
 func (e *brokeredActionExecutor) ApplyRelationship(target adapterruntime.RelationshipTarget, r actions.ActionResolution, now time.Time) actions.ActionResult {
@@ -208,36 +208,36 @@ type applyOutcome struct {
 	result actions.ActionResult
 }
 
-type brokeredFSMPEP struct {
-	legacy *actions.SourceActionExecutor
-	params func() adapterruntime.EnforcementParams
-	active *applyContext
-	last   applyOutcome
+type brokeredSourcePEP struct {
+	sourceExecutor *actions.SourceActionExecutor
+	params         func() adapterruntime.EnforcementParams
+	active         *applyContext
+	last           applyOutcome
 }
 
-func newBrokeredFSMPEP(legacy *actions.SourceActionExecutor, params func() adapterruntime.EnforcementParams) *brokeredFSMPEP {
-	return &brokeredFSMPEP{legacy: legacy, params: params}
+func newBrokeredSourcePEP(sourceExecutor *actions.SourceActionExecutor, params func() adapterruntime.EnforcementParams) *brokeredSourcePEP {
+	return &brokeredSourcePEP{sourceExecutor: sourceExecutor, params: params}
 }
 
-func (p *brokeredFSMPEP) AdapterID() string { return "kliq-fsm-pep" }
+func (p *brokeredSourcePEP) AdapterID() string { return "kliq-source-pep" }
 
-func (p *brokeredFSMPEP) begin(ctx applyContext) {
+func (p *brokeredSourcePEP) begin(ctx applyContext) {
 	p.active = &ctx
 	p.last = applyOutcome{}
 }
 
-func (p *brokeredFSMPEP) finish() applyOutcome {
+func (p *brokeredSourcePEP) finish() applyOutcome {
 	out := p.last
 	p.active = nil
 	p.last = applyOutcome{}
 	return out
 }
 
-func (p *brokeredFSMPEP) Apply(_ context.Context, lease decision.ActionLease) (string, error) {
+func (p *brokeredSourcePEP) Apply(_ context.Context, lease decision.ActionLease) (string, error) {
 	if p.active == nil {
-		return "", fmt.Errorf("brokered fsm pep apply without active transition context")
+		return "", fmt.Errorf("brokered source pep apply without active transition context")
 	}
-	st, result := p.legacy.ApplySource(p.active.target, p.active.state, p.active.resolution, p.active.params, p.active.now)
+	st, result := p.sourceExecutor.ApplySource(p.active.target, p.active.state, p.active.resolution, p.active.params, p.active.now)
 	p.last = applyOutcome{state: st, result: result}
 	if p.last.result.Status == "failed" {
 		return "", fmt.Errorf("%s", p.last.result.Reason)
@@ -245,11 +245,11 @@ func (p *brokeredFSMPEP) Apply(_ context.Context, lease decision.ActionLease) (s
 	return lease.FencingToken, nil
 }
 
-func (p *brokeredFSMPEP) CurrentFencingToken(_ context.Context, lease decision.ActionLease) (string, error) {
+func (p *brokeredSourcePEP) CurrentFencingToken(_ context.Context, lease decision.ActionLease) (string, error) {
 	return lease.FencingToken, nil
 }
 
-func (p *brokeredFSMPEP) Revert(_ context.Context, lease decision.ActionLease) error {
+func (p *brokeredSourcePEP) Revert(_ context.Context, lease decision.ActionLease) error {
 	target := actionbroker.TargetFromLease(lease)
 	if target.Value == "" {
 		return fmt.Errorf("source revert target missing for lease %s", lease.LeaseID)
@@ -258,7 +258,7 @@ func (p *brokeredFSMPEP) Revert(_ context.Context, lease decision.ActionLease) e
 	if p.params != nil {
 		params = p.params()
 	}
-	p.legacy.ApplyDeEnforceSource(adapterruntime.SourceTarget{
+	p.sourceExecutor.ApplyDeEnforceSource(adapterruntime.SourceTarget{
 		SourceID:   target.Value,
 		Subject:    observation.EntityRef{ID: target.Value},
 		Attributes: copyStringMap(target.Attributes),

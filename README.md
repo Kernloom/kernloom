@@ -40,8 +40,8 @@ Forge (policy compiler)          kernloom-forge repo
 │  OpenZiti action adapter (planned) ①                         │
 │                                                              │
 │  Shadow/Active RuntimePDP                                    │
-│  shadow: logs decisions alongside FSM                        │
-│  active: becomes primary enforcement (--runtime-pdp-mode)    │
+│  shadow: logs decisions only                                 │
+│  active: authoritative policy for all action domains         │
 └──────────────────────────────────────────────────────────────┘
     │ writes eBPF maps
 ┌─────────────────────────────────────────┐
@@ -62,13 +62,13 @@ Forge (policy compiler)          kernloom-forge repo
 
 **When:** Internet-facing nodes — Ziti controller, Ziti router, public web server, reverse proxy.
 
-**What:** KLIQ learns your node's normal PPS/SYN/scan rates and rate-limits or blocks sources that deviate. No graph learning, no SQLite, minimal overhead.
+**What:** KLIQ learns the active adapter's normal source-level metrics and rate-limits or blocks sources that deviate. With KLShield this means PPS/SYN/scan/BPS rates; with another adapter it can be dial rate, auth failures, posture failures, API error rate, or any other adapter-published metric/signal. No graph learning, no SQLite, minimal overhead.
 
 ### Scenario B — Microsegmentation (internal nodes)
 
 **When:** Internal nodes communicating with a small, known set of services — database, IdP, internal API, NAS.
 
-**What:** KLIQ learns the full communication graph. After freeze, unexpected connections are detected and can be rate-limited or blocked at the exact `(src_ip, port, proto)` tuple in XDP.
+**What:** KLIQ learns the communication graph as generic subject-predicate-object relationships. After freeze, unexpected relationships are detected and RuntimePDP can decide whether to restrict them. The concrete enforcement target depends on the adapter: KLShield can enforce network tuples such as `(src_ip, port, proto)` in XDP; an OpenZiti adapter would enforce Ziti identities/services only once it exposes the corresponding RelationshipPEP.
 
 ---
 
@@ -76,11 +76,13 @@ Forge (policy compiler)          kernloom-forge repo
 
 | Profile | Active subsystems |
 |---|---|
-| `dos-light` | Source heuristics + autotune. No graph, no SQLite. |
+| `dos-light` | Source heuristics + adapter-scoped autotune. No graph, no SQLite. |
 | `iq-learning` | dos-light + per-source EWMA baseline + state store. |
-| `graph-learning` | iq-learning + flow telemetry + graph learning + edge baselines + SQLite. |
-| `graph-enforce` | graph-learning + XDP tuple enforcement. |
+| `graph-learning` | iq-learning + relationship telemetry + graph learning + relationship/edge baselines + SQLite. |
+| `graph-enforce` | graph-learning + relationship tuple enforcement when a configured adapter exposes a RelationshipPEP. KLShield implements this with XDP tuple maps. |
 | `full-learning-experimental` | graph-learning + generic relationship/baseline paths for lab use. |
+
+Profiles enable KLIQ subsystems; adapters provide the concrete observations and PEP capabilities. `dos-light` is not intrinsically PPS/SYN/scan-only: those are KLShield/network metrics. `graph-enforce` is not intrinsically XDP-only: XDP is the current KLShield backend for network tuples, while other adapters can use the same graph/RuntimePDP path once they publish relationships and implement matching enforcement capabilities.
 
 ---
 
@@ -165,8 +167,10 @@ forge serve --addr :8443
 ```
 
 **`--runtime-pdp-mode`:**
-- `shadow` (default) — the new Runtime PDP evaluates alongside the legacy FSM and logs decisions for parity comparison. No enforcement change.
-- `active` — Runtime PDP decisions become enforcement actions via the action broker. The FSM remains active for network-layer defence.
+- `shadow` (default) — RuntimePDP evaluates and logs decisions only. Analyzers, graph and FSM can still produce facts/intent, but no enforcement action is emitted.
+- `active` — RuntimePDP is the policy authority. Adapter analyzers, graph, baselines, identity, and FSM/hysteresis components provide facts/intent; only RuntimePDP decisions become enforcement actions via the action broker.
+
+RuntimePDP policy rules can use generic fact maps such as `risk`, `metrics`, `signals`, `baseline`, `graph`, `adapter`, `fsm`, `device`, `session`, and `features`. For example, a network rule can compare `metrics.network.packets_per_second` with `baseline.network.packets_per_second` without making KLShield the decision owner.
 
 In managed mode KLIQ:
 1. Enrolls the node and heartbeats runtime status to Forge
@@ -187,7 +191,7 @@ Standalone nodes can also load a contracts-based RuntimePolicyPack directly:
 ```
 
 `--policy-file` accepts:
-- `kind: LocalPolicyPack` — legacy/local KLIQ policy and threshold tuning.
+- `kind: LocalPolicyPack` — local KLIQ policy and threshold tuning.
 - `kind: RuntimePolicyPack` with `apiVersion: kernloom.io/runtime/v1alpha1` — contracts-based Runtime PDP rules. In `shadow` mode decisions are logged; in `active` mode matched Runtime PDP decisions are mapped to `ActionProposal`s and enforced through the action broker.
 
 ---
@@ -274,6 +278,7 @@ kernloom/
 │   ├── cmd/kliq/                 KLIQ agent — main loop, CLI, wiring
 │   │   ├── kliq.go               main loop and CLI runtime composition
 │   │   ├── shadow_pdp.go         RuntimePDP shadow/active mode runner
+│   │   ├── runtime_pdp_candidate.go  generic RuntimePDP candidate facts
 │   │   ├── policy_file.go        LocalPolicyPack/RuntimePolicyPack loader
 │   │   ├── runtime_pdp_action_mapper.go  RuntimeDecision → ActionProposal
 │   │   ├── brokered_executor.go  Action broker wiring + receipt persistence

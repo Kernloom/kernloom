@@ -206,8 +206,8 @@ type SourceTarget struct {
 	Attributes map[string]string
 }
 
-// SourcePEP is the generic synchronous PEP contract used by the legacy FSM
-// path. Concrete adapters own the actual enforcement backend and key formats.
+// SourcePEP is the generic synchronous PEP contract used by brokered source
+// actions. Concrete adapters own the actual enforcement backend and key formats.
 type SourcePEP interface {
 	TransitionSource(target SourceTarget, st fsm.State, level fsm.Level, now time.Time, params EnforcementParams) (fsm.State, error)
 }

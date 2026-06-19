@@ -173,7 +173,19 @@ func (s *sourceStates) activeBlocks() int {
 	return n
 }
 
-func (s *sourceStates) processCandidates(cands []metrics, now time.Time, c cfg, wl sourceMatcher, fb sourceMatcher, resolver *actions.PolicyResolver, executor fsmActionExecutor, tuner adapterruntime.Tuner, clean bool) processedSources {
+func (s *sourceStates) processCandidates(
+	cands []metrics,
+	now time.Time,
+	c cfg,
+	wl sourceMatcher,
+	fb sourceMatcher,
+	resolver *actions.PolicyResolver,
+	executor *brokeredActionExecutor,
+	tuner adapterruntime.Tuner,
+	clean bool,
+	runner *shadowPDPRunner,
+	nodeID string,
+) processedSources {
 	processed := make(processedSources, len(cands))
 	for _, m := range cands {
 		sourceID := m.sourceID()
@@ -182,46 +194,169 @@ func (s *sourceStates) processCandidates(cands []metrics, now time.Time, c cfg, 
 		}
 		entry := s.ensure(sourceID, m.Target)
 		entry.target = m.Target
-		entry.state = processCandidate(m, entry.state, now, c, wl, fb, resolver, executor, tuner, clean)
+		entry.state = processCandidateRuntimePDP(m, entry.state, now, c, wl, fb, resolver, executor, tuner, clean, runner, nodeID)
 		s.entries[sourceID] = entry
 		processed[sourceID] = true
 	}
 	return processed
 }
 
-func (s *sourceStates) sweepInactive(processed processedSources, now time.Time, c cfg, resolver *actions.PolicyResolver, executor fsmActionExecutor, params adapterruntime.EnforcementParams) {
-	zeroM := fsm.Metrics{}
+func (s *sourceStates) sweepInactive(processed processedSources, now time.Time, c cfg, resolver *actions.PolicyResolver, executor *brokeredActionExecutor, params adapterruntime.EnforcementParams, runner *shadowPDPRunner, nodeID string) {
 	for sourceID, entry := range s.entries {
 		if entry.state.Level == fsm.LevelObserve || processed[sourceID] {
 			continue
 		}
 		entry := entry
-		doTransition := func(current fsm.State, target fsm.Level) fsm.State {
-			res := resolveHousekeepingTransition(sourceID, target, now, c, resolver)
-			newSt, _ := executor.ApplySource(entry.target, current, res, params, now)
-			return newSt
+		m := metrics{Target: entry.target, Score: 0, Signals: map[string]float64{}}
+		if m.Target.SourceID == "" {
+			m.Target = sourceTargetFromID(sourceID)
 		}
-		entry.state, _ = fsm.Advance(zeroM, entry.state, now, c.toFSMConfig(), doTransition)
+		intent := evaluateFSMIntent(m, entry.state, now, c)
+		entry.state = processRuntimePDPDecisionForCandidate(m, entry.state, intent, now, c, resolver, executor, runner, nodeID)
 		s.entries[sourceID] = entry
 	}
 }
 
-func resolveHousekeepingTransition(sourceID string, target fsm.Level, now time.Time, c cfg, resolver *actions.PolicyResolver) actions.ActionResolution {
-	proposal := actions.ActionProposal{
-		Source:        "housekeeping",
-		Reason:        "fsm_downscale",
-		DesiredAction: actions.FsmLevelToCapability(target),
-		DesiredLevel:  actions.FsmLevelName(target),
-		Target:        actions.ActionTarget{Granularity: actions.TargetGranularitySource, Value: sourceID},
-		TTL:           c.ttlForFSMLevel(target),
-		CreatedAt:     now,
+func processCandidateRuntimePDP(
+	m metrics,
+	st fsm.State,
+	now time.Time,
+	c cfg,
+	wl sourceMatcher,
+	fb sourceMatcher,
+	resolver *actions.PolicyResolver,
+	executor *brokeredActionExecutor,
+	tuner adapterruntime.Tuner,
+	clean bool,
+	runner *shadowPDPRunner,
+	nodeID string,
+) fsm.State {
+	st.LastSeenWallTime = now
+
+	sourceID := m.sourceID()
+
+	wlHit := wl.MatchSource(sourceID)
+	fbHit := fb.MatchSource(sourceID)
+	overrideLearned := false
+	if wlHit || fbHit {
+		if m.Signals == nil {
+			m.Signals = map[string]float64{}
+		}
+		if wlHit {
+			m.Signals["policy.whitelist_hit"] = 1
+		}
+		if fbHit {
+			m.Signals["policy.feedback_hit"] = 1
+		}
+		if c.AutoTune && clean && st.Level == fsm.LevelObserve && m.score() <= c.LearnMaxSev && m.enforcementFeedbackRate() == 0 {
+			if (wlHit && c.WhitelistLearn) || (fbHit && c.FeedbackLearn) {
+				recordTuningSample(tuner, m, true)
+				overrideLearned = true
+			}
+		}
 	}
-	res := resolver.Resolve(proposal)
+
+	intent := evaluateFSMIntent(m, st, now, c)
+	next := processRuntimePDPDecisionForCandidate(m, st, intent, now, c, resolver, executor, runner, nodeID)
+
+	if next.Level != st.Level {
+		kliqLog.Printf("STATE %s %s->%s authority=runtime-pdp strikes=%d up=%d down=%d noncomp=%d score=%.2f %s",
+			sourceID, st.Level.String(), next.Level.String(),
+			next.Strikes, next.UpStreak, next.DownStreak, next.NonCompTicks,
+			m.score(), m.signalsSummary())
+	} else if intent.Transitioned && intent.ProposedLevel != st.Level {
+		kliqLog.Printf("STATE %s runtime-pdp held fsm_intent=%s current=%s strikes=%d score=%.2f %s",
+			sourceID, actions.FsmLevelName(intent.ProposedLevel), st.Level.String(),
+			intent.SignalState.Strikes, m.score(), m.signalsSummary())
+	}
+
+	shouldRecord := clean && c.AutoTune && intent.SignalState.Level == fsm.LevelObserve && m.score() <= c.LearnMaxSev && m.enforcementFeedbackRate() == 0
+	if !overrideLearned {
+		recordTuningSample(tuner, m, shouldRecord)
+	}
+
+	return next
+}
+
+func processRuntimePDPDecisionForCandidate(
+	m metrics,
+	current fsm.State,
+	intent fsmIntent,
+	now time.Time,
+	c cfg,
+	resolver *actions.PolicyResolver,
+	executor *brokeredActionExecutor,
+	runner *shadowPDPRunner,
+	nodeID string,
+) fsm.State {
+	if runner == nil {
+		return mergeFSMRuntimeState(current, intent.SignalState)
+	}
+
+	mode, _ := runner.getMode()
+	prefix := runtimePDPDecisionLogPrefix(mode)
+	input := runtimePDPInputForCandidate(nodeID, m, current, intent, c, now)
+	dec, matched, loaded, err := runner.decide(input)
+	if err != nil {
+		kliqLog.Printf("%s candidate decide error %s: %v", prefix, describeRuntimeCandidate(m, intent), err)
+		return mergeFSMRuntimeState(current, intent.SignalState)
+	}
+	if !loaded {
+		if mode == PDPModeActive {
+			kliqLog.Printf("%s no policy pack loaded; candidate held %s", prefix, describeRuntimeCandidate(m, intent))
+		}
+		return mergeFSMRuntimeState(current, intent.SignalState)
+	}
+	if !matched {
+		return mergeFSMRuntimeState(current, intent.SignalState)
+	}
+	if mode == PDPModeShadow {
+		kliqLog.Printf("%s DECISION %s effect=%s reasons=%v (observe-only)",
+			prefix, describeRuntimeCandidate(m, intent), dec.Effect, dec.ReasonCodes)
+		return mergeFSMRuntimeState(current, intent.SignalState)
+	}
+
+	prop, ok, reason := runtimeDecisionToActionProposal(dec, m.sourceID(), input.Risk.Confidence, now)
+	if !ok {
+		kliqLog.Printf("%s decision skipped %s reason=%s", prefix, describeRuntimeCandidate(m, intent), reason)
+		return mergeFSMRuntimeState(current, intent.SignalState)
+	}
+	res := resolver.Resolve(prop)
 	if res.DenyReason != "" {
-		kliqLog.Printf("ACTION-RESOLVER housekeeping %s %s->%s reason=%q",
-			sourceID, proposal.DesiredLevel, res.ExecutableLevel, res.DenyReason)
+		kliqLog.Printf("ACTION-RESOLVER runtime-pdp %s %s->%s reason=%q",
+			m.sourceID(), prop.DesiredLevel, res.ExecutableLevel, res.DenyReason)
 	}
-	return res
+
+	switch res.Target.Granularity {
+	case "", actions.TargetGranularitySource:
+		target := m.Target
+		if res.Target.Value != "" && res.Target.Value != m.sourceID() {
+			target = sourceTargetFromID(res.Target.Value)
+		}
+		target.Attributes = copyStringMap(res.Target.Attributes)
+		newSt, result := executor.ApplySource(target, current, res, c.toPEPParams(), now)
+		if result.Status == "failed" {
+			kliqLog.Printf("[runtime-pdp:active] source action failed subject=%s reason=%s", m.sourceID(), result.Reason)
+			return mergeFSMRuntimeState(current, intent.SignalState)
+		}
+		return mergeFSMRuntimeState(newSt, intent.SignalState)
+
+	case actions.TargetGranularityRelationship:
+		target, ok := relationshipTargetFromActionTarget(res.Target)
+		if !ok {
+			kliqLog.Printf("[runtime-pdp:active] relationship target invalid: %#v", res.Target)
+			return mergeFSMRuntimeState(current, intent.SignalState)
+		}
+		result := executor.ApplyRelationship(target, res, now)
+		if result.Status == "failed" {
+			kliqLog.Printf("[runtime-pdp:active] relationship action failed subject=%s reason=%s", m.sourceID(), result.Reason)
+		}
+		return mergeFSMRuntimeState(current, intent.SignalState)
+
+	default:
+		kliqLog.Printf("[runtime-pdp:active] unsupported target %s:%q", res.Target.Granularity, res.Target.Value)
+		return mergeFSMRuntimeState(current, intent.SignalState)
+	}
 }
 
 func applyResolvedSourceAction(res actions.ActionResolution, executor fsmActionExecutor, params adapterruntime.EnforcementParams, now time.Time) bool {

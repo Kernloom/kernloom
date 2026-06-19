@@ -68,7 +68,7 @@ Recommended fix:
 ### 3. Action Broker is only partially live
 
 `iq/internal/actionbroker` now models leases, receipts, and fencing-aware revert behavior. KLIQ now
-routes TTL-bounded FSM/CEL source enforcement through a brokered executor that journals leases and
+routes TTL-bounded RuntimePDP/CEL source enforcement through a brokered executor that journals leases and
 logs receipts before delegating to the existing KLShield/netfilter PEP path.
 
 Relevant files:
@@ -154,27 +154,37 @@ Recommended fix:
 - Feed pipeline risk outputs into `iq/internal/runtimepdp`.
 - Surface the resulting `contracts.RuntimeDecision` and risk assessment in Forge reports.
 
-### 7. Runtime PDP is not yet live
+### 7. Runtime PDP live path still needs broader contract hardening
 
 `iq/internal/runtimepdp` now evaluates `contracts.RuntimePolicyPack` CEL expressions over
-`contracts.LocalRiskAssessment` and context snapshots, producing `contracts.RuntimeDecision`. The
-live KLIQ loop still uses the legacy PolicyPack/FSM/CEL bridge.
+`contracts.LocalRiskAssessment` and context snapshots, producing `contracts.RuntimeDecision`. In
+`--runtime-pdp-mode=active`, KLIQ now evaluates runtime policy synchronously for source candidates:
+network metrics, baseline thresholds, graph facts, adapter attributes, and FSM hysteresis state are
+generic PDP inputs. `--runtime-pdp-mode=shadow` is observe-only, and the live source/relationship
+paths no longer use the old FSM or graph logic as an enforcement authority.
 
 Relevant files:
 
-- `pkg/core/policy/pack.go`
-- `pkg/core/pdp/config.go`
 - `iq/cmd/kliq/kliq.go`
+- `iq/cmd/kliq/runtime_pdp_candidate.go`
+- `iq/internal/runtimepdp/pdp.go`
 
-Risk:
+Remaining risk:
 
-- Forge-produced RuntimePolicyPacks are not yet the live decision source.
-- The legacy FSM/CEL path and Runtime PDP path can diverge until bridged.
+- More adapters need to populate rich generic facts so RuntimePDP policies can cover identity,
+  application, DLP, and trust domains as completely as network candidates.
+- Forge/KLIQ conformance fixtures must cover the generic fact variables and action-target fallback
+  behavior.
+- Operational de-enforcement paths such as SIGUSR1 reset and feedback sweeps are still local PEP
+  cleanup controls rather than RuntimePDP-authored decisions.
 
 Recommended fix:
 
-- Keep compatibility with existing policy pack fields only at the migration boundary.
-- Add a live runtime-PDP shadow mode before replacing enforcement decisions.
+- Extend adapter fact producers instead of adding adapter-specific logic to KLIQ.
+- Add conformance fixtures for metrics/baseline/graph/fsm CEL variables and source/relationship
+  RuntimeDecision mapping.
+- Decide whether explicit local cleanup controls should remain operator overrides or become
+  RuntimePDP-authored observe/allow decisions with broker receipts.
 
 ### 8. Lease and state-store hardening is incomplete
 
@@ -259,8 +269,6 @@ Observed examples:
 - `dist/`
 - root `kliq`
 - root `klshield`
-- `kernloom-repo.zip`
-- `.claude/archive/*.Zone.Identifier`
 
 Risk:
 
@@ -293,6 +301,6 @@ Recommended fix:
 ## Recommended Immediate Order
 
 1. Migrate managed RuntimeBundle ingestion to `github.com/kernloom/kernloom-contracts`.
-2. Add live Runtime PDP shadow mode fed by `iq/internal/localrisk`.
+2. Extend RuntimePDP fact producers for non-network adapters.
 3. Persist/upload enforcement receipts and finish broker support for tuple/de-enforce paths.
-4. Replace legacy PolicyPack/FSM decision source only after shadow parity is proven.
+4. Decide the operator-cleanup model for SIGUSR1/feedback de-enforcement and add receipts if kept.
