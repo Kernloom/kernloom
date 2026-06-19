@@ -7,13 +7,25 @@ set -euo pipefail
 export KLT_RUN_ID="${KLT_RUN_ID:-$$}"
 export KLT_ROOT="${KLT_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
 
-export KLT_ARTIFACT_DIR="${KLT_ARTIFACT_DIR:-$KLT_ROOT/tests/integration/artifacts/$KLT_RUN_ID}"
+KLT_ARTIFACT_OWNER_ID="${SUDO_UID:-$(id -u)}"
+export KLT_ARTIFACT_BASE_DIR="${KLT_ARTIFACT_BASE_DIR:-/tmp/kernloom-integration-artifacts-$KLT_ARTIFACT_OWNER_ID}"
+export KLT_ARTIFACT_DIR="${KLT_ARTIFACT_DIR:-$KLT_ARTIFACT_BASE_DIR/$KLT_RUN_ID}"
+
+if [[ -z "${KLT_GO:-}" ]]; then
+  if command -v go >/dev/null 2>&1; then
+    export KLT_GO="$(command -v go)"
+  elif [[ -x /usr/local/go/bin/go ]]; then
+    export KLT_GO="/usr/local/go/bin/go"
+  else
+    export KLT_GO="go"
+  fi
+fi
 
 # Binaries
-export KLT_KLSHIELD="$KLT_ROOT/bin/klshield"
-export KLT_KLIQ="$KLT_ROOT/bin/kliq"
-export KLT_BPF_OBJ="$KLT_ROOT/shield/bpf/out/xdp_kernloom_shield.bpf.o"
-export KLT_FORGE="$KLT_ROOT/bin/forge"
+export KLT_KLSHIELD="${KLT_KLSHIELD:-$KLT_ROOT/bin/klshield}"
+export KLT_KLIQ="${KLT_KLIQ:-$KLT_ROOT/bin/kliq}"
+export KLT_BPF_OBJ="${KLT_BPF_OBJ:-$KLT_ROOT/shield/bpf/out/xdp_kernloom_shield.bpf.o}"
+export KLT_FORGE="${KLT_FORGE:-$KLT_ROOT/bin/forge}"
 
 # Forge control-plane (no-XDP integration tests)
 export KLT_FORGE_ADDR="${KLT_FORGE_ADDR:-127.0.0.1:17443}"
@@ -23,7 +35,22 @@ export KLT_FORGE_ADMIN_KEY="${KLT_FORGE_ADMIN_KEY:-it-admin-key-$$}"
 export KLT_FORGE_LOG="$KLT_ARTIFACT_DIR/forge.log"
 # kernloom-forge repo expected as sibling of kernloom repo
 export KLT_FORGE_ROOT="${KLT_FORGE_ROOT:-$(cd "$KLT_ROOT/../kernloom-forge" 2>/dev/null && pwd || echo "")}"
-export KLT_FORGE_ADAPTERS="${KLT_FORGE_ADAPTERS:-$KLT_FORGE_ROOT/registries/adapters}"
+if [[ -z "${KLT_FORGE_ADAPTERS:-}" ]]; then
+  if [[ -n "$KLT_FORGE_ROOT" && -d "$KLT_FORGE_ROOT/registries/adapters" ]]; then
+    export KLT_FORGE_ADAPTERS="$KLT_FORGE_ROOT/registries/adapters"
+  elif [[ -n "$KLT_FORGE_ROOT" && -d "$KLT_FORGE_ROOT/examples/adapters" ]]; then
+    export KLT_FORGE_ADAPTERS="$KLT_FORGE_ROOT/examples/adapters"
+  else
+    export KLT_FORGE_ADAPTERS="$KLT_FORGE_ROOT/registries/adapters"
+  fi
+fi
+if [[ -z "${KLT_FORGE_PROFILES:-}" ]]; then
+  if [[ -n "$KLT_FORGE_ROOT" && -d "$KLT_FORGE_ROOT/examples/profiles" ]]; then
+    export KLT_FORGE_PROFILES="$KLT_FORGE_ROOT/examples/profiles"
+  else
+    export KLT_FORGE_PROFILES="$KLT_FORGE_ROOT/examples/profiles"
+  fi
+fi
 export KLT_FORGE_SIGNING_KEY="$KLT_ARTIFACT_DIR/forge-signing.key"
 
 # Network namespaces and IPs

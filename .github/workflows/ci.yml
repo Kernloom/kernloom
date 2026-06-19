@@ -15,6 +15,20 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v5
 
+      - name: Guard generated integration artifacts
+        shell: bash
+        run: |
+          set -euo pipefail
+          mapfile -t tracked_artifacts < <(
+            git ls-files tests/integration/artifacts \
+              | grep -Ev '^tests/integration/artifacts/(\.gitignore|\.gitkeep)$' || true
+          )
+          if [ "${#tracked_artifacts[@]}" -ne 0 ]; then
+            echo "Generated integration artifacts must not be tracked:"
+            printf '  %s\n' "${tracked_artifacts[@]}"
+            exit 1
+          fi
+
       - name: Setup Go
         uses: actions/setup-go@v6
         with:

@@ -11,6 +11,11 @@ pass() {
   echo "[PASS] $*"
 }
 
+skip() {
+  echo "[SKIP] $*"
+  exit 0
+}
+
 fail() {
   _KLT_FAIL=$((_KLT_FAIL + 1))
   echo "[FAIL] $*" >&2
@@ -67,6 +72,13 @@ assert_int_gt() {
   local min="$2"
   local label="${3:-value}"
   [[ "$val" -gt "$min" ]] || fail "$label: expected >$min, got $val"
+}
+
+assert_int_ge() {
+  local val="$1"
+  local min="$2"
+  local label="${3:-value}"
+  [[ "$val" -ge "$min" ]] || fail "$label: expected >=$min, got $val"
 }
 
 assert_stats_field_gt() {

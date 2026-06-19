@@ -11,11 +11,10 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$SCRIPT_DIR/../env.sh"
 source "$SCRIPT_DIR/../lib/assert.sh"
+source "$SCRIPT_DIR/../lib/processes.sh"
 source "$SCRIPT_DIR/../lib/traffic.sh"
 
-sudo mkdir -p "$KLT_STATE_DIR" "$KLT_ETC_DIR"
-sudo cp "$KLT_ROOT/tests/integration/testdata/whitelist.txt" "$KLT_ETC_DIR/whitelist.txt"
-sudo cp "$KLT_ROOT/tests/integration/testdata/feedback.json" "$KLT_STATE_DIR/feedback.json"
+stop_kliq
 sudo rm -f "$KLT_STATE_DIR/state.json"
 
 # Start kliq with:
@@ -24,13 +23,11 @@ sudo rm -f "$KLT_STATE_DIR/state.json"
 #   - fast cycle (bootstrap-every1=8s) and few required samples (5)
 #   - maxDown=0.10 explicit so cap allows 10% drop per cycle
 #   - alpha=0.10 (default) — must NOT apply during bootstrap
-sudo "$KLT_KLIQ" \
-  --state-file="$KLT_STATE_DIR/state.json" \
-  --feedback-file="$KLT_STATE_DIR/feedback.json" \
-  --whitelist="$KLT_ETC_DIR/whitelist.txt" \
-  --db="$KLT_STATE_DIR/kliq.db" \
-  --bpffs-root=/sys/fs/bpf \
-  --interval=1s \
+AUTOTUNE_LOG="$KLT_ARTIFACT_DIR/kliq-06.log"
+start_kliq_with_args "$AUTOTUNE_LOG" \
+  --adapter=klshield \
+  --feature-profile=dos-light \
+  --runtime-pdp-mode=shadow \
   --dry-run=true \
   --bootstrap=true \
   --autotune=true \
@@ -42,10 +39,7 @@ sudo "$KLT_KLIQ" \
   --bootstrap-every1=8s \
   --bootstrap-max-down1=0.10 \
   --bootstrap-max-up1=0.10 \
-  --min-pps=1 \
-  > "$KLT_ARTIFACT_DIR/kliq-06.log" 2>&1 &
-KLIQ_PID=$!
-echo "$KLIQ_PID" > "$KLT_ARTIFACT_DIR/kliq.pid"
+  --min-pps=1
 
 echo "[06] kliq started, generating traffic via good namespace for reservoir"
 
@@ -60,13 +54,12 @@ done
 # Wait for the 8s cycle to fire (plus a few ticks margin).
 sleep 12
 
-sudo kill "$KLIQ_PID" 2>/dev/null || true
-wait "$KLIQ_PID" 2>/dev/null || true
+stop_kliq
 
 # Read the result.
 STATE="$KLT_STATE_DIR/state.json"
 if [[ ! -f "$STATE" ]]; then
-  cat "$KLT_ARTIFACT_DIR/kliq-06.log" >&2
+  cat "$AUTOTUNE_LOG" >&2
   fail "06: state.json not written — autotune cycle did not fire"
 fi
 
@@ -78,24 +71,35 @@ trig = st['active']['trig']['trig_pps']
 print(f'{trig:.2f}')
 " 2>/dev/null || echo "0")
 
-echo "[06] new trig_pps=$NEW_PPS (started at 100, maxDown=10% → expect ~90)"
-cat "$KLT_ARTIFACT_DIR/kliq-06.log" | grep -E "AUTOTUNE|trig_pps" | tail -5 || true
+echo "[06] final trig_pps=$NEW_PPS (started at 100, maxDown=10% per bootstrap cycle)"
+grep -E "AUTOTUNE|trig_pps" "$AUTOTUNE_LOG" | tail -5 || true
 
 # Correct (no EWMA in bootstrap): ~90  (100 * 0.90)
 # Buggy  (EWMA applied):          ~99  (100 * 0.90 + 100*0.90*0.10)
-# We check: new_pps < 95 (clearly below the buggy threshold of ~99)
+# We check the first applied cycle. The final state may be 81 when the second
+# 8s bootstrap cycle also fires before the test stops KLIQ.
 python3 -c "
-v = float('$NEW_PPS')
-if v <= 0:
+import re
+from pathlib import Path
+
+final_v = float('$NEW_PPS')
+if final_v <= 0:
     print('[FAIL] trig_pps is 0 — cycle did not fire or state unreadable', flush=True)
     exit(1)
-if v >= 95:
-    print(f'[FAIL] trig_pps={v:.2f} >= 95: EWMA smoothing was applied during bootstrap (bug regression)', flush=True)
+log = Path('$AUTOTUNE_LOG').read_text(errors='replace')
+m = re.search(r'AUTOTUNE applied: trig_pps ([0-9.]+)->([0-9.]+)', log)
+if not m:
+    print('[FAIL] no AUTOTUNE applied line found', flush=True)
     exit(1)
-if v < 85:
-    print(f'[FAIL] trig_pps={v:.2f} < 85: dropped more than expected (check maxDown flag)', flush=True)
+old_v = float(m.group(1))
+first_v = float(m.group(2))
+if first_v >= 95:
+    print(f'[FAIL] first trig_pps step {old_v:.2f}->{first_v:.2f}: EWMA smoothing was applied during bootstrap (bug regression)', flush=True)
     exit(1)
-print(f'[OK] trig_pps={v:.2f} — 10% cap applied correctly without EWMA', flush=True)
+if first_v < 85:
+    print(f'[FAIL] first trig_pps step {old_v:.2f}->{first_v:.2f}: dropped more than expected (check maxDown flag)', flush=True)
+    exit(1)
+print(f'[OK] first trig_pps step {old_v:.2f}->{first_v:.2f}; final={final_v:.2f} — 10% cap applied correctly without EWMA', flush=True)
 "
 
 pass "06: autotune bootstrap drops ~10% per cycle (no EWMA regression)"

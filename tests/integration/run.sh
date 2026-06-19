@@ -13,6 +13,21 @@ source tests/integration/lib/cleanup.sh
 
 mkdir -p "$KLT_ARTIFACT_DIR"
 
+restore_artifact_ownership() {
+  [[ -n "${SUDO_UID:-}" && -n "${SUDO_GID:-}" ]] || return 0
+  [[ -d "${KLT_ARTIFACT_DIR:-}" ]] || return 0
+  case "$KLT_ARTIFACT_DIR" in
+    /tmp/kernloom-*|"$KLT_ROOT"/tests/integration/artifacts/*)
+      chown -R "$SUDO_UID:$SUDO_GID" "$KLT_ARTIFACT_DIR" 2>/dev/null || true
+      ;;
+  esac
+  case "$(dirname "$KLT_ARTIFACT_DIR")" in
+    /tmp/kernloom-integration-artifacts-*)
+      chown "$SUDO_UID:$SUDO_GID" "$(dirname "$KLT_ARTIFACT_DIR")" 2>/dev/null || true
+      ;;
+  esac
+}
+
 # Collect debug info on failure.
 dump_debug() {
   echo ""
@@ -37,6 +52,7 @@ on_exit() {
   echo ""
   echo "[runner] cleanup"
   cleanup_all
+  restore_artifact_ownership
   if [[ $code -eq 0 ]]; then
     echo "[runner] artifacts: $KLT_ARTIFACT_DIR"
   fi
@@ -49,27 +65,7 @@ cleanup_all
 # Make sure bpffs is mounted.
 mount -t bpf bpf /sys/fs/bpf 2>/dev/null || true
 
-# Build forge binary for scenarios 09+10 (no XDP required).
-# Skips silently if the kernloom-forge repo is not found — scenarios will
-# then fail with a clear "forge not found" message rather than silently skip.
-if [[ ! -x "$KLT_FORGE" ]]; then
-  FORGE_REPO="${KLT_FORGE_ROOT:-}"
-  if [[ -z "$FORGE_REPO" ]] && [[ -d "$ROOT/../kernloom-forge" ]]; then
-    FORGE_REPO="$(cd "$ROOT/../kernloom-forge" && pwd)"
-  fi
-  if [[ -n "$FORGE_REPO" && -d "$FORGE_REPO" ]]; then
-    echo "[runner] building forge from $FORGE_REPO"
-    mkdir -p "$ROOT/bin"
-    (cd "$FORGE_REPO" && go build -o "$KLT_FORGE" ./cmd/forge/) \
-      && echo "[runner] forge built: $KLT_FORGE" \
-      || echo "[runner] WARNING: forge build failed — scenarios 09+10 will fail"
-  else
-    echo "[runner] WARNING: kernloom-forge repo not found — scenarios 09+10 will fail"
-    echo "         Set KLT_FORGE_ROOT or place kernloom-forge next to kernloom"
-  fi
-fi
-
-SCENARIOS=(
+DEFAULT_SCENARIOS=(
   tests/integration/scenarios/00_smoke_build.sh
   tests/integration/scenarios/01_attach_stats.sh
   tests/integration/scenarios/02_dryrun_detection.sh
@@ -82,7 +78,62 @@ SCENARIOS=(
   # Forge control-plane scenarios — no XDP required.
   tests/integration/scenarios/09_managed_enrollment.sh
   tests/integration/scenarios/10_adapter_definition.sh
+  tests/integration/scenarios/11_netfilter_adapter.sh
 )
+
+resolve_scenarios() {
+  if [[ -z "${KLT_SCENARIOS:-}" ]]; then
+    printf '%s\n' "${DEFAULT_SCENARIOS[@]}"
+    return
+  fi
+  local item
+  for item in $KLT_SCENARIOS; do
+    if [[ -f "$item" ]]; then
+      printf '%s\n' "$item"
+    elif [[ -f "tests/integration/scenarios/$item" ]]; then
+      printf '%s\n' "tests/integration/scenarios/$item"
+    else
+      printf '%s\n' "tests/integration/scenarios/${item}"*.sh
+    fi
+  done
+}
+
+mapfile -t SCENARIOS < <(resolve_scenarios)
+for scenario in "${SCENARIOS[@]}"; do
+  [[ -f "$scenario" ]] || {
+    echo "[runner] ERROR: scenario not found: $scenario" >&2
+    exit 1
+  }
+done
+
+needs_forge=false
+for scenario in "${SCENARIOS[@]}"; do
+  case "$(basename "$scenario")" in
+    09_*|10_*) needs_forge=true ;;
+  esac
+done
+
+# Build forge binary for scenarios 09+10 (no XDP required).
+# Skips silently if the kernloom-forge repo is not found — scenarios will
+# then fail with a clear "forge not found" message rather than silently skip.
+if [[ "$needs_forge" == "true" && "${KLT_FORGE_SKIP_BUILD:-0}" != "1" ]]; then
+  FORGE_REPO="${KLT_FORGE_ROOT:-}"
+  if [[ -z "$FORGE_REPO" ]] && [[ -d "$ROOT/../kernloom-forge" ]]; then
+    FORGE_REPO="$(cd "$ROOT/../kernloom-forge" && pwd)"
+  fi
+  if [[ -n "$FORGE_REPO" && -d "$FORGE_REPO" ]]; then
+    echo "[runner] building forge from $FORGE_REPO"
+    mkdir -p "$(dirname "$KLT_FORGE")"
+    (cd "$FORGE_REPO" && "$KLT_GO" build -o "$KLT_FORGE" ./cmd/forge/) \
+      && echo "[runner] forge built: $KLT_FORGE" \
+      || echo "[runner] WARNING: forge build failed — scenarios 09+10 will fail"
+  else
+    echo "[runner] WARNING: kernloom-forge repo not found — scenarios 09+10 will fail"
+    echo "         Set KLT_FORGE_ROOT or place kernloom-forge next to kernloom"
+  fi
+elif [[ "$needs_forge" == "true" && ! -x "$KLT_FORGE" ]]; then
+  echo "[runner] WARNING: forge binary not found at $KLT_FORGE"
+fi
 
 PASS=0
 FAIL=0

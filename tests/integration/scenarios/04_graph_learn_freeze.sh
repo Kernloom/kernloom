@@ -19,6 +19,11 @@ start_kliq_graph
 good_http_many 8
 sleep 6  # wait for promote-interval (5s) to fire
 
+# Relationships are learned in memory and flushed to SQLite periodically or on
+# shutdown. Stop KLIQ before reading/freezing the graph so the CLI sees the
+# same persisted state a real operator would inspect after the learning run.
+stop_kliq
+
 # Export graph state from the test DB.
 EDGES="$KLT_ARTIFACT_DIR/graph-edges-04.txt"
 sudo "$KLT_KLIQ" graph edges --all \
@@ -36,19 +41,20 @@ sudo "$KLT_KLIQ" graph freeze \
   > "$FREEZE_LOG" 2>&1 || true
 cat "$FREEZE_LOG"
 
-stop_kliq
-
 # Restart in frozen-observe mode; new log file to isolate post-freeze events.
 FROZEN_LOG="$KLT_ARTIFACT_DIR/kliq-frozen-04.log"
 start_kliq_frozen "$FROZEN_LOG"
 
 # Send traffic from the BAD source — this edge was not in the frozen graph.
-sudo ip netns exec "$KLT_NS_BAD" \
-  curl -fsS --max-time 3 "$(api_url)" >/dev/null 2>&1 || true
+for _ in $(seq 1 5); do
+  sudo ip netns exec "$KLT_NS_BAD" \
+    curl -fsS --max-time 3 "$(api_url)" >/dev/null 2>&1 || true
+  sleep 0.2
+done
 sleep 4
 
 # kliq must have signalled the new edge.
 assert_contains "$FROZEN_LOG" \
-  "new_edge|freeze|GRAPH|${KLT_IP_BAD}"
+  "SIGNAL type=graph\\.new_edge_after_freeze subject=${KLT_IP_BAD}"
 
 pass "04: graph learned normal edge, freeze detected new edge from bad source"

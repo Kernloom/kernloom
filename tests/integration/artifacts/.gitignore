@@ -1,2 +1,5 @@
-# Ignore all artifact run directories but keep the .gitkeep marker.
-*/
+# Ignore all generated integration-test artifacts, but keep this directory
+# present in fresh checkouts.
+*
+!.gitignore
+!.gitkeep

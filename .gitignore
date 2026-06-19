@@ -38,6 +38,11 @@ coverage.out
 # Logs
 *.log
 
+# Integration test runtime artifacts
+/tests/integration/artifacts/*
+!/tests/integration/artifacts/.gitignore
+!/tests/integration/artifacts/.gitkeep
+
 # Archives
 *.tar
 *.tar.gz

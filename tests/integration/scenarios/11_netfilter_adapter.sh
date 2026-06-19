@@ -6,7 +6,7 @@
 #
 # Tests:
 #   - probe detects iptables/nftables backend
-#   - kliq --adapter=netfilter starts without klshield
+#   - kliq run --adapter=netfilter starts without klshield
 #   - deny src_ip blocks traffic in network namespace
 #   - de-enforce (observe) restores connectivity
 #   - idempotent: repeated apply does not create duplicate rules
@@ -104,26 +104,38 @@ echo "[11] 11.0: baseline connectivity OK"
 
 KLIQ_LOG_NF="$RESULTS_DIR/kliq-netfilter.log"
 KLIQ_STATE_NF="$RESULTS_DIR/kliq-state-nf.json"
+KLIQ_DB_NF="$RESULTS_DIR/kliq-state-nf.db"
 
 # Run kliq with --adapter=netfilter and dry-run in background briefly
 # to verify it starts cleanly (no klshield required).
-sudo "$KLT_KLIQ" \
+set +e
+timeout 3s sudo "$KLT_KLIQ" run \
   --adapter=netfilter \
-  --dry-run \
+  --feature-profile=dos-light \
+  --runtime-pdp-mode=shadow \
+  --dry-run=true \
+  --bootstrap=false \
+  --autotune=false \
+  --whitelist= \
+  --feedback-file= \
   --state-file "$KLIQ_STATE_NF" \
-  --interval 1s \
+  --db "$KLIQ_DB_NF" \
+  --interval=1s \
   --mode standalone \
-  2>&1 | head -20 > "$RESULTS_DIR/kliq-probe.log" &
-PROBE_PID=$!
-sleep 2
-kill $PROBE_PID 2>/dev/null || true
-wait $PROBE_PID 2>/dev/null || true
+  > "$RESULTS_DIR/kliq-probe.log" 2>&1
+PROBE_RC=$?
+set -e
+if [[ "$PROBE_RC" -ne 0 && "$PROBE_RC" -ne 124 ]]; then
+  cat "$RESULTS_DIR/kliq-probe.log" >&2
+  fail "11.1: kliq run --adapter=netfilter exited with $PROBE_RC"
+fi
 
 assert_not_contains "$RESULTS_DIR/kliq-probe.log" "open BPF maps"
 assert_not_contains "$RESULTS_DIR/kliq-probe.log" "fatal"
+assert_contains "$RESULTS_DIR/kliq-probe.log" "no catalog runtime adapter|Netfilter adapter active|Kernloom IQ started"
 echo "[11] 11.1: kliq starts without klshield"
 
-pass "11.1: kliq --adapter=netfilter starts without XDP maps"
+pass "11.1: kliq run --adapter=netfilter starts without XDP maps"
 
 # ── 11.2: netfilter deny blocks traffic ──────────────────────────────────────
 #

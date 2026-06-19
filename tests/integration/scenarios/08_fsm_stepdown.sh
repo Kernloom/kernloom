@@ -19,22 +19,16 @@ stop_kliq
 # source is not already blocked when this scenario starts.
 sudo "$KLT_KLSHIELD" reset 2>/dev/null || true
 
-sudo mkdir -p "$KLT_STATE_DIR" "$KLT_ETC_DIR"
-sudo cp "$KLT_ROOT/tests/integration/testdata/whitelist.txt" "$KLT_ETC_DIR/whitelist.txt"
-sudo cp "$KLT_ROOT/tests/integration/testdata/feedback.json" "$KLT_STATE_DIR/feedback.json"
 sudo rm -f "$KLT_STATE_DIR/state.json"
 
 STEPDOWN_LOG="$KLT_ARTIFACT_DIR/kliq-08.log"
 
 # Start kliq with very short TTLs so stepdown happens within the test window.
 #   soft-ttl=5s hard-ttl=5s block-ttl=5s down-need=2 min-hold-hard=0
-sudo "$KLT_KLIQ" \
-  --state-file="$KLT_STATE_DIR/state.json" \
-  --feedback-file="$KLT_STATE_DIR/feedback.json" \
-  --whitelist="$KLT_ETC_DIR/whitelist.txt" \
-  --db="$KLT_STATE_DIR/kliq.db" \
-  --bpffs-root=/sys/fs/bpf \
-  --interval=1s \
+start_kliq_with_args "$STEPDOWN_LOG" \
+  --adapter=klshield \
+  --feature-profile=dos-light \
+  --runtime-pdp-mode=shadow \
   --dry-run=false \
   --bootstrap=false \
   --autotune=false \
@@ -50,10 +44,7 @@ sudo "$KLT_KLIQ" \
   --soft-ttl=5s \
   --hard-ttl=5s \
   --block-ttl=5s \
-  --min-hold-hard=0s \
-  > "$STEPDOWN_LOG" 2>&1 &
-echo "$!" > "$KLT_ARTIFACT_DIR/kliq.pid"
-sleep 2
+  --min-hold-hard=0s
 
 echo "[08] phase 1: generating bad traffic for 15s to trigger enforcement"
 # Use a stop-file so the loop exits cleanly without pkill.
@@ -74,7 +65,7 @@ sleep 8
 
 # Verify enforcement was applied while traffic is still running.
 assert_contains "$STEPDOWN_LOG" "${KLT_IP_BAD}"
-assert_contains "$STEPDOWN_LOG" "ACTION ip=${KLT_IP_BAD}"
+assert_contains "$STEPDOWN_LOG" "STATE ${KLT_IP_BAD} .*->(RATE_SOFT|RATE_HARD|BLOCK)|ACTION-RECEIPT.*${KLT_IP_BAD}"
 
 echo "[08] phase 2: stopping bad traffic — waiting for recovery (TTL=5s + 2 clean ticks)"
 # Signal the loop to exit via stop file, then wait for the process to finish.

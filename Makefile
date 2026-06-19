@@ -1,7 +1,8 @@
 # SPDX-License-Identifier: MPL-2.0
 # Copyright (c) 2026 Adrian Enderlin
 
-GOPATH   ?= $(shell go env GOPATH)
+GO       ?= $(shell if command -v go >/dev/null 2>&1; then command -v go; elif [ -x /usr/local/go/bin/go ]; then printf '%s\n' /usr/local/go/bin/go; else printf '%s\n' go; fi)
+GOPATH   ?= $(shell $(GO) env GOPATH 2>/dev/null)
 BIN      := bin
 BPFOBJ   := shield/bpf/out/xdp_kernloom_shield.bpf.o
 
@@ -14,21 +15,21 @@ bpf:
 
 build: bpf
 	mkdir -p $(BIN)
-	go build -o $(BIN)/klshield ./shield/cmd/klshield
-	go build -o $(BIN)/kliq     ./iq/cmd/kliq
+	$(GO) build -o $(BIN)/klshield ./shield/cmd/klshield
+	$(GO) build -o $(BIN)/kliq     ./iq/cmd/kliq
 
 test:
-	go test ./...
+	$(GO) test ./...
 
 integration: build build-forge
-	sudo tests/integration/run.sh
+	sudo -E tests/integration/run.sh
 
 # Build forge binary from sibling repo (for scenarios 09+10).
 build-forge:
 	@if [ -d "$(dir $(abspath .))/kernloom-forge" ]; then \
 	  echo "Building forge from $(dir $(abspath .))/kernloom-forge..."; \
 	  mkdir -p bin; \
-	  (cd $(dir $(abspath .))/kernloom-forge && go build -o $(abspath bin)/forge ./cmd/forge/) \
+	  (cd $(dir $(abspath .))/kernloom-forge && $(GO) build -o $(abspath bin)/forge ./cmd/forge/) \
 	    && echo "forge built: bin/forge" \
 	    || echo "WARNING: forge build failed — scenarios 09+10 may fail"; \
 	else \
@@ -41,7 +42,7 @@ integration-forge:
 	bash tests/integration/run-forge.sh
 
 integration-clean:
-	sudo tests/integration/scenarios/99_cleanup.sh
+	sudo -E tests/integration/scenarios/99_cleanup.sh
 
 clean:
 	$(MAKE) -C shield/bpf clean

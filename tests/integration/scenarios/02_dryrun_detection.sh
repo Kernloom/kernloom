@@ -29,6 +29,6 @@ assert_contains "$KLT_LOG_KLIQ" "${KLT_IP_BAD}"
 
 # Must NOT have written any actual enforcement (dry-run).
 # In dry-run no ACTION lines with dry_run=false should appear.
-assert_not_contains "$KLT_LOG_KLIQ" "dry_run=false" || true
+assert_not_contains "$KLT_LOG_KLIQ" "dry_run=false"
 
 pass "02: dry-run detected bad source, no enforcement, API reachable for both"

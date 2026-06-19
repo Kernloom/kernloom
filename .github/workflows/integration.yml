@@ -20,6 +20,8 @@ jobs:
     # Tag the runner with [self-hosted, linux, xdp] to enable this job.
     runs-on: [self-hosted, linux, xdp]
     timeout-minutes: 20
+    env:
+      KLT_ARTIFACT_DIR: /tmp/kernloom-integration-artifacts/${{ github.run_id }}
 
     steps:
       - name: Checkout
@@ -48,5 +50,5 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: kernloom-integration-${{ github.run_id }}
-          path: tests/integration/artifacts/**
+          path: /tmp/kernloom-integration-artifacts/${{ github.run_id }}/**
           if-no-files-found: ignore

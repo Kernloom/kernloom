@@ -16,6 +16,21 @@ source tests/integration/lib/cleanup.sh
 
 mkdir -p "$KLT_ARTIFACT_DIR"
 
+restore_artifact_ownership() {
+  [[ -n "${SUDO_UID:-}" && -n "${SUDO_GID:-}" ]] || return 0
+  [[ -d "${KLT_ARTIFACT_DIR:-}" ]] || return 0
+  case "$KLT_ARTIFACT_DIR" in
+    /tmp/kernloom-*|"$KLT_ROOT"/tests/integration/artifacts/*)
+      chown -R "$SUDO_UID:$SUDO_GID" "$KLT_ARTIFACT_DIR" 2>/dev/null || true
+      ;;
+  esac
+  case "$(dirname "$KLT_ARTIFACT_DIR")" in
+    /tmp/kernloom-integration-artifacts-*)
+      chown "$SUDO_UID:$SUDO_GID" "$(dirname "$KLT_ARTIFACT_DIR")" 2>/dev/null || true
+      ;;
+  esac
+}
+
 check_deps() {
   local missing=()
   for cmd in curl jq; do
@@ -28,17 +43,20 @@ check_deps() {
 }
 
 build_forge() {
-  if [[ ! -x "$KLT_FORGE" ]]; then
-    echo "[runner] forge binary not found at $KLT_FORGE — building..."
+  if [[ "${KLT_FORGE_SKIP_BUILD:-0}" != "1" ]]; then
+    echo "[runner] building forge binary at $KLT_FORGE"
     local forge_root="${KLT_FORGE_ROOT:-}"
     if [[ -z "$forge_root" || ! -d "$forge_root" ]]; then
       echo "[runner] ERROR: KLT_FORGE_ROOT not set or not found" >&2
       echo "         Expected kernloom-forge repo at: $(cd "$ROOT/../kernloom-forge" 2>/dev/null && pwd || echo '<not found>')" >&2
       exit 1
     fi
-    mkdir -p "$ROOT/bin"
-    (cd "$forge_root" && go build -o "$KLT_FORGE" ./cmd/forge/)
+    mkdir -p "$(dirname "$KLT_FORGE")"
+    (cd "$forge_root" && "$KLT_GO" build -o "$KLT_FORGE" ./cmd/forge/)
     echo "[runner] forge built: $KLT_FORGE"
+  elif [[ ! -x "$KLT_FORGE" ]]; then
+    echo "[runner] ERROR: forge binary not found at $KLT_FORGE" >&2
+    exit 1
   fi
 }
 
@@ -70,16 +88,42 @@ on_exit() {
     dump_debug
   fi
   forge_cleanup
+  restore_artifact_ownership
 }
 trap on_exit EXIT
 
 check_deps
 build_forge
 
-SCENARIOS=(
+DEFAULT_SCENARIOS=(
   tests/integration/scenarios/09_managed_enrollment.sh
   tests/integration/scenarios/10_adapter_definition.sh
 )
+
+resolve_scenarios() {
+  if [[ -z "${KLT_SCENARIOS:-}" ]]; then
+    printf '%s\n' "${DEFAULT_SCENARIOS[@]}"
+    return
+  fi
+  local item
+  for item in $KLT_SCENARIOS; do
+    if [[ -f "$item" ]]; then
+      printf '%s\n' "$item"
+    elif [[ -f "tests/integration/scenarios/$item" ]]; then
+      printf '%s\n' "tests/integration/scenarios/$item"
+    else
+      printf '%s\n' "tests/integration/scenarios/${item}"*.sh
+    fi
+  done
+}
+
+mapfile -t SCENARIOS < <(resolve_scenarios)
+for scenario in "${SCENARIOS[@]}"; do
+  [[ -f "$scenario" ]] || {
+    echo "[runner] ERROR: scenario not found: $scenario" >&2
+    exit 1
+  }
+done
 
 PASS=0
 FAIL=0

@@ -71,49 +71,69 @@ detach_xdp() {
   sudo "$KLT_KLSHIELD" detach-xdp --iface "$KLT_XDP_IFACE2" 2>/dev/null || true
 }
 
-_kliq_common_flags() {
-  echo \
-    --state-file="$KLT_STATE_DIR/state.json" \
-    --feedback-file="$KLT_STATE_DIR/feedback.json" \
-    --whitelist="$KLT_ETC_DIR/whitelist.txt" \
-    --db="$KLT_STATE_DIR/kliq.db" \
-    --bpffs-root=/sys/fs/bpf \
-    --interval=1s
+prepare_kliq_runtime() {
+  sudo mkdir -p "$KLT_STATE_DIR" "$KLT_ETC_DIR"
+  sudo cp "$KLT_ROOT/tests/integration/testdata/whitelist.txt" "$KLT_ETC_DIR/whitelist.txt"
+  sudo cp "$KLT_ROOT/tests/integration/testdata/feedback.json" "$KLT_STATE_DIR/feedback.json"
+}
+
+kliq_base_args() {
+  KLIQ_BASE_ARGS=(
+    "--state-file=$KLT_STATE_DIR/state.json"
+    "--feedback-file=$KLT_STATE_DIR/feedback.json"
+    "--whitelist=$KLT_ETC_DIR/whitelist.txt"
+    "--db=$KLT_STATE_DIR/kliq.db"
+    "--bpffs-root=/sys/fs/bpf"
+    "--interval=1s"
+  )
+}
+
+start_kliq_with_args() {
+  local logfile="$1"
+  shift
+  prepare_kliq_runtime
+  kliq_base_args
+  sudo "$KLT_KLIQ" run \
+    "${KLIQ_BASE_ARGS[@]}" \
+    "$@" \
+    > "$logfile" 2>&1 &
+  record_pid kliq "$!"
+  sleep 2
+  local pid
+  pid="$(cat "$KLT_ARTIFACT_DIR/kliq.pid")"
+  if ! kill -0 "$pid" 2>/dev/null; then
+    echo "[ERROR] kliq exited during startup; log follows:" >&2
+    tail -80 "$logfile" >&2 || true
+    return 1
+  fi
 }
 
 start_kliq_dryrun() {
   local logfile="${1:-$KLT_LOG_KLIQ}"
   echo "[proc] starting kliq (dry-run, low thresholds) → $logfile"
-  sudo mkdir -p "$KLT_STATE_DIR" "$KLT_ETC_DIR"
-  sudo cp "$KLT_ROOT/tests/integration/testdata/whitelist.txt" "$KLT_ETC_DIR/whitelist.txt"
-  sudo cp "$KLT_ROOT/tests/integration/testdata/feedback.json" "$KLT_STATE_DIR/feedback.json"
 
-  # shellcheck disable=SC2046
-  sudo "$KLT_KLIQ" \
-    $(_kliq_common_flags) \
+  start_kliq_with_args "$logfile" \
+    --adapter=klshield \
+    --feature-profile=dos-light \
+    --runtime-pdp-mode=shadow \
     --dry-run=true \
     --bootstrap=false \
     --autotune=false \
     --min-pps=1 \
     --trig-pps=5 \
     --trig-syn=5 \
-    --trig-scan=3 \
-    > "$logfile" 2>&1 &
-  record_pid kliq "$!"
-  sleep 2
+    --trig-scan=3
   echo "[proc] kliq running (dry-run) pid=$(cat "$KLT_ARTIFACT_DIR/kliq.pid")"
 }
 
 start_kliq_enforce() {
   local logfile="${1:-$KLT_LOG_KLIQ}"
   echo "[proc] starting kliq (enforce mode, fast thresholds) → $logfile"
-  sudo mkdir -p "$KLT_STATE_DIR" "$KLT_ETC_DIR"
-  sudo cp "$KLT_ROOT/tests/integration/testdata/whitelist.txt" "$KLT_ETC_DIR/whitelist.txt"
-  sudo cp "$KLT_ROOT/tests/integration/testdata/feedback.json" "$KLT_STATE_DIR/feedback.json"
 
-  # shellcheck disable=SC2046
-  sudo "$KLT_KLIQ" \
-    $(_kliq_common_flags) \
+  start_kliq_with_args "$logfile" \
+    --adapter=klshield \
+    --feature-profile=dos-light \
+    --runtime-pdp-mode=shadow \
     --dry-run=false \
     --bootstrap=false \
     --autotune=false \
@@ -128,23 +148,18 @@ start_kliq_enforce() {
     --down-need=5 \
     --soft-ttl=30s \
     --hard-ttl=30s \
-    --block-ttl=30s \
-    > "$logfile" 2>&1 &
-  record_pid kliq "$!"
-  sleep 2
+    --block-ttl=30s
   echo "[proc] kliq running (enforce) pid=$(cat "$KLT_ARTIFACT_DIR/kliq.pid")"
 }
 
 start_kliq_graph() {
   local logfile="${1:-$KLT_LOG_KLIQ}"
   echo "[proc] starting kliq (graph-learning, fast promotion) → $logfile"
-  sudo mkdir -p "$KLT_STATE_DIR" "$KLT_ETC_DIR"
-  sudo cp "$KLT_ROOT/tests/integration/testdata/whitelist.txt" "$KLT_ETC_DIR/whitelist.txt"
-  sudo cp "$KLT_ROOT/tests/integration/testdata/feedback.json" "$KLT_STATE_DIR/feedback.json"
 
-  # shellcheck disable=SC2046
-  sudo "$KLT_KLIQ" \
-    $(_kliq_common_flags) \
+  start_kliq_with_args "$logfile" \
+    --adapter=klshield \
+    --feature-profile=graph-learning \
+    --runtime-pdp-mode=shadow \
     --dry-run=false \
     --bootstrap=false \
     --autotune=false \
@@ -157,19 +172,18 @@ start_kliq_graph() {
     --graph-min-seen=3 \
     --graph-min-windows=1 \
     --graph-min-age=3s \
-    --graph-promote-interval=5s \
-    > "$logfile" 2>&1 &
-  record_pid kliq "$!"
-  sleep 2
+    --graph-promote-interval=5s
   echo "[proc] kliq running (graph) pid=$(cat "$KLT_ARTIFACT_DIR/kliq.pid")"
 }
 
 start_kliq_frozen() {
   local logfile="${1:-$KLT_LOG_KLIQ}"
   echo "[proc] starting kliq (frozen-observe)"
-  # shellcheck disable=SC2046
-  sudo "$KLT_KLIQ" \
-    $(_kliq_common_flags) \
+
+  start_kliq_with_args "$logfile" \
+    --adapter=klshield \
+    --feature-profile=graph-enforce \
+    --runtime-pdp-mode=shadow \
     --dry-run=false \
     --bootstrap=false \
     --autotune=false \
@@ -180,10 +194,7 @@ start_kliq_frozen() {
     --graph \
     --graph-mode=frozen-observe \
     --graph-freeze-action=signal \
-    --graph-freeze-min-severity=0 \
-    > "$logfile" 2>&1 &
-  record_pid kliq "$!"
-  sleep 2
+    --graph-freeze-min-severity=0
   echo "[proc] kliq running (frozen-observe) pid=$(cat "$KLT_ARTIFACT_DIR/kliq.pid")"
 }
 
@@ -192,18 +203,15 @@ start_kliq_frozen() {
 
 start_forge() {
   echo "[proc] starting forge serve on $KLT_FORGE_ADDR"
-  mkdir -p "$(dirname "$KLT_FORGE_DB")"
   "$KLT_FORGE" serve \
-    --addr    "$KLT_FORGE_ADDR" \
-    --db      "$KLT_FORGE_DB" \
-    --admin-key "$KLT_FORGE_ADMIN_KEY" \
+    --addr "$KLT_FORGE_ADDR" \
     --adapters "${KLT_FORGE_ADAPTERS:-}" \
+    --profiles "${KLT_FORGE_PROFILES:-}" \
     > "$KLT_FORGE_LOG" 2>&1 &
   record_pid forge "$!"
   # Wait for forge to be ready.
   local i=0
-  while ! curl -sf "$KLT_FORGE_URL/api/v1/nodes" \
-      -H "Authorization: Bearer $KLT_FORGE_ADMIN_KEY" >/dev/null 2>&1; do
+  while ! curl -sf "$KLT_FORGE_URL/healthz" >/dev/null 2>&1; do
     sleep 0.3
     i=$((i + 1))
     [[ $i -lt 20 ]] || { echo "[ERROR] forge did not start"; cat "$KLT_FORGE_LOG" >&2; exit 1; }
@@ -217,67 +225,59 @@ stop_forge() {
 
 forge_admin() {
   curl -sf \
-    -H "Authorization: Bearer $KLT_FORGE_ADMIN_KEY" \
     -H "Content-Type: application/json" \
     "$@"
 }
 
-forge_create_token() {
-  local node_id="${1:-}"
-  local args=()
-  [[ -n "$node_id" ]] && args+=(--node "$node_id")
-  "$KLT_FORGE" token create \
-    --db "$KLT_FORGE_DB" \
-    "${args[@]}" \
-    --expires 1h \
-    2>/dev/null | grep '^TOKEN=' | cut -d= -f2-
-}
-
 # Simulate KLIQ enrollment via curl (no BPF required).
-# $1 = node_id, $2 = token, $3 = plugin_adapter (default: builtin-klshield)
+# $1 = node_id
 forge_simulate_enroll() {
   local node_id="$1"
-  local token="$2"
-  local plugin="${3:-builtin-klshield}"
 
   curl -sf -X POST "$KLT_FORGE_URL/api/v1/nodes/enroll" \
-    -H "Authorization: Bearer $token" \
     -H "Content-Type: application/json" \
     -d "{
       \"node_id\": \"$node_id\",
       \"mode\": \"managed\",
-      \"kliq_version\": \"it-test\",
-      \"inventory\": {
-        \"apiVersion\": \"kernloom.io/v1alpha1\",
-        \"kind\": \"ComponentRuntimeInventory\",
-        \"metadata\": {\"id\": \"$plugin-$node_id\"},
-        \"controlled_by\": {
-          \"node_id\": \"$node_id\",
-          \"plugin_adapter\": \"$plugin\"
-        },
-        \"component\": {\"product\": \"kernloom-shield\"},
-        \"roles\": [\"pep\", \"sensor\"],
-        \"profiles\": [\"network.l3_l4_filter\"]
-      }
+      \"enroll_key\": \"it-test\"
     }"
 }
 
-# Simulate a KLIQ heartbeat via curl.
-# $1 = node_id, $2 = session_token
-forge_simulate_heartbeat() {
-  local node_id="$1"
-  local session_token="$2"
-  curl -sf -X POST "$KLT_FORGE_URL/api/v1/nodes/$node_id/heartbeat" \
-    -H "Authorization: Bearer $session_token" \
-    -H "Content-Type: application/json" \
-    -d "{\"node_id\": \"$node_id\", \"timestamp\": \"$(date -u +%Y-%m-%dT%H:%M:%SZ)\"}"
-}
-
 # Pull the runtime bundle via curl.
-# $1 = node_id, $2 = session_token
+# $1 = node_id
 forge_pull_bundle() {
   local node_id="$1"
-  local session_token="$2"
-  curl -sf "$KLT_FORGE_URL/api/v1/nodes/$node_id/runtime-bundle" \
-    -H "Authorization: Bearer $session_token"
+  curl -sf "$KLT_FORGE_URL/api/v1/nodes/$node_id/runtime-bundle"
+}
+
+# $1 = node_id
+forge_post_bundle_ack() {
+  local node_id="$1"
+  curl -sf -X POST "$KLT_FORGE_URL/api/v1/nodes/$node_id/bundle-acks" \
+    -H "Content-Type: application/json" \
+    -d '{"status":"activated","generation":1}'
+}
+
+# $1 = node_id
+forge_post_receipts() {
+  local node_id="$1"
+  curl -sf -X POST "$KLT_FORGE_URL/api/v1/nodes/$node_id/receipts" \
+    -H "Content-Type: application/json" \
+    -d '{"receipts":[{"id":"receipt-it-1","status":"applied"}]}'
+}
+
+# $1 = node_id
+forge_post_findings() {
+  local node_id="$1"
+  curl -sf -X POST "$KLT_FORGE_URL/api/v1/nodes/$node_id/findings" \
+    -H "Content-Type: application/json" \
+    -d '[{"id":"finding-it-1","severity":"info"}]'
+}
+
+# $1 = node_id
+forge_post_baseline_proposal() {
+  local node_id="$1"
+  curl -sf -X POST "$KLT_FORGE_URL/api/v1/nodes/$node_id/baseline-proposals" \
+    -H "Content-Type: application/json" \
+    -d '{"proposal":"it"}'
 }

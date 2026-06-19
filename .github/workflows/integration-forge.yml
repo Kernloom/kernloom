@@ -58,6 +58,7 @@ jobs:
         env:
           KLT_FORGE_ROOT: ${{ github.workspace }}/kernloom-forge
           KLT_FORGE: ${{ github.workspace }}/kernloom/bin/forge
+          KLT_ARTIFACT_DIR: /tmp/kernloom-integration-artifacts/${{ github.run_id }}
         run: |
           cd kernloom
           bash tests/integration/run-forge.sh
@@ -67,5 +68,5 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: forge-it-artifacts
-          path: kernloom/tests/integration/artifacts/
+          path: /tmp/kernloom-integration-artifacts/${{ github.run_id }}/
           retention-days: 3

@@ -97,7 +97,7 @@ touch "$BAD_STOP"; wait "$BAD_PID" 2>/dev/null || true; rm -f "$BAD_STOP"
 echo "[07] good source: $GOOD_OK ok / $GOOD_FAIL failed out of 10 checks"
 
 assert_contains "$LOG07" "${KLT_IP_BAD}"
-assert_contains "$LOG07" "ACTION ip=${KLT_IP_BAD}"
+assert_contains "$LOG07" "STATE ${KLT_IP_BAD} .*->(RATE_SOFT|RATE_HARD|BLOCK)|ACTION-RECEIPT.*${KLT_IP_BAD}"
 
 stop_kliq
 

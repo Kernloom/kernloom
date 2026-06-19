@@ -1069,6 +1069,19 @@ func main() {
 			}
 		}()
 
+		defer func() {
+			if n, err := rlLearner.FlushDirty(context.Background()); err != nil {
+				kliqLog.Printf("WARN: shutdown flush relationships: %v", err)
+			} else if n > 0 {
+				kliqLog.Printf("Graph shutdown flush: relationships=%d", n)
+			}
+			if n, err := gpAdapter.BaselineEngine().FlushDirty(context.Background(), ss); err != nil {
+				kliqLog.Printf("WARN: shutdown flush baselines: %v", err)
+			} else if n > 0 {
+				kliqLog.Printf("Graph shutdown flush: baselines=%d", n)
+			}
+		}()
+
 		gctx, gcancel := context.WithCancel(context.Background())
 
 		startedFlowTelemetry := 0

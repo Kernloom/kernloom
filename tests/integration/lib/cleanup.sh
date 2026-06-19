@@ -55,8 +55,17 @@ cleanup_all() {
   echo "[cleanup] removing test runtime dirs"
   # State and etc are now inside KLT_ARTIFACT_DIR — removing the artifact dir
   # covers them. Remove explicitly in case KLT_ARTIFACT_DIR is overridden.
-  sudo rm -rf "${KLT_STATE_DIR:-}" 2>/dev/null || true
-  sudo rm -rf "${KLT_ETC_DIR:-}"   2>/dev/null || true
+  for dir in "${KLT_STATE_DIR:-}" "${KLT_ETC_DIR:-}"; do
+    [[ -n "$dir" ]] || continue
+    case "$dir" in
+      "$KLT_ARTIFACT_DIR"/*|/tmp/kernloom-*)
+        sudo rm -rf "$dir" 2>/dev/null || true
+        ;;
+      *)
+        echo "[cleanup] refusing to remove non-artifact runtime dir: $dir"
+        ;;
+    esac
+  done
 
   set -e
   echo "[cleanup] done"
