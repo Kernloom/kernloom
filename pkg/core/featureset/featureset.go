@@ -19,9 +19,6 @@ const (
 	ProfileGraphLearning RuntimeProfile = "graph-learning"
 	// ProfileGraphEnforce: graph-learning + tuple-based enforcement.
 	ProfileGraphEnforce RuntimeProfile = "graph-enforce"
-	// ProfileFullLearningExperimental: generic baselines + generic relationship learner
-	// for all adapters (network, HTTP, Ziti, Trust).  Intended for test/lab use.
-	ProfileFullLearningExperimental RuntimeProfile = "full-learning-experimental"
 )
 
 // FeatureSet describes which KLIQ capabilities are active.
@@ -103,22 +100,6 @@ func FeaturesFor(profile RuntimeProfile) FeatureSet {
 			EdgeBaseline:               true,
 			SQLite:                     true,
 			TupleEnforcement:           true,
-			GenericBaseline:            true,
-			GenericRelationshipLearner: true,
-			StateStore:                 true,
-		}
-
-	case ProfileFullLearningExperimental:
-		return FeatureSet{
-			PrimaryEnforcement:         true,
-			UserspaceIQ:                true,
-			SourceHeuristic:            true,
-			GlobalAutotune:             true,
-			SourceBaseline:             true,
-			FlowTelemetry:              true,
-			GraphLearning:              true,
-			EdgeBaseline:               true,
-			SQLite:                     true,
 			GenericBaseline:            true,
 			GenericRelationshipLearner: true,
 			StateStore:                 true,

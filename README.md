@@ -80,7 +80,6 @@ Forge (policy compiler)          kernloom-forge repo
 | `iq-learning` | dos-light + per-source EWMA baseline + state store. |
 | `graph-learning` | iq-learning + relationship telemetry + graph learning + relationship/edge baselines + SQLite. |
 | `graph-enforce` | graph-learning + relationship tuple enforcement when a configured adapter exposes a RelationshipPEP. KLShield implements this with XDP tuple maps. |
-| `full-learning-experimental` | graph-learning + generic relationship/baseline paths for lab use. |
 
 Profiles enable KLIQ subsystems; adapters provide the concrete observations and PEP capabilities. `dos-light` is not intrinsically PPS/SYN/scan-only: those are KLShield/network metrics. `graph-enforce` is not intrinsically XDP-only: XDP is the current KLShield backend for network tuples, while other adapters can use the same graph/RuntimePDP path once they publish relationships and implement matching enforcement capabilities.
 
