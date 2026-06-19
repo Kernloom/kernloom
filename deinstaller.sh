@@ -196,8 +196,12 @@ if [ "$KEEP_STATE" -eq 1 ]; then
 else
   log "Removing runtime state from $IQ_VAR_DIR"
   remove_file "$IQ_VAR_DIR/state.json"
+  remove_file "$IQ_VAR_DIR/state.json.bak"
+  remove_file "$IQ_VAR_DIR/state.json.tmp"
   remove_file "$IQ_VAR_DIR/feedback.json"
-  remove_file "$IQ_VAR_DIR/kliq.db"
+  remove_file "$IQ_VAR_DIR/kliq-state.db"
+  remove_file "$IQ_VAR_DIR/kliq-state.db-shm"
+  remove_file "$IQ_VAR_DIR/kliq-state.db-wal"
   remove_dir  "$IQ_VAR_DIR"
   # Remove /var/lib/kernloom only if now empty
   VAR_BASE="/var/lib/kernloom"

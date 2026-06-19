@@ -4,10 +4,10 @@ set -eu
 # Kernloom installer
 #
 # Examples:
-#   curl -fsSL https://raw.githubusercontent.com/Kernloom/kernloom/main/install.sh | sudo sh
-#   curl -fsSL https://raw.githubusercontent.com/Kernloom/kernloom/main/install.sh | sudo sh -s -- klshield
-#   curl -fsSL https://raw.githubusercontent.com/Kernloom/kernloom/main/install.sh | sudo KERNLOOM_VERSION=v0.0.1 sh
-#   curl -fsSL https://raw.githubusercontent.com/Kernloom/kernloom/main/install.sh | sh -s -- --prefix "$HOME/.local/bin"
+#   curl -fsSL https://raw.githubusercontent.com/Kernloom/kernloom/master/install.sh | sudo sh
+#   curl -fsSL https://raw.githubusercontent.com/Kernloom/kernloom/master/install.sh | sudo sh -s -- klshield
+#   curl -fsSL https://raw.githubusercontent.com/Kernloom/kernloom/master/install.sh | sudo KERNLOOM_VERSION=v0.0.1 sh
+#   curl -fsSL https://raw.githubusercontent.com/Kernloom/kernloom/master/install.sh | sh -s -- --prefix "$HOME/.local/bin"
 
 REPO="Kernloom/kernloom"
 COMPONENT="all"            # all | kliq | klshield
@@ -370,9 +370,9 @@ echo "     sudo cp $IQ_PDP_DIR/ziti-controller-bootstrap.yaml \\"
 echo "             $IQ_PDP_DIR/node.yaml"
 echo ""
 echo "  3. Start kliq (14-day bootstrap, dry-run):"
-echo "     sudo $PREFIX/kliq \\"
+echo "     sudo $PREFIX/kliq run \\"
 echo "          --pdp-config=$IQ_PDP_DIR/node.yaml \\"
 echo "          --dry-run=true --whitelist-learn=true"
 echo ""
-echo "  4. Full help:  $PREFIX/kliq --help"
+echo "  4. Full help:  $PREFIX/kliq run --help"
 echo "                 $PREFIX/klshield"
