@@ -294,6 +294,9 @@ Expected result:
 - The first `AUTOTUNE applied` step should be around `100 -> 90`.
 - A final value of `81` is okay if a second 8-second cycle also ran.
 - Values near `99` would indicate the old EWMA regression.
+- The scenario reads the final PPS threshold from the generic state path
+  `active.tuning_scopes[*].metrics["network.packets_per_second"].threshold`
+  and falls back to legacy `active.trig.trig_pps` for old state files.
 
 ### 07 Good/Bad Isolation
 
@@ -477,6 +480,10 @@ Graph relationships are learned in memory by KLIQ and are flushed to SQLite peri
 `trig_pps=81` in scenario 06
 
 This is allowed if two bootstrap cycles ran: `100 -> 90 -> 81`. The test therefore checks the first `AUTOTUNE applied` step.
+
+`trig_pps=0` in scenario 06
+
+The test could not read a PPS threshold from `state.json`. Check whether the state file contains `active.tuning_scopes` with `network.packets_per_second`; current KLIQ no longer writes the old top-level `active.trig` mirror for new state files.
 
 Artifacts in the repository
 

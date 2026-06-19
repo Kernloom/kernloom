@@ -66,9 +66,32 @@ fi
 NEW_PPS=$(python3 -c "
 import json, sys
 st = json.load(open('$STATE'))
-sc = st['active']['sample_count']
-trig = st['active']['trig']['trig_pps']
-print(f'{trig:.2f}')
+active = st.get('active', {})
+
+def metric_pps_from_scope(scope):
+    metrics = scope.get('metrics') or {}
+    metric = metrics.get('network.packets_per_second') or {}
+    return metric.get('threshold')
+
+# New generic state writes adapter-scoped metric thresholds. Keep the legacy
+# active.trig fallback so the scenario can still validate old state files.
+trig = None
+scopes = active.get('tuning_scopes') or {}
+if 'klshield:network' in scopes:
+    trig = metric_pps_from_scope(scopes['klshield:network'])
+if trig is None:
+    for scope in scopes.values():
+        trig = metric_pps_from_scope(scope)
+        if trig is not None:
+            break
+if trig is None:
+    trig = ((active.get('trig') or {}).get('trig_pps'))
+if trig is None and st.get('history'):
+    metrics = (st['history'][-1].get('metric_thresholds') or {})
+    trig = metrics.get('network.packets_per_second')
+if trig is None:
+    raise KeyError('network.packets_per_second threshold not found in state')
+print(f'{float(trig):.2f}')
 " 2>/dev/null || echo "0")
 
 echo "[06] final trig_pps=$NEW_PPS (started at 100, maxDown=10% per bootstrap cycle)"
