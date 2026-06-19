@@ -7,6 +7,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/kernloom/kernloom/iq/internal/actionbroker"
@@ -67,6 +68,41 @@ func (e *brokeredActionExecutor) ApplySource(target adapterruntime.SourceTarget,
 
 func (e *brokeredActionExecutor) ApplyDeEnforceSource(target adapterruntime.SourceTarget, st fsm.State, params adapterruntime.EnforcementParams, now time.Time) fsm.State {
 	return e.sourceExecutor.ApplyDeEnforceSource(target, st, params, now)
+}
+
+func (e *brokeredActionExecutor) ApplySourceObserveOverride(target adapterruntime.SourceTarget, st fsm.State, params adapterruntime.EnforcementParams, now time.Time, reason string) (fsm.State, actions.ActionResult) {
+	if target.SourceID == "" {
+		target.SourceID = target.Subject.ID
+	}
+	resolution := actions.ActionResolution{
+		ProposalID:       "operator-override",
+		DecisionID:       "operator-" + now.UTC().Format(time.RFC3339Nano) + "-" + target.SourceID,
+		Allowed:          true,
+		RequestedAction:  "operator.observe",
+		RequestedLevel:   "observe",
+		ExecutableAction: "operator.observe",
+		ExecutableLevel:  "observe",
+		Target: actions.ActionTarget{
+			Granularity: actions.TargetGranularitySource,
+			Value:       target.SourceID,
+			Attributes:  copyStringMap(target.Attributes),
+		},
+		DenyReason: reason,
+		PolicyID:   "operator.override",
+	}
+	next, result := e.sourceExecutor.ApplySource(target, st, resolution, params, now)
+	receipt := decision.NewEnforcementReceipt(resolution.DecisionID, e.nodeID, "kliq-source-pep", receiptStatusForActionResult(result))
+	receipt.AppliedAt = now.UTC()
+	receipt.Action = resolution.ExecutableAction
+	receipt.Target = actions.TargetGranularitySource + ":" + target.SourceID
+	if result.Reason != "" {
+		receipt.SetMessage(result.Reason)
+	} else if reason != "" {
+		receipt.SetMessage(reason)
+	}
+	logEnforcementReceipt(receipt)
+	e.persistReceipt(receipt)
+	return next, result
 }
 
 func (e *brokeredActionExecutor) ApplyRelationship(target adapterruntime.RelationshipTarget, r actions.ActionResolution, now time.Time) actions.ActionResult {
@@ -195,6 +231,17 @@ func relationshipSkippedResult(r actions.ActionResolution, now time.Time, reason
 	}
 }
 
+func receiptStatusForActionResult(result actions.ActionResult) decision.ReceiptStatus {
+	switch result.Status {
+	case "failed":
+		return decision.StatusFailed
+	case "denied", "skipped":
+		return decision.StatusSkipped
+	default:
+		return decision.StatusApplied
+	}
+}
+
 type applyContext struct {
 	target     adapterruntime.SourceTarget
 	state      fsm.State
@@ -211,12 +258,18 @@ type applyOutcome struct {
 type brokeredSourcePEP struct {
 	sourceExecutor *actions.SourceActionExecutor
 	params         func() adapterruntime.EnforcementParams
+	mu             sync.Mutex
+	currentTokens  map[string]string
 	active         *applyContext
 	last           applyOutcome
 }
 
 func newBrokeredSourcePEP(sourceExecutor *actions.SourceActionExecutor, params func() adapterruntime.EnforcementParams) *brokeredSourcePEP {
-	return &brokeredSourcePEP{sourceExecutor: sourceExecutor, params: params}
+	return &brokeredSourcePEP{
+		sourceExecutor: sourceExecutor,
+		params:         params,
+		currentTokens:  map[string]string{},
+	}
 }
 
 func (p *brokeredSourcePEP) AdapterID() string { return "kliq-source-pep" }
@@ -242,10 +295,16 @@ func (p *brokeredSourcePEP) Apply(_ context.Context, lease decision.ActionLease)
 	if p.last.result.Status == "failed" {
 		return "", fmt.Errorf("%s", p.last.result.Reason)
 	}
+	p.setCurrentFencingToken(lease)
 	return lease.FencingToken, nil
 }
 
 func (p *brokeredSourcePEP) CurrentFencingToken(_ context.Context, lease decision.ActionLease) (string, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if token := p.currentTokens[leaseFencingKey(lease)]; token != "" {
+		return token, nil
+	}
 	return lease.FencingToken, nil
 }
 
@@ -263,17 +322,35 @@ func (p *brokeredSourcePEP) Revert(_ context.Context, lease decision.ActionLease
 		Subject:    observation.EntityRef{ID: target.Value},
 		Attributes: copyStringMap(target.Attributes),
 	}, fsm.State{Level: actions.ParseFSMLevel(lease.Level)}, params, time.Now().UTC())
+	p.clearCurrentFencingToken(lease)
 	return nil
+}
+
+func (p *brokeredSourcePEP) setCurrentFencingToken(lease decision.ActionLease) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.currentTokens[leaseFencingKey(lease)] = lease.FencingToken
+}
+
+func (p *brokeredSourcePEP) clearCurrentFencingToken(lease decision.ActionLease) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	key := leaseFencingKey(lease)
+	if p.currentTokens[key] == lease.FencingToken {
+		delete(p.currentTokens, key)
+	}
 }
 
 type brokeredRelationshipPEP struct {
 	pep    adapterruntime.RelationshipPEP
+	mu     sync.Mutex
+	tokens map[string]string
 	active *adapterruntime.RelationshipTarget
 	last   actions.ActionResult
 }
 
 func newBrokeredRelationshipPEP(pep adapterruntime.RelationshipPEP) *brokeredRelationshipPEP {
-	return &brokeredRelationshipPEP{pep: pep}
+	return &brokeredRelationshipPEP{pep: pep, tokens: map[string]string{}}
 }
 
 func (p *brokeredRelationshipPEP) AdapterID() string { return "kliq-relationship-pep" }
@@ -315,10 +392,16 @@ func (p *brokeredRelationshipPEP) Apply(_ context.Context, lease decision.Action
 		Status:     "applied",
 		AppliedAt:  time.Now().UTC(),
 	}
+	p.setCurrentFencingToken(lease)
 	return lease.FencingToken, nil
 }
 
 func (p *brokeredRelationshipPEP) CurrentFencingToken(_ context.Context, lease decision.ActionLease) (string, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if token := p.tokens[leaseFencingKey(lease)]; token != "" {
+		return token, nil
+	}
 	return lease.FencingToken, nil
 }
 
@@ -330,7 +413,37 @@ func (p *brokeredRelationshipPEP) Revert(_ context.Context, lease decision.Actio
 	if !ok {
 		return fmt.Errorf("relationship revert target invalid for lease %s", lease.LeaseID)
 	}
-	return p.pep.AllowRelationship(target)
+	if err := p.pep.AllowRelationship(target); err != nil {
+		return err
+	}
+	p.clearCurrentFencingToken(lease)
+	return nil
+}
+
+func (p *brokeredRelationshipPEP) setCurrentFencingToken(lease decision.ActionLease) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.tokens[leaseFencingKey(lease)] = lease.FencingToken
+}
+
+func (p *brokeredRelationshipPEP) clearCurrentFencingToken(lease decision.ActionLease) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	key := leaseFencingKey(lease)
+	if p.tokens[key] == lease.FencingToken {
+		delete(p.tokens, key)
+	}
+}
+
+func leaseFencingKey(lease decision.ActionLease) string {
+	if lease.Target != "" {
+		return lease.Target
+	}
+	target := actionbroker.TargetFromLease(lease)
+	if target.Granularity != "" {
+		return target.Granularity + ":" + target.Value
+	}
+	return target.Value
 }
 
 // persistReceipt durably stores a receipt so it can be uploaded to Forge later.

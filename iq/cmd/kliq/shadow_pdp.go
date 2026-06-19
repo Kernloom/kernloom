@@ -21,6 +21,7 @@ package main
 import (
 	"context"
 	"log"
+	"sort"
 	"sync"
 	"time"
 
@@ -105,7 +106,7 @@ func (s *shadowPDPRunner) getMode() (runtimePDPMode, chan<- actions.ActionPropos
 //
 // In shadow mode: decisions are logged only.
 // In active mode: decisions become ActionProposals fed to the broker path.
-func startShadowPDP(ctx context.Context, bus adapterruntime.EventBus, runner *shadowPDPRunner) {
+func startShadowPDP(ctx context.Context, bus adapterruntime.EventBus, runner *shadowPDPRunner, facts runtimePDPFactProvider) {
 	sigCh := bus.SubscribeSignals(256)
 	go func() {
 		windowDur := 5 * time.Second
@@ -128,11 +129,20 @@ func startShadowPDP(ctx context.Context, bus adapterruntime.EventBus, runner *sh
 					if a.SubjectID != subjectID {
 						continue
 					}
-					entityRef := contracts.EntityRef{
-						Kind: "ip",
-						ID:   subjectID,
-					}
+					entityRef := runtimeEntityRefForSignalGroup(subjectID, sigs)
 					lra := a.ToContract(entityRef, runner.nodeID)
+					lra.Metadata.IssuedAt = now
+					contextSnapshot := runtimepdp.ContextSnapshot{
+						Signals: runtimeSignalGroupFacts(sigs),
+					}
+					if facts != nil {
+						snapshot, err := facts.CandidateFacts(context.Background(), runner.nodeID, metricsForRuntimeSubject(entityRef), now)
+						contextSnapshot.Baseline = snapshot.Baseline
+						contextSnapshot.Graph = snapshot.Graph
+						if err != nil {
+							contextSnapshot.Adapter = map[string]any{"fact_lookup_error": err.Error()}
+						}
+					}
 
 					if pdp == nil {
 						if a.Score >= 30 && mode == PDPModeShadow {
@@ -146,6 +156,7 @@ func startShadowPDP(ctx context.Context, bus adapterruntime.EventBus, runner *sh
 						NodeID:  runner.nodeID,
 						Subject: entityRef,
 						Risk:    lra,
+						Context: contextSnapshot,
 						Now:     now,
 					})
 					if err != nil {
@@ -201,4 +212,49 @@ func startShadowPDP(ctx context.Context, bus adapterruntime.EventBus, runner *sh
 			}
 		}
 	}()
+}
+
+func runtimeEntityRefForSignalGroup(subjectID string, sigs []signal.Signal) contracts.EntityRef {
+	ref := contracts.EntityRef{Kind: "source", ID: subjectID}
+	for _, sig := range sigs {
+		if sig.Subject.ID == "" {
+			continue
+		}
+		ref.ID = sig.Subject.ID
+		if sig.Subject.Kind != "" {
+			ref.Kind = string(sig.Subject.Kind)
+		}
+		if sig.Subject.Namespace != "" {
+			ref.Namespace = sig.Subject.Namespace
+		}
+		return ref
+	}
+	return ref
+}
+
+func runtimeSignalGroupFacts(sigs []signal.Signal) map[string]any {
+	out := map[string]any{
+		"count": len(sigs),
+	}
+	types := map[string]int{}
+	reasons := map[string]bool{}
+	maxScore := 0
+	for _, sig := range sigs {
+		types[string(sig.Type)]++
+		if sig.Score > maxScore {
+			maxScore = sig.Score
+		}
+		for _, reason := range sig.ReasonCodes {
+			reasons[reason] = true
+		}
+	}
+	reasonList := make([]string, 0, len(reasons))
+	for reason := range reasons {
+		reasonList = append(reasonList, reason)
+	}
+	sort.Strings(reasonList)
+	out["types"] = types
+	out["max_score"] = maxScore
+	out["reason_codes"] = reasonList
+	return out
 }

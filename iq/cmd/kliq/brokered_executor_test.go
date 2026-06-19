@@ -11,6 +11,7 @@ import (
 	"github.com/kernloom/kernloom/iq/internal/actionbroker"
 	"github.com/kernloom/kernloom/iq/internal/actions"
 	"github.com/kernloom/kernloom/pkg/adapterruntime"
+	"github.com/kernloom/kernloom/pkg/core/fsm"
 	sstore "github.com/kernloom/kernloom/pkg/statestore/sqlite"
 )
 
@@ -85,5 +86,71 @@ func TestBrokeredRelationshipApplyAndRevert(t *testing.T) {
 	}
 	if len(receipts) != 2 {
 		t.Fatalf("expected apply + revert receipts, got %d: %#v", len(receipts), receipts)
+	}
+}
+
+func TestBrokeredSourceFencingPreventsOlderLeaseRevertingNewerLevel(t *testing.T) {
+	store, err := sstore.Open(sstore.DefaultConfig(":memory:"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer store.Close()
+
+	start := time.Date(2026, 6, 19, 10, 10, 0, 0, time.UTC)
+	now := start
+	pep := &recordingSourcePEP{}
+	sourceExecutor := actions.NewSourceActionExecutor(pep)
+	brokerPEP := newBrokeredSourcePEP(sourceExecutor, func() adapterruntime.EnforcementParams {
+		return adapterruntime.EnforcementParams{
+			SoftTTL:  time.Second,
+			HardTTL:  5 * time.Second,
+			BlockTTL: 5 * time.Second,
+		}
+	})
+	sourceBroker, err := actionbroker.New(actionbroker.Config{
+		NodeID: "node-1",
+		Store:  store,
+		PEP:    brokerPEP,
+		Now:    func() time.Time { return now },
+	})
+	if err != nil {
+		t.Fatalf("new source broker: %v", err)
+	}
+	executor := newBrokeredActionExecutor(sourceExecutor, sourceBroker, brokerPEP, nil, nil, store, "node-1")
+	target := adapterruntime.SourceTarget{SourceID: "10.0.0.1"}
+
+	state, result := executor.ApplySource(target, fsm.State{}, sourceResolution("decision-soft", "soft", time.Second), adapterruntime.EnforcementParams{SoftTTL: time.Second}, now)
+	if result.Status != "applied" || state.Level != fsm.LevelSoft {
+		t.Fatalf("soft apply: state=%s result=%#v", state.Level, result)
+	}
+
+	now = start.Add(500 * time.Millisecond)
+	state, result = executor.ApplySource(target, state, sourceResolution("decision-hard", "hard", 5*time.Second), adapterruntime.EnforcementParams{HardTTL: 5 * time.Second}, now)
+	if result.Status != "applied" || state.Level != fsm.LevelHard {
+		t.Fatalf("hard apply: state=%s result=%#v", state.Level, result)
+	}
+
+	now = start.Add(2 * time.Second)
+	executor.RevertExpired(context.Background(), now)
+	if len(pep.levels) != 2 {
+		t.Fatalf("old soft lease must not revert newer hard lease, transitions=%#v", pep.levels)
+	}
+	if pep.levels[0] != fsm.LevelSoft || pep.levels[1] != fsm.LevelHard {
+		t.Fatalf("unexpected transitions: %#v", pep.levels)
+	}
+}
+
+func sourceResolution(decisionID, level string, ttl time.Duration) actions.ActionResolution {
+	return actions.ActionResolution{
+		ProposalID:       "proposal-" + decisionID,
+		DecisionID:       decisionID,
+		Allowed:          true,
+		RequestedAction:  "enforce.traffic.rate_limit",
+		RequestedLevel:   level,
+		ExecutableAction: "enforce.traffic.rate_limit",
+		ExecutableLevel:  level,
+		Target:           actions.ActionTarget{Granularity: actions.TargetGranularitySource, Value: "10.0.0.1"},
+		TTL:              ttl,
+		PolicyID:         "policy-test",
 	}
 }

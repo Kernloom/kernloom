@@ -1,6 +1,6 @@
 # Kernloom Technical Debt Review
 
-Date: 2026-06-18
+Date: 2026-06-19
 
 Scope: static code and architecture review of `kernloom`, with `.claude/00-agent-brief.md`,
 `.claude/14-ai-implementation-backlog.md`, `.claude/15-migration-from-current-codebase.md`,
@@ -65,31 +65,40 @@ Recommended fix:
 - Keep `klshield-light` as a CLI-only compatibility alias or replace it with a capability view once
   runtime profiles are capability-based.
 
-### 3. Action Broker is only partially live
+### 3. Action Broker is live, but operational hardening remains
 
 `iq/internal/actionbroker` now models leases, receipts, and fencing-aware revert behavior. KLIQ now
 routes TTL-bounded RuntimePDP/CEL source enforcement through a brokered executor that journals leases and
-logs receipts before delegating to the existing KLShield/netfilter PEP path.
+logs/persists receipts before delegating to the configured source PEP path. Relationship/tuple
+enforcement uses the same broker/receipt/revert path when an adapter exposes a RelationshipPEP. Explicit
+operator cleanup paths such as SIGUSR1 reset and feedback de-enforcement now produce observe-override
+receipts instead of silently calling the PEP.
 
 Relevant files:
 
 - `iq/internal/actionbroker/broker.go`
 - `iq/internal/actions/executor.go`
+- `iq/cmd/kliq/brokered_executor.go`
 - `iq/cmd/kliq/kliq.go`
 - `pkg/statestore/sqlite/action_leases.go`
+- `pkg/statestore/sqlite/receipts.go`
 - `pkg/core/decision/decision.go`
 
 Risk:
 
-- Tuple enforcement and explicit de-enforcement are still lease-less compatibility paths.
-- Receipts are logged but not yet persisted/uploaded as a durable Forge-facing queue.
-- Expiry revert is modeled, but full runtime-state-map revert wiring still needs a dedicated pass.
+- Operator cleanup receipts are intentionally lease-less because they revert enforcement to `observe`;
+  they are audit records, not expiring leases.
+- Receipt upload retry is now durable for `pending` and `failed`, but needs managed-mode integration
+  coverage against Forge outages and restarts.
+- Expired leases are reverted by the broker, but state-map reconciliation after out-of-band adapter
+  changes still needs deeper runtime tests.
 
 Recommended fix:
 
-- Persist receipts or an upload queue, not only lease records.
-- Route tuple enforcement through a broker-compatible PEP once tuple leases have a target model.
-- Wire expiry revert to runtime FSM state maps or make lease expiry explicitly advisory.
+- Add restart/outage integration tests for pending/failed receipt upload retry.
+- Add adapter-state reconciliation tests for source and relationship lease expiry.
+- Keep non-expiring operator cleanup as explicit override receipts unless Forge introduces a first-class
+  operator-decision contract.
 
 ## P1 - High Priority
 
@@ -119,17 +128,26 @@ Recommended fix:
 ### 5. KLIQ command package is doing too much
 
 `iq/cmd/kliq/kliq.go` still orchestrates Forge pull, telemetry, graph, metric pipeline, policy,
-FSM, shadow risk, PEP behavior, and feedback/proposal logic in one command package.
+FSM, PEP behavior, and feedback/proposal logic in one command package. The RuntimePDP mode setup,
+proposal applier, policy-pack update watcher, and signal/graph-anomaly consumer have been pulled into
+`iq/cmd/kliq/runtime_services.go`, so `kliq.go` is now closer to composition for that path.
 
 Risk:
 
 - The canonical pipeline from `.claude/14-ai-implementation-backlog.md` is hard to enforce.
 - Feature additions will keep increasing command-level coupling.
-- Runtime PDP and Action Broker integrations will be harder to test in isolation.
+- Forge bundle application, graph pipeline setup, adapter startup, and the main tick still share one
+  orchestration scope, which keeps integration tests broad and refactors riskier than needed.
 
 Recommended fix:
 
-- Extract runtime services into internal packages:
+- Continue extracting runtime services into smaller units:
+  - `runtime_services.go` already owns RuntimePDP startup, proposal application, pack updates, and the
+    signal consumer.
+  - Next: move graph pipeline lifecycle/setup out of `kliq.go`.
+  - Next: move adapter binding/startup into a runtime adapter service.
+  - Next: move the tick body into a service that accepts already-built dependencies.
+- Longer term, move mature units into internal packages:
   - `internal/forgeagent`
   - `internal/runtimepdp`
   - `internal/riskengine`
@@ -137,22 +155,29 @@ Recommended fix:
   - `internal/proposals`
 - Keep `cmd/kliq` as composition, config loading, and CLI surface.
 
-### 6. Local risk assessment is not yet live-wired into Runtime PDP
+### 6. Local risk assessment is live-wired, but still local-only
 
 `iq/internal/localrisk` now turns riskaggregator output into an explainable assessment with level,
 confidence, completeness, domains, contributions, missing inputs, validity window, and model
-reference. It can now convert to `contracts.LocalRiskAssessment`. The current runtime tick does not
-yet feed this into Runtime PDP.
+reference. KLIQ now feeds this into RuntimePDP both from the bus-based signal window and from the
+synchronous candidate path; candidate metrics are converted into generic local signals before producing a
+`contracts.LocalRiskAssessment`.
 
 Risk:
 
-- Runtime PDP decisions are not active in the live KLIQ loop yet.
-- Missing inputs and confidence are not yet surfaced to Forge or feedback/proposal flows.
+- Risk semantics are still code-configured (`max_score`, fixed level thresholds, local signal scoring);
+  there is no signed/declarative `RuntimeRiskModel` artifact yet.
+- Missing inputs are still not populated from an explicit required-context registry.
+- Forge reporting does not yet expose the full local-risk contribution list for every decision path.
+- Cross-node/global risk is still outside the local RuntimePDP input path.
 
 Recommended fix:
 
-- Feed pipeline risk outputs into `iq/internal/runtimepdp`.
-- Surface the resulting `contracts.RuntimeDecision` and risk assessment in Forge reports.
+- Define a contracts-based `RuntimeRiskModel` that declares level thresholds, domain weights, signal
+  overrides, freshness, missing-input handling, and model version.
+- Define a context registry that can mark required risk inputs as present/missing.
+- Surface RuntimeDecision risk contributions in Forge findings/receipts where useful.
+- Keep global/correlate risk as additional signals feeding the same localrisk aggregation model.
 
 ### 7. Runtime PDP live path still needs broader contract hardening
 
@@ -166,6 +191,7 @@ paths no longer use the old FSM or graph logic as an enforcement authority.
 Relevant files:
 
 - `iq/cmd/kliq/kliq.go`
+- `iq/cmd/kliq/runtime_services.go`
 - `iq/cmd/kliq/runtime_pdp_candidate.go`
 - `iq/internal/runtimepdp/pdp.go`
 
@@ -173,35 +199,34 @@ Remaining risk:
 
 - More adapters need to populate rich generic facts so RuntimePDP policies can cover identity,
   application, DLP, and trust domains as completely as network candidates.
-- Forge/KLIQ conformance fixtures must cover the generic fact variables and action-target fallback
-  behavior.
-- Operational de-enforcement paths such as SIGUSR1 reset and feedback sweeps are still local PEP
-  cleanup controls rather than RuntimePDP-authored decisions.
+- The fact maps are generic at runtime, but there is not yet a formal schema registry describing which
+  adapter emits which fact keys.
+- Runtime bundle ingestion still needs to move fully to `kernloom-contracts` so Forge/KLIQ conformance is
+  checked before activation in every managed-mode path.
 
 Recommended fix:
 
 - Extend adapter fact producers instead of adding adapter-specific logic to KLIQ.
-- Add conformance fixtures for metrics/baseline/graph/fsm CEL variables and source/relationship
-  RuntimeDecision mapping.
-- Decide whether explicit local cleanup controls should remain operator overrides or become
-  RuntimePDP-authored observe/allow decisions with broker receipts.
+- Add a runtime context/fact registry with compatibility checks for adapter facts, baseline scopes, graph
+  predicates, and action targets.
+- Continue adding conformance fixtures around generic fact variables, unsupported capabilities, LKG/offline
+  behavior, and source/relationship RuntimeDecision mapping.
 
 ### 8. Lease and state-store hardening is incomplete
 
-The SQLite state store now has `action_leases`, but the lease lifecycle needs more operational
-coverage.
+The SQLite state store now has `action_leases` and `action_receipts`. The runtime reconciles pending
+leases at startup, reverts expired source/relationship leases during the tick, persists receipts, uploads
+pending/failed receipts in managed mode, and prunes uploaded receipts.
 
 Risk:
 
-- `pending` leases after crash are not reconciled.
-- Receipt upload/persistence is not guaranteed.
-- Store opening is still coupled to existing feature paths in places that should become runtime-wide.
+- Receipt upload retry has unit coverage through the store path, but needs full managed-mode outage tests.
+- Store opening is still coupled to existing command composition in places that should become runtime-wide.
+- Migration tests do not yet cover all old DB versions and interrupted migrations.
 
 Recommended fix:
 
-- Add startup reconciliation for `pending`, `active`, `expired`, `reverted`, `failed`, and `conflict`
-  states.
-- Persist receipt envelopes and upload status.
+- Add managed-mode integration tests for receipt upload failure/retry/prune.
 - Add migration tests for empty DB, old DB, and interrupted migration scenarios.
 
 ### 9. Adapter role split is only partially complete
@@ -301,6 +326,10 @@ Recommended fix:
 ## Recommended Immediate Order
 
 1. Migrate managed RuntimeBundle ingestion to `github.com/kernloom/kernloom-contracts`.
-2. Extend RuntimePDP fact producers for non-network adapters.
-3. Persist/upload enforcement receipts and finish broker support for tuple/de-enforce paths.
-4. Decide the operator-cleanup model for SIGUSR1/feedback de-enforcement and add receipts if kept.
+2. Introduce a runtime fact/context registry for metrics, baselines, graph predicates, adapter facts, and
+   required/missing context.
+3. Extend non-network adapters to publish rich generic facts and relationships against that registry.
+4. Continue shrinking `iq/cmd/kliq`: graph pipeline setup, adapter startup, and the main tick body are the
+   next high-value extraction targets after RuntimePDP/signal handling.
+5. Add managed-mode outage/restart integration tests for bundle validation, receipt retry, and lease
+   reconciliation.

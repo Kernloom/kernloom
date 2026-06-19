@@ -49,9 +49,9 @@ SELECT id, decision_id, lease_id, node_id, adapter_id,
        status, action, target, message, fencing_token,
        applied_at, expires_at
 FROM action_receipts
-WHERE upload_status = ?
+WHERE upload_status IN (?, ?)
 ORDER BY applied_at ASC
-LIMIT ?`, receiptUploadPending, limit)
+LIMIT ?`, receiptUploadPending, receiptUploadFailed, limit)
 	if err != nil {
 		return nil, fmt.Errorf("list pending receipts: %w", err)
 	}

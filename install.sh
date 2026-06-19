@@ -19,7 +19,7 @@ PREFIX="${PREFIX:-}"
 #   bpf/       — BPF object (architecture-independent bytecode)
 #   attested/  — config files measured by IMA (whitelist, frozen graph, policy/pdp YAML)
 # /var/lib/kernloom/iq/ holds runtime state that changes frequently (not attested):
-#   state.json, feedback.json, graph.db
+#   state.json, feedback.json, kliq-state.db
 # Everything under /opt/kernloom/attested/ is IMA-measured by Keylime:
 #   kliq, klshield        — executables (Keylime attests the binaries)
 #   bpf/                  — BPF object
@@ -47,7 +47,7 @@ Usage:
 
 Options:
   --version TAG   Install a specific release tag (default: latest)
-  --prefix DIR    Install directory (default: /usr/local/bin when root,
+  --prefix DIR    Install directory (default: /opt/kernloom/attested when root,
                   otherwise ~/.local/bin)
   -h, --help      Show this help
 
@@ -367,18 +367,21 @@ echo "     sudo $PREFIX/klshield attach-xdp --iface eth0 \\"
 echo "          --obj $SHARE_DIR/xdp_kernloom_shield.bpf.o"
 echo ""
 echo "  2. Choose a PDPConfig profile (see $IQ_PDP_DIR/):"
-echo "     sudo cp $IQ_PDP_DIR/ziti-controller-bootstrap.yaml \\"
-echo "             $IQ_PDP_DIR/node.yaml"
+echo "     Place a profile at $IQ_PDP_DIR/node.yaml"
+echo "     or pass runtime flags directly to kliq."
 echo ""
 echo "  3. Optional: place a LocalPolicyPack or RuntimePolicyPack in:"
 echo "     $IQ_POLICY_DIR"
 echo ""
-echo "  4. Start kliq (14-day bootstrap, dry-run):"
+echo "  4. Start kliq observe-only (14-day bootstrap, dry-run):"
 echo "     sudo $PREFIX/kliq run \\"
 echo "          --pdp-config=$IQ_PDP_DIR/node.yaml \\"
 echo "          --runtime-pdp-mode=shadow \\"
 echo "          --dry-run=true --whitelist-learn=true"
-echo "     Add --policy-file=$IQ_POLICY_DIR/runtime-policy.yaml after creating one."
+echo "     Shadow mode logs RuntimePDP decisions but emits no PEP actions."
+echo "     For real enforcement, create a RuntimePolicyPack and use:"
+echo "          --policy-file=$IQ_POLICY_DIR/runtime-policy.yaml \\"
+echo "          --runtime-pdp-mode=active --dry-run=false"
 echo ""
 echo "  5. Full help:  $PREFIX/kliq run --help"
 echo "                 $PREFIX/klshield"

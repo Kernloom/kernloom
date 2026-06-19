@@ -21,6 +21,7 @@ import (
 // LeaseStore is the durable journal used by the broker.
 type LeaseStore interface {
 	UpsertActionLease(context.Context, decision.ActionLease) error
+	FindActiveActionLease(context.Context, string, string, string, string) (decision.ActionLease, bool, error)
 	ListActionLeasesByStatus(context.Context, decision.ActionLeaseStatus) ([]decision.ActionLease, error)
 	ListExpiredActionLeases(context.Context, time.Time) ([]decision.ActionLease, error)
 	UpdateActionLeaseStatus(context.Context, decision.ActionLease) error
@@ -109,13 +110,24 @@ func (b *Broker) Apply(ctx context.Context, r actions.ActionResolution) (decisio
 			metadata["param."+k] = fmt.Sprint(v)
 		}
 	}
+	target := targetString(r.Target)
+	if lease, ok, err := b.renewActiveLease(ctx, r, decisionID, target, metadata, now); err != nil {
+		receipt.Status = decision.StatusFailed
+		receipt.SetMessage(err.Error())
+		return lease, receipt.SetLease(lease), err
+	} else if ok {
+		receipt.Status = decision.StatusApplied
+		receipt.SetMessage("lease renewed")
+		return lease, receipt.SetLease(lease), nil
+	}
+
 	lease := decision.ActionLease{
 		LeaseID:    "lease-" + generateID(),
 		DecisionID: decisionID,
 		ProposalID: r.ProposalID,
 		NodeID:     b.nodeID,
 		AdapterID:  b.pep.AdapterID(),
-		Target:     targetString(r.Target),
+		Target:     target,
 		Action:     r.ExecutableAction,
 		Level:      r.ExecutableLevel,
 		Status:     decision.ActionLeasePending,
@@ -156,6 +168,40 @@ func (b *Broker) Apply(ctx context.Context, r actions.ActionResolution) (decisio
 	}
 	receipt.Status = decision.StatusApplied
 	return lease, receipt.SetLease(lease), nil
+}
+
+func (b *Broker) renewActiveLease(ctx context.Context, r actions.ActionResolution, decisionID, target string, metadata map[string]string, now time.Time) (decision.ActionLease, bool, error) {
+	existing, ok, err := b.store.FindActiveActionLease(ctx, b.pep.AdapterID(), target, r.ExecutableAction, r.ExecutableLevel)
+	if err != nil || !ok {
+		return existing, false, err
+	}
+	currentToken, err := b.pep.CurrentFencingToken(ctx, existing)
+	if err != nil {
+		return existing, false, err
+	}
+	if currentToken != existing.FencingToken {
+		existing.Status = decision.ActionLeaseConflict
+		existing.LastError = fmt.Sprintf("fencing token mismatch during renewal: expected %q got %q", existing.FencingToken, currentToken)
+		nowCopy := now
+		existing.RevertedAt = &nowCopy
+		if updateErr := b.store.UpdateActionLeaseStatus(ctx, existing); updateErr != nil {
+			return existing, false, updateErr
+		}
+		return decision.ActionLease{}, false, nil
+	}
+	existing.DecisionID = decisionID
+	existing.ProposalID = r.ProposalID
+	existing.PolicyID = r.PolicyID
+	existing.Reason = r.DenyReason
+	existing.ExpiresAt = now.Add(r.TTL)
+	existing.Metadata = metadata
+	existing.Status = decision.ActionLeaseActive
+	existing.LastError = ""
+	existing.RevertedAt = nil
+	if err := b.store.UpsertActionLease(ctx, existing); err != nil {
+		return existing, false, err
+	}
+	return existing, true, nil
 }
 
 // RevertExpired reverts every active lease whose expiry is at or before now.

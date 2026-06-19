@@ -84,6 +84,28 @@ FROM action_leases WHERE lease_id=?`, leaseID)
 	return lease, true, nil
 }
 
+// FindActiveActionLease loads the newest active lease for one adapter target,
+// action, and level tuple.
+func (s *Store) FindActiveActionLease(ctx context.Context, adapterID, target, action, level string) (decision.ActionLease, bool, error) {
+	row := s.db.QueryRowContext(ctx, `
+SELECT lease_id, decision_id, proposal_id, node_id, adapter_id, target, action,
+       level, status, fencing_token, policy_id, bundle_id, reason, applied_at,
+       expires_at, reverted_at, last_error, metadata
+FROM action_leases
+WHERE adapter_id=? AND target=? AND action=? AND level=? AND status=?
+ORDER BY expires_at DESC, applied_at DESC, lease_id DESC
+LIMIT 1`,
+		adapterID, target, action, level, string(decision.ActionLeaseActive))
+	lease, err := scanActionLease(row)
+	if err != nil {
+		if isNoRows(err) {
+			return decision.ActionLease{}, false, nil
+		}
+		return decision.ActionLease{}, false, fmt.Errorf("find active action lease adapter=%s target=%s action=%s level=%s: %w", adapterID, target, action, level, err)
+	}
+	return lease, true, nil
+}
+
 // ListActionLeasesByStatus loads leases with the given status.
 func (s *Store) ListActionLeasesByStatus(ctx context.Context, status decision.ActionLeaseStatus) ([]decision.ActionLease, error) {
 	rows, err := s.db.QueryContext(ctx, `

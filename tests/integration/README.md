@@ -410,17 +410,19 @@ Flow:
 1. The scenario writes a temporary `kind: RuntimePolicyPack` YAML file into the artifact directory.
 2. `kliq run --adapter=none --policy-file=<runtime-policy.yaml> --runtime-pdp-mode=shadow` starts for a few seconds.
 3. The log must show that the policy file was loaded as `RuntimePolicyPack`.
-4. The Runtime PDP must compile the pack and log `pack loaded: 1 rules`.
+4. The Runtime PDP must compile the pack and log `pack loaded: 2 rules`.
 5. The run must not log unsupported-kind, parse, compile, or panic errors.
 6. Targeted Go contract tests then run for:
    - RuntimePolicyPack loader and signature verification
    - RuntimeDecision to ActionProposal mapping
+   - broker lease renewal and source fencing
    - brokered relationship apply/revert receipts
    - signed RuntimeBundle conformance and offline last-known-good validation
 
 Expected result:
 
 - Standalone `--policy-file` accepts the contracts `RuntimePolicyPack` schema.
+- RuntimePolicyPack rules can include an enforcement-feedback hold rule using `signals.enforcement_feedback_rate`.
 - Runtime PDP shadow mode can load the policy without changing enforcement.
 - The active-mode plumbing remains covered at the mapper/broker/conformance boundary.
 

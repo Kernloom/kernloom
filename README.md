@@ -169,7 +169,11 @@ forge serve --addr :8443
 - `shadow` (default) — RuntimePDP evaluates and logs decisions only. Analyzers, graph and FSM can still produce facts/intent, but no enforcement action is emitted.
 - `active` — RuntimePDP is the policy authority. Adapter analyzers, graph, baselines, identity, and FSM/hysteresis components provide facts/intent; only RuntimePDP decisions become enforcement actions via the action broker.
 
-RuntimePDP policy rules can use generic fact maps such as `risk`, `metrics`, `signals`, `baseline`, `graph`, `adapter`, `fsm`, `device`, `session`, and `features`. For example, a network rule can compare `metrics.network.packets_per_second` with `baseline.network.packets_per_second` without making KLShield the decision owner.
+RuntimePDP policy rules can use generic fact maps such as `risk`, `metrics`, `signals`, `baseline`, `graph`, `adapter`, `fsm`, `device`, `session`, and `features`. `risk` is produced through the local risk aggregator; `baseline` can include learned metric profiles from SQLite as well as active thresholds; `graph` can include learned relationships for the subject. For example, a network rule can compare `metrics.network.packets_per_second` with `baseline.network.packets_per_second` without making KLShield the decision owner.
+
+When an adapter reports canonical enforcement feedback such as `signals.enforcement_feedback_rate`, KLIQ treats it as evidence that an active mitigation is still doing work. RuntimePolicyPacks should include a hold rule before broad high-risk rules, for example `fsm.current_level in ['soft', 'hard', 'block'] && signals.enforcement_feedback_rate > 0` with a renewed `enforce.traffic.rate_limit` TTL. This prevents post-mitigation telemetry from looking falsely clean while packets, denies, or equivalent PEP feedback are still being produced.
+
+The current risk model is implemented in code: adapter/analyzer signals are aggregated into a `LocalRiskAssessment` with score, level, confidence, domains and contributions. A separately signed/declarative `RuntimeRiskModel` artifact is not implemented yet; that remains a follow-up to make risk semantics fully policy-managed.
 
 In managed mode KLIQ:
 1. Enrolls the node and heartbeats runtime status to Forge
@@ -239,7 +243,7 @@ Unfiltered baseline deletion is rejected unless `--all` is set explicitly.
 ## Action leases and receipts
 
 Every TTL-bounded enforcement action is recorded as an `ActionLease` before the PEP is called. Leases carry:
-- a fencing token (prevents blind revert if the target was manually changed)
+- a fencing token (prevents blind revert if the target was manually changed or a newer lease took over)
 - expiry time and previous state reference
 - revert status: `pending` → `reverted` | `conflict` | `failed`
 
@@ -371,6 +375,7 @@ See `TECHNICAL_DEBT.md` for the full prioritised list. Key items:
 | Issue | Priority |
 |---|---|
 | Shared `kernloom-contracts` module is not yet fully adopted by managed bundle ingestion | P1 |
+| Runtime fact/context registry for adapter-published metrics, graph predicates, and missing inputs is still needed | P1 |
 | `iq/cmd/kliq` still owns too much runtime orchestration and should keep shrinking into internal services | P1 |
 | Historical names such as `LocalPolicyPack` and `PDPConfig` remain visible during the migration | P2 |
 

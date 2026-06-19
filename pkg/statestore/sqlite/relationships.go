@@ -148,6 +148,34 @@ func (s *Store) ListRelationships(ctx context.Context, nodeID, predicate, state 
 	return result, rows.Err()
 }
 
+// ListRelationshipsBySubject returns relationships for a node and subject entity.
+func (s *Store) ListRelationshipsBySubject(ctx context.Context, nodeID, subjectEntityID string) ([]relationship.Relationship, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT id, node_id, subject_entity_id, predicate, object_entity_id,
+		       scope_type, scope_id, dimensions, dimensions_hash,
+		       state, weight, confidence, seen_count, distinct_windows,
+		       first_seen_at, last_seen_at, last_evidence_id,
+		       learned_by, source_adapter
+		FROM relationships
+		WHERE node_id=? AND subject_entity_id=?
+		ORDER BY last_seen_at DESC
+	`, nodeID, subjectEntityID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var result []relationship.Relationship
+	for rows.Next() {
+		r, err := scanRelationship(rows.Scan)
+		if err != nil {
+			return nil, err
+		}
+		result = append(result, *r)
+	}
+	return result, rows.Err()
+}
+
 // SetRelationshipState updates the state (and confidence) of a relationship by ID.
 func (s *Store) SetRelationshipState(ctx context.Context, id string, state relationship.State, confidence float64) error {
 	now := time.Now().UTC().Format(time.RFC3339Nano)

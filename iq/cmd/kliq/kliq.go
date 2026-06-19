@@ -25,7 +25,6 @@ import (
 
 	contracts "github.com/kernloom/kernloom-contracts"
 	"github.com/kernloom/kernloom/iq/internal/actionbroker"
-	"github.com/kernloom/kernloom/iq/internal/actions"
 	"github.com/kernloom/kernloom/iq/internal/forgeagent"
 	"github.com/kernloom/kernloom/iq/internal/lifecycle/bootstrapautotune"
 	lgraph "github.com/kernloom/kernloom/iq/internal/lifecycle/graph"
@@ -40,7 +39,6 @@ import (
 	corepdp "github.com/kernloom/kernloom/pkg/core/pdp"
 	corepolicy "github.com/kernloom/kernloom/pkg/core/policy"
 	"github.com/kernloom/kernloom/pkg/core/relationship"
-	"github.com/kernloom/kernloom/pkg/core/signal"
 	"github.com/kernloom/kernloom/pkg/decisionengine"
 	"github.com/kernloom/kernloom/pkg/learningguard"
 	"github.com/kernloom/kernloom/pkg/pipeline"
@@ -570,6 +568,7 @@ func main() {
 		}
 	}
 	executor := newBrokeredActionExecutor(sourceExecutor, actionBroker, brokerPEP, relationshipBroker, relationshipBrokerPEP, stateStore, nodeID)
+	runtimeFacts := newRuntimePDPFactStore(stateStore)
 	for _, sidecar := range sourcePEPSidecars {
 		sidecar := sidecar
 		executor.AddSidecar(sourcePEPSidecar{
@@ -919,152 +918,37 @@ func main() {
 	// enforcement.
 	graphStrikeCh := make(chan graphStrikeMsg, 512)
 
-	// RuntimePDP path: shadow (observe only) or active (enforce via action broker).
-	// Default: shadow. In active mode RuntimePDP is the policy authority for
-	// candidate enforcement; analyzers/FSM provide facts and intent only.
-	shadowRunner := newShadowPDPRunner(nodeID, log.New(os.Stderr, "[runtime-pdp] ", log.LstdFlags))
-	if c.RuntimePDPMode == string(PDPModeActive) {
-		rpdpProposalCh := make(chan actions.ActionProposal, 256)
-		shadowRunner.SetMode(PDPModeActive, rpdpProposalCh)
-		go func() {
-			for prop := range rpdpProposalCh {
-				res := resolver.Resolve(prop)
-				if !res.Allowed {
-					kliqLog.Printf("[runtime-pdp:active] proposal denied: %s", res.DenyReason)
-					continue
-				}
-				if !applyResolvedAction(res, executor, c.toPEPParams(), time.Now()) {
-					kliqLog.Printf("[runtime-pdp:active] proposal skipped: unsupported target %s:%q", res.Target.Granularity, res.Target.Value)
-				}
-			}
-		}()
-		kliqLog.Printf("RuntimePDP mode: ACTIVE — RuntimePDP is authoritative; FSM/analyzers provide facts only")
-	} else {
-		shadowRunner.SetMode(PDPModeShadow, nil)
-		kliqLog.Printf("RuntimePDP mode: SHADOW — decisions logged only (--runtime-pdp-mode=active to enforce)")
+	runtimeCtx, runtimeCancel := context.WithCancel(context.Background())
+	defer runtimeCancel()
+	shadowRunner, err := startRuntimePDPService(runtimeCtx, runtimePDPServiceConfig{
+		NodeID:      nodeID,
+		Mode:        c.RuntimePDPMode,
+		PolicyFile:  c.PolicyFile,
+		StartupPack: startupPolicy.Runtime,
+		PackUpdates: runtimePolicyUpdateCh,
+		Bus:         mainBus,
+		Resolver:    resolver,
+		Executor:    executor,
+		Params: func() adapterruntime.EnforcementParams {
+			return c.toPEPParams()
+		},
+		Facts: runtimeFacts,
+	})
+	if err != nil {
+		log.Fatalf("%v", err)
 	}
-	if startupPolicy.Runtime != nil {
-		if err := shadowRunner.UpdatePack(*startupPolicy.Runtime); err != nil {
-			log.Fatalf("compile runtime policy file %s: %v", c.PolicyFile, err)
-		}
-	}
-	shadowCtx, shadowCancel := context.WithCancel(context.Background())
-	defer shadowCancel()
-	go func() {
-		for {
-			select {
-			case <-shadowCtx.Done():
-				return
-			case pack := <-runtimePolicyUpdateCh:
-				if err := shadowRunner.UpdatePack(pack); err != nil {
-					kliqLog.Printf("runtime policy pack update rejected: %v", err)
-				}
-			}
-		}
-	}()
-	startShadowPDP(shadowCtx, mainBus, shadowRunner)
-
-	// Signal consumer: logs signals and turns graph anomalies into RuntimePDP facts.
-	// Use a dedicated subscriber channel — the bus fans signals out to every
-	// subscriber, so both this loop and the graphlearner see every signal.
-	sigCtx, sigCancel := context.WithCancel(context.Background())
-	defer sigCancel()
-	kliqSigCh := mainBus.SubscribeSignals(256)
-	go func() {
-		for {
-			select {
-			case <-sigCtx.Done():
-				return
-			case sig, ok := <-kliqSigCh:
-				if !ok {
-					return
-				}
-				logLine := fmt.Sprintf("SIGNAL type=%s subject=%s score=%d confidence=%d ttl=%s reasons=%v",
-					sig.Type, formatSubject(sig.Subject), sig.Score, sig.Confidence, sig.TTL, sig.ReasonCodes)
-				if len(sig.Attributes) > 0 {
-					keys := make([]string, 0, len(sig.Attributes))
-					for k := range sig.Attributes {
-						keys = append(keys, k)
-					}
-					sort.Strings(keys)
-					for _, k := range keys {
-						logLine += fmt.Sprintf(" %s=%s", k, sig.Attributes[k])
-					}
-				}
-				kliqLog.Print(logLine)
-
-				if _, _, err := decisionEng.EvaluateSignal(sigCtx, sig); err != nil {
-					kliqLog.Printf("SIGNAL decision error: %v", err)
-				}
-
-				// Graph freeze violation -> source-candidate strike credits.
-				// score >= 90 (frozen-enforce): forceBlock skips accumulation.
-				// score < 90 (frozen-observe): normal strike accumulation.
-				// Graph freeze violation: source is actively sending -> add to cands
-				// so RuntimePDP receives real metric facts this tick.
-				if sig.Type == signal.SignalGraphNewEdgeAfterFreeze && sig.Subject.ID != "" {
-					sendStrike(graphStrikeCh, sig.Subject.ID, graphStrikesFromScore(sig.Score), sig.Score >= 90, true, sig.Score)
-
-					// Tuple enforcement (graph-enforce profile): RuntimePDP must
-					// authorize the specific relationship action. In shadow mode the
-					// signal is observed only.
-					if features.TupleEnforcement && sig.Score >= 90 && relationshipPEP != nil && relationshipPEP.RelationshipAvailable() {
-						if relTarget, ok := relationshipActionTargetFromSignal(sig); ok {
-							now := time.Now()
-							if c.RuntimePDPMode == string(PDPModeActive) {
-								input := runtimePDPInputForSignal(nodeID, sig, now)
-								dec, matched, loaded, err := shadowRunner.decide(input)
-								if err != nil {
-									kliqLog.Printf("[runtime-pdp:active] graph relationship decide error %s: %v", relTarget.Label, err)
-								} else if !loaded {
-									kliqLog.Printf("[runtime-pdp:active] graph relationship held %s: no policy pack loaded", relTarget.Label)
-								} else if matched {
-									fallback := relTarget.Proposal
-									prop, ok, reason := runtimeDecisionToActionProposalWithFallbackTarget(dec, sig.Subject.ID, &fallback, float64(sig.Confidence)/100.0, now)
-									if !ok {
-										kliqLog.Printf("[runtime-pdp:active] graph relationship decision skipped %s reason=%s", relTarget.Label, reason)
-									} else {
-										res := resolver.Resolve(prop)
-										if res.DenyReason != "" {
-											kliqLog.Printf("ACTION-RESOLVER runtime-pdp relationship %s %s→%s reason=%q",
-												relTarget.Label,
-												prop.DesiredLevel, res.ExecutableLevel, res.DenyReason)
-										}
-										result := executor.ApplyRelationship(relTarget.PEP, res, now)
-										switch result.Status {
-										case "applied":
-											kliqLog.Printf("RELATIONSHIP deny edge: %s (runtime-pdp graph decision)", relTarget.Label)
-										case "failed":
-											kliqLog.Printf("RELATIONSHIP deny edge %s failed: %s", relTarget.Label, result.Reason)
-										}
-									}
-								}
-							} else {
-								input := runtimePDPInputForSignal(nodeID, sig, now)
-								dec, matched, loaded, err := shadowRunner.decide(input)
-								switch {
-								case err != nil:
-									kliqLog.Printf("[runtime-pdp:shadow] graph relationship decide error %s: %v", relTarget.Label, err)
-								case !loaded:
-									kliqLog.Printf("[runtime-pdp:shadow] graph relationship observed %s (no policy pack)", relTarget.Label)
-								case matched:
-									kliqLog.Printf("[runtime-pdp:shadow] graph relationship decision %s effect=%s reasons=%v (observe-only)",
-										relTarget.Label, dec.Effect, dec.ReasonCodes)
-								}
-							}
-						}
-					}
-				}
-
-				// Edge baseline deviation (EWMA) and peak-exceeded signals:
-				// process the source as a graph-derived high-severity candidate.
-				// This keeps graph anomalies visible to RuntimePDP.
-				if isGraphBaselineSignal(sig.Type) && sig.Subject.ID != "" {
-					sendStrike(graphStrikeCh, sig.Subject.ID, 0, false, true, sig.Score)
-				}
-			}
-		}
-	}()
+	startKLIQSignalConsumer(runtimeCtx, runtimeSignalConsumerConfig{
+		NodeID:           nodeID,
+		Bus:              mainBus,
+		DecisionEngine:   decisionEng,
+		GraphStrikeCh:    graphStrikeCh,
+		TupleEnforcement: features.TupleEnforcement,
+		RelationshipPEP:  relationshipPEP,
+		RuntimeRunner:    shadowRunner,
+		RuntimeFacts:     runtimeFacts,
+		Resolver:         resolver,
+		Executor:         executor,
+	})
 
 	// Graph pipeline (optional) — uses generic relationship learner + state store.
 	var gpAdapter *graphpipeline.Adapter
@@ -1141,7 +1025,7 @@ func main() {
 			defer gcT.Stop()
 			for {
 				select {
-				case <-sigCtx.Done():
+				case <-runtimeCtx.Done():
 					_, _ = rlLearner.FlushDirty(context.Background())
 					_, _ = gpAdapter.BaselineEngine().FlushDirty(context.Background(), ss)
 					return
@@ -1457,12 +1341,12 @@ func main() {
 			}
 		}
 
-		processed := sources.processCandidates(cands, nowWall, c, wl, fb, resolver, executor, tuner, clean, shadowRunner, nodeID)
+		processed := sources.processCandidates(cands, nowWall, c, wl, fb, resolver, executor, tuner, clean, shadowRunner, nodeID, runtimeFacts)
 
 		// Maintenance sweep: advance source intent for non-OBSERVE sources that
 		// had no qualifying observation this tick. RuntimePDP decides whether the
 		// resulting downscale/observe intent becomes an action.
-		sources.sweepInactive(processed, nowWall, c, resolver, executor, pepParams, shadowRunner, nodeID)
+		sources.sweepInactive(processed, nowWall, c, resolver, executor, pepParams, shadowRunner, nodeID, runtimeFacts)
 
 		tickN++
 		if tickN%30 == 1 {

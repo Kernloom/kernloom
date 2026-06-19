@@ -4,6 +4,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"math"
 	"sort"
@@ -12,9 +13,12 @@ import (
 
 	contracts "github.com/kernloom/kernloom-contracts"
 	"github.com/kernloom/kernloom/iq/internal/actions"
+	"github.com/kernloom/kernloom/iq/internal/localrisk"
 	"github.com/kernloom/kernloom/iq/internal/runtimepdp"
 	"github.com/kernloom/kernloom/pkg/adapterruntime"
 	"github.com/kernloom/kernloom/pkg/core/fsm"
+	"github.com/kernloom/kernloom/pkg/core/observation"
+	"github.com/kernloom/kernloom/pkg/core/reason"
 	"github.com/kernloom/kernloom/pkg/core/signal"
 )
 
@@ -72,55 +76,32 @@ func mergeFSMRuntimeState(actual, signal fsm.State) fsm.State {
 	return out
 }
 
-func runtimePDPInputForCandidate(nodeID string, m metrics, current fsm.State, intent fsmIntent, c cfg, now time.Time) runtimepdp.Input {
-	sourceID := m.sourceID()
-	subject := contracts.EntityRef{
-		Kind: "source",
-		ID:   sourceID,
-	}
-	if m.Target.Subject.ID != "" {
-		subject.ID = m.Target.Subject.ID
-	}
-	if m.Target.Subject.Kind != "" {
-		subject.Kind = string(m.Target.Subject.Kind)
-	}
-	if subject.Kind == "" {
-		subject.Kind = "source"
-	}
+func runtimePDPInputForCandidate(nodeID string, m metrics, current fsm.State, intent fsmIntent, c cfg, facts runtimePDPFactProvider, now time.Time) runtimepdp.Input {
+	subject := runtimePDPSubjectForCandidate(m)
+	risk := localRiskForCandidate(nodeID, subject, m, current, c, now)
+	adapterFacts := adapterFactMap(m)
+	baselineFacts := thresholdFactsWithSnapshot(c.tuningThresholds())
+	graphFacts := graphFactMap(m.Signals)
 
-	score := clampInt(int(math.Round(m.score())), 0, 100)
-	confidence := float64(score) / 100.0
-	if confidence < 0.1 {
-		confidence = 0.1
+	if facts != nil {
+		snapshot, err := facts.CandidateFacts(context.Background(), nodeID, m, now)
+		baselineFacts = mergeFactMaps(baselineFacts, snapshot.Baseline)
+		graphFacts = mergeFactMaps(graphFacts, snapshot.Graph)
+		if err != nil {
+			adapterFacts["fact_lookup_error"] = err.Error()
+		}
 	}
 
 	return runtimepdp.Input{
 		NodeID:  nodeID,
 		Subject: subject,
-		Risk: contracts.LocalRiskAssessment{
-			TypeMeta: contracts.TypeMeta{
-				APIVersion: contracts.RuntimeAPIVersion,
-				Kind:       contracts.KindLocalRiskAssessment,
-			},
-			Metadata: contracts.ObjectMeta{
-				NodeID:   nodeID,
-				IssuedAt: now.UTC(),
-			},
-			Subject:      subject,
-			Level:        riskLevelForScore(score),
-			Score:        score,
-			Confidence:   confidence,
-			Completeness: 1.0,
-			Domains:      domainsForCandidate(m),
-			ValidUntil:   now.UTC().Add(2 * time.Minute),
-			Model:        "kliq.candidate.v1",
-		},
+		Risk:    risk,
 		Context: runtimepdp.ContextSnapshot{
 			Metrics:  metricFactMap(m.Signals),
 			Signals:  signalFactMap(m),
-			Baseline: thresholdFactMap(c.tuningThresholds()),
-			Graph:    graphFactMap(m.Signals),
-			Adapter:  adapterFactMap(m),
+			Baseline: baselineFacts,
+			Graph:    graphFacts,
+			Adapter:  adapterFacts,
 			FSM:      fsmFactMap(current, intent, now),
 			Features: featureFactMap(c),
 		},
@@ -128,7 +109,10 @@ func runtimePDPInputForCandidate(nodeID string, m metrics, current fsm.State, in
 	}
 }
 
-func runtimePDPInputForSignal(nodeID string, sig signal.Signal, now time.Time) runtimepdp.Input {
+func runtimePDPInputForSignal(nodeID string, sig signal.Signal, facts runtimePDPFactProvider, now time.Time) runtimepdp.Input {
+	if sig.Time.IsZero() {
+		sig.Time = now.UTC()
+	}
 	subject := contracts.EntityRef{
 		Kind: string(sig.Subject.Kind),
 		ID:   sig.Subject.ID,
@@ -136,6 +120,7 @@ func runtimePDPInputForSignal(nodeID string, sig signal.Signal, now time.Time) r
 	if subject.Kind == "" {
 		subject.Kind = "source"
 	}
+	risk := localRiskForSignal(nodeID, subject, sig, now)
 	object := map[string]any{}
 	if sig.Object.ID != "" {
 		object["id"] = sig.Object.ID
@@ -146,60 +131,233 @@ func runtimePDPInputForSignal(nodeID string, sig signal.Signal, now time.Time) r
 		attrs[k] = v
 		insertNestedFact(attrs, k, v)
 	}
-	validUntil := now.UTC().Add(sig.TTL)
-	if sig.TTL <= 0 {
-		validUntil = now.UTC().Add(2 * time.Minute)
-	}
-	confidence := float64(clampInt(sig.Confidence, 0, 100)) / 100.0
-	if confidence == 0 {
-		confidence = 0.1
-	}
 	score := clampInt(sig.Score, 0, 100)
-	domain := "unknown"
-	if value := string(sig.Type); value != "" {
-		domain = value
-		if idx := strings.IndexByte(value, '.'); idx > 0 {
-			domain = value[:idx]
+	graphFacts := graphSignalFactMap(sig)
+	baselineFacts := map[string]any{}
+	adapterFacts := map[string]any{
+		"source_id":  sig.Subject.ID,
+		"subject_id": sig.Subject.ID,
+		"object":     object,
+	}
+	if facts != nil && subject.ID != "" {
+		snapshot, err := facts.CandidateFacts(context.Background(), nodeID, metricsForRuntimeSubject(subject), now)
+		baselineFacts = mergeFactMaps(baselineFacts, snapshot.Baseline)
+		graphFacts = mergeFactMaps(graphFacts, snapshot.Graph)
+		if err != nil {
+			adapterFacts["fact_lookup_error"] = err.Error()
 		}
 	}
 	return runtimepdp.Input{
 		NodeID:  nodeID,
 		Subject: subject,
-		Risk: contracts.LocalRiskAssessment{
-			TypeMeta: contracts.TypeMeta{
-				APIVersion: contracts.RuntimeAPIVersion,
-				Kind:       contracts.KindLocalRiskAssessment,
-			},
-			Metadata: contracts.ObjectMeta{
-				NodeID:   nodeID,
-				IssuedAt: now.UTC(),
-			},
-			Subject:      subject,
-			Level:        riskLevelForScore(score),
-			Score:        score,
-			Confidence:   confidence,
-			Completeness: 1.0,
-			Domains:      []string{domain},
-			ValidUntil:   validUntil,
-			Model:        "kliq.signal.v1",
-		},
+		Risk:    risk,
 		Context: runtimepdp.ContextSnapshot{
 			Signals: map[string]any{
-				"type":         string(sig.Type),
-				"score":        score,
-				"confidence":   confidence,
-				"reason_codes": append([]string(nil), sig.ReasonCodes...),
-				"attributes":   attrs,
+				"type":                      string(sig.Type),
+				"score":                     score,
+				"confidence":                risk.Confidence,
+				"enforcement_feedback_rate": 0.0,
+				"reason_codes":              append([]string(nil), sig.ReasonCodes...),
+				"attributes":                attrs,
 			},
-			Graph: graphSignalFactMap(sig),
-			Adapter: map[string]any{
-				"source_id":  sig.Subject.ID,
-				"subject_id": sig.Subject.ID,
-				"object":     object,
-			},
+			Baseline: baselineFacts,
+			Graph:    graphFacts,
+			Adapter:  adapterFacts,
+			FSM: fsmFactMap(
+				fsm.State{},
+				fsmIntent{SignalState: fsm.State{}, ProposedLevel: fsm.LevelObserve},
+				now,
+			),
 		},
 		Now: now,
 	}
+}
+
+func runtimePDPSubjectForCandidate(m metrics) contracts.EntityRef {
+	subject := contracts.EntityRef{
+		Kind: "source",
+		ID:   m.sourceID(),
+	}
+	if m.Target.Subject.ID != "" {
+		subject.ID = m.Target.Subject.ID
+	}
+	if m.Target.Subject.Kind != "" {
+		subject.Kind = string(m.Target.Subject.Kind)
+	}
+	if m.Target.Subject.Namespace != "" {
+		subject.Namespace = m.Target.Subject.Namespace
+	}
+	if subject.Kind == "" {
+		subject.Kind = "source"
+	}
+	return subject
+}
+
+func metricsForRuntimeSubject(subject contracts.EntityRef) metrics {
+	return metrics{
+		Target: adapterruntime.SourceTarget{
+			SourceID: subject.ID,
+			Subject: observation.EntityRef{
+				Kind:      observation.EntityKind(subject.Kind),
+				ID:        subject.ID,
+				Namespace: subject.Namespace,
+			},
+		},
+	}
+}
+
+func localRiskForCandidate(nodeID string, subject contracts.EntityRef, m metrics, current fsm.State, c cfg, now time.Time) contracts.LocalRiskAssessment {
+	score := clampInt(int(math.Round(m.score())), 0, 100)
+	confidence := candidateConfidence(score)
+	signals := candidateSignals(subject, m, score, confidence, now)
+	if feedback, ok := enforcementFeedbackRiskSignal(subject, m, current, c, now); ok {
+		signals = append(signals, feedback)
+	}
+	return localRiskFromSignals(nodeID, subject, signals, now, "kliq.candidate.v1", score, confidence, domainsForCandidate(m))
+}
+
+func localRiskForSignal(nodeID string, subject contracts.EntityRef, sig signal.Signal, now time.Time) contracts.LocalRiskAssessment {
+	score := clampInt(sig.Score, 0, 100)
+	confidence := clampInt(sig.Confidence, 0, 100)
+	if confidence == 0 {
+		confidence = candidateConfidence(score)
+	}
+	domain := domainForSignalType(sig.Type)
+	return localRiskFromSignals(nodeID, subject, []signal.Signal{sig}, now, "kliq.signal.v1", score, confidence, []string{domain})
+}
+
+func localRiskFromSignals(nodeID string, subject contracts.EntityRef, signals []signal.Signal, now time.Time, model string, fallbackScore, fallbackConfidence int, fallbackDomains []string) contracts.LocalRiskAssessment {
+	cfg := localrisk.DefaultConfig()
+	cfg.Model = model
+	assessments := localrisk.FromSignals(signals, now, cfg)
+	for _, assessment := range assessments {
+		if assessment.SubjectID != subject.ID {
+			continue
+		}
+		risk := assessment.ToContract(subject, nodeID)
+		risk.Metadata.IssuedAt = now.UTC()
+		if risk.Confidence <= 0 {
+			risk.Confidence = confidenceRatio(fallbackConfidence)
+		}
+		return risk
+	}
+	return fallbackLocalRisk(nodeID, subject, fallbackScore, fallbackConfidence, fallbackDomains, model, now)
+}
+
+func fallbackLocalRisk(nodeID string, subject contracts.EntityRef, score, confidence int, domains []string, model string, now time.Time) contracts.LocalRiskAssessment {
+	return contracts.LocalRiskAssessment{
+		TypeMeta: contracts.TypeMeta{
+			APIVersion: contracts.RuntimeAPIVersion,
+			Kind:       contracts.KindLocalRiskAssessment,
+		},
+		Metadata: contracts.ObjectMeta{
+			NodeID:   nodeID,
+			IssuedAt: now.UTC(),
+		},
+		Subject:      subject,
+		Level:        riskLevelForScore(score),
+		Score:        score,
+		Confidence:   confidenceRatio(confidence),
+		Completeness: 1.0,
+		Domains:      domains,
+		ValidUntil:   now.UTC().Add(2 * time.Minute),
+		Model:        model,
+	}
+}
+
+func candidateSignals(subject contracts.EntityRef, m metrics, score, confidence int, now time.Time) []signal.Signal {
+	ref := observation.EntityRef{
+		Kind:      observation.EntityKind(subject.Kind),
+		ID:        subject.ID,
+		Namespace: subject.Namespace,
+	}
+	signals := make([]signal.Signal, 0, len(m.Signals))
+	for metricID, value := range m.Signals {
+		if value == 0 {
+			continue
+		}
+		sig := signal.NewSignal(signal.ProducerKLIQ, signal.ScopeLocal, signal.SignalType(metricID), ref).
+			SetScore(score).
+			SetConfidence(confidence).
+			SetTTL(2*time.Minute).
+			AddReasonCode(reasonCodeForMetric(metricID)).
+			SetAttribute("metric_id", metricID).
+			SetAttribute("value", fmt.Sprintf("%g", value))
+		sig.Time = now.UTC()
+		signals = append(signals, *sig)
+	}
+	if len(signals) == 0 && score > 0 {
+		sig := signal.NewSignal(signal.ProducerKLIQ, signal.ScopeLocal, signal.SignalType("runtime.candidate"), ref).
+			SetScore(score).
+			SetConfidence(confidence).
+			SetTTL(2 * time.Minute).
+			AddReasonCode("candidate_score")
+		sig.Time = now.UTC()
+		signals = append(signals, *sig)
+	}
+	return signals
+}
+
+func enforcementFeedbackRiskSignal(subject contracts.EntityRef, m metrics, current fsm.State, c cfg, now time.Time) (signal.Signal, bool) {
+	dropRate := m.enforcementFeedbackRate()
+	if dropRate <= 0 || current.Level < fsm.LevelSoft {
+		return signal.Signal{}, false
+	}
+
+	score := 70
+	if current.Level >= fsm.LevelHard {
+		score = 75
+	}
+	if current.Level >= fsm.LevelBlock {
+		score = 85
+	}
+	if c.NonCompDrop > 0 && dropRate >= c.NonCompDrop && score < 80 {
+		score = 80
+	}
+	if candidateScore := clampInt(int(math.Round(m.score())), 0, 100); candidateScore > score {
+		score = candidateScore
+	}
+
+	ref := observation.EntityRef{
+		Kind:      observation.EntityKind(subject.Kind),
+		ID:        subject.ID,
+		Namespace: subject.Namespace,
+	}
+	sig := signal.NewSignal(signal.ProducerKLIQ, signal.ScopeLocal, signal.SignalRateLimitDropsSustained, ref).
+		SetScore(score).
+		SetConfidence(90).
+		SetTTL(2*time.Minute).
+		AddReasonCode(reason.RateLimitDropsSustained).
+		AddReasonCode("enforcement_hold").
+		SetAttribute("metric_id", adapterruntime.MetricNetworkRateLimitDropRate).
+		SetAttribute("drop_rate", fmt.Sprintf("%g", dropRate)).
+		SetAttribute("current_level", actions.FsmLevelName(current.Level)).
+		SetAttribute("evidence", "enforcement_feedback")
+	sig.Time = now.UTC()
+	return *sig, true
+}
+
+func candidateConfidence(score int) int {
+	if score < 10 {
+		return 10
+	}
+	return score
+}
+
+func confidenceRatio(confidence int) float64 {
+	out := float64(clampInt(confidence, 0, 100)) / 100.0
+	if out < 0.1 {
+		return 0.1
+	}
+	return out
+}
+
+func reasonCodeForMetric(metricID string) string {
+	code := strings.ReplaceAll(metricID, ".", "_")
+	if code == "" {
+		return "metric_signal"
+	}
+	return code
 }
 
 func graphSignalFactMap(sig signal.Signal) map[string]any {
@@ -238,10 +396,7 @@ func riskLevelForScore(score int) contracts.RiskLevel {
 func domainsForCandidate(m metrics) []string {
 	seen := map[string]bool{}
 	for metric := range m.Signals {
-		domain := metric
-		if idx := strings.IndexByte(metric, '.'); idx > 0 {
-			domain = metric[:idx]
-		}
+		domain := domainForMetricID(metric)
 		if domain != "" {
 			seen[domain] = true
 		}
@@ -255,6 +410,20 @@ func domainsForCandidate(m metrics) []string {
 	}
 	sort.Strings(out)
 	return out
+}
+
+func domainForSignalType(sigType signal.SignalType) string {
+	return domainForMetricID(string(sigType))
+}
+
+func domainForMetricID(metric string) string {
+	if idx := strings.IndexByte(metric, '.'); idx > 0 {
+		return metric[:idx]
+	}
+	if metric == "" {
+		return "unknown"
+	}
+	return metric
 }
 
 func metricFactMap(values map[string]float64) map[string]any {

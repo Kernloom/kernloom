@@ -379,7 +379,7 @@ func TestGraphBaselineStrikeProcessesSyntheticCandidate(t *testing.T) {
 	executor := newBrokeredActionExecutor(buildExecutor(nil), nil, nil, nil, nil, nil, "node-test")
 	wl := sourcefilters.NewWhitelist("")
 	fb := sourcefilters.NewFeedback("")
-	processed := sources.processCandidates(cands, now, c, wl, fb, resolver, executor, nil, false, nil, "node-test")
+	processed := sources.processCandidates(cands, now, c, wl, fb, resolver, executor, nil, false, nil, "node-test", nil)
 	if !processed["source-1"] {
 		t.Fatal("expected source-1 to be processed")
 	}

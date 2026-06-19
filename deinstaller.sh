@@ -54,7 +54,7 @@ Usage: sudo sh deinstaller.sh [OPTIONS]
 Options:
   --dry-run      Show what would be removed without deleting anything
   --keep-state   Keep runtime state in $IQ_VAR_DIR
-                 (graph.db, feedback.json, state.json, leases, receipts)
+                 (kliq-state.db, graph.db, feedback.json, state.json)
   -h, --help     Show this help
 
 Environment:
@@ -206,6 +206,9 @@ else
   remove_file "$IQ_VAR_DIR/kliq-state.db"
   remove_file "$IQ_VAR_DIR/kliq-state.db-shm"
   remove_file "$IQ_VAR_DIR/kliq-state.db-wal"
+  remove_file "$IQ_VAR_DIR/graph.db"
+  remove_file "$IQ_VAR_DIR/graph.db-shm"
+  remove_file "$IQ_VAR_DIR/graph.db-wal"
   remove_dir  "$IQ_VAR_DIR"
   # Remove /var/lib/kernloom only if now empty
   VAR_BASE="/var/lib/kernloom"

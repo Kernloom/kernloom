@@ -36,6 +36,17 @@ spec:
   capabilities_required:
     - enforce.traffic.rate_limit
   rules:
+    - id: hold-enforcement-while-drops
+      when: "fsm.current_level in ['soft', 'hard', 'block'] && signals.enforcement_feedback_rate > 0"
+      then:
+        capability: enforce.traffic.rate_limit
+        level: hard
+        ttl: "30s"
+        params:
+          rate_pps: 100
+      reason_codes:
+        - rate_limit_drops_sustained
+        - enforcement_hold
     - id: high-risk-rate-limit
       when: "risk.level in ['high', 'critical']"
       then:
@@ -73,7 +84,7 @@ fi
 
 assert_contains "$RUN_LOG" "Policy loaded: file=.*runtime-policy.yaml kind=RuntimePolicyPack name=it-runtime-policy"
 assert_contains "$RUN_LOG" "RuntimePDP mode: SHADOW"
-assert_contains "$RUN_LOG" "pack loaded: 1 rules"
+assert_contains "$RUN_LOG" "pack loaded: 2 rules"
 assert_contains "$RUN_LOG" "Kernloom IQ started"
 assert_not_contains "$RUN_LOG" "unsupported kind|compile error|parse runtime pack|panic"
 
@@ -83,12 +94,13 @@ assert_cmd_success "$KLT_GO" version
 
 run_contract_tests() {
   local go_cache="$RESULTS_DIR/go-build"
-  local test_regex='TestLoadPolicyBytesRecognizesRuntimePolicyPack|TestLoadPolicyBytesVerifiesSignedRuntimePolicyPack|TestRuntimeDecisionToActionProposal|TestBrokeredRelationshipApplyAndRevert|TestValidateRuntimeBundle|TestValidateOfflineLastKnownGood'
+  local test_regex='TestLoadPolicyBytesRecognizesRuntimePolicyPack|TestLoadPolicyBytesVerifiesSignedRuntimePolicyPack|TestRuntimeDecisionToActionProposal|TestBrokeredRelationshipApplyAndRevert|TestBrokeredSourceFencingPreventsOlderLeaseRevertingNewerLevel|TestApplyRenewsMatchingActiveLease|TestValidateRuntimeBundle|TestValidateOfflineLastKnownGood'
 
   if [[ "$(id -u)" -eq 0 && -n "${SUDO_UID:-}" && -n "${SUDO_GID:-}" ]]; then
     chown -R "$SUDO_UID:$SUDO_GID" "$RESULTS_DIR"
     sudo -u "#$SUDO_UID" env GOCACHE="$go_cache" "$KLT_GO" test \
       ./iq/cmd/kliq \
+      ./iq/internal/actionbroker \
       ./iq/internal/conformance \
       -run "$test_regex"
     return
@@ -96,6 +108,7 @@ run_contract_tests() {
 
   GOCACHE="$go_cache" "$KLT_GO" test \
     ./iq/cmd/kliq \
+    ./iq/internal/actionbroker \
     ./iq/internal/conformance \
     -run "$test_regex"
 }
@@ -106,6 +119,7 @@ run_contract_tests > "$GO_LOG" 2>&1 || {
 }
 
 assert_contains "$GO_LOG" "ok[[:space:]]+github.com/kernloom/kernloom/iq/cmd/kliq"
+assert_contains "$GO_LOG" "ok[[:space:]]+github.com/kernloom/kernloom/iq/internal/actionbroker"
 assert_contains "$GO_LOG" "ok[[:space:]]+github.com/kernloom/kernloom/iq/internal/conformance"
 
 pass "12.2: RuntimePDP loader, mapper, broker, and conformance fixtures pass"

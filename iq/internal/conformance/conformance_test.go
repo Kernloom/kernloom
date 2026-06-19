@@ -48,6 +48,18 @@ func TestValidateRuntimeBundleRejectsMissingCapability(t *testing.T) {
 	}
 }
 
+func TestValidateRuntimeBundleRejectsUnsupportedCapability(t *testing.T) {
+	pub, priv := keypair(t)
+	bundle := signBundle(t, validBundle("shadow", "enforce.unknown.magic", "soft", "fail_static"), priv)
+	node := nodeRuntime("rate_limit")
+	node.Capabilities["enforce.unknown.magic"] = true
+
+	err := conformance.ValidateRuntimeBundle(bundle, pub, node)
+	if err == nil || !strings.Contains(err.Error(), "not supported") {
+		t.Fatalf("expected unsupported capability error, got %v", err)
+	}
+}
+
 func TestValidateRuntimeBundleRejectsActionAboveBounds(t *testing.T) {
 	pub, priv := keypair(t)
 	bundle := signBundle(t, validBundle("shadow", "enforce.access.deny", "block", "fail_static"), priv)
@@ -69,6 +81,24 @@ func TestValidateRuntimeBundleRejectsUnsupportedMode(t *testing.T) {
 	err := conformance.ValidateRuntimeBundle(bundle, pub, node)
 	if err == nil || !strings.Contains(err.Error(), "mode") {
 		t.Fatalf("expected unsupported mode error, got %v", err)
+	}
+}
+
+func TestValidateRuntimePolicyPackAcceptsGenericFactVariables(t *testing.T) {
+	pack := validBundle("active", "enforce.traffic.rate_limit", "hard", "fail_static").Spec.RuntimePolicyPack
+	pack.Spec.Rules[0].When = strings.Join([]string{
+		"risk.score >= 70",
+		"metrics.network.packets_per_second > baseline.network.packets_per_second * 2.0",
+		"baseline.profile_count >= 1",
+		"graph.relationship_count >= 1",
+		"adapter.subject_kind == 'ip'",
+		"fsm.proposed_level == 'hard'",
+		"features.runtime_pdp_mode == 'active'",
+	}, " && ")
+
+	err := conformance.ValidateRuntimePolicyPack(pack, nodeRuntime("rate_limit_hard"))
+	if err != nil {
+		t.Fatalf("generic fact policy rejected: %v", err)
 	}
 }
 

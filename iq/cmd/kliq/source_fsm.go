@@ -33,13 +33,13 @@ func newSourceStates() *sourceStates {
 	return &sourceStates{entries: make(map[string]sourceStateEntry, 64_000)}
 }
 
-func (s *sourceStates) reset(now time.Time, executor fsmActionExecutor, params adapterruntime.EnforcementParams) int {
+func (s *sourceStates) reset(now time.Time, executor *brokeredActionExecutor, params adapterruntime.EnforcementParams) int {
 	n := 0
 	for id, entry := range s.entries {
 		if entry.state.Level == fsm.LevelObserve {
 			continue
 		}
-		entry.state = executor.ApplyDeEnforceSource(entry.target, entry.state, params, now)
+		entry.state, _ = executor.ApplySourceObserveOverride(entry.target, entry.state, params, now, "operator_reset")
 		entry.state.Strikes, entry.state.UpStreak, entry.state.DownStreak, entry.state.NonCompTicks = 0, 0, 0, 0
 		s.entries[id] = entry
 		n++
@@ -47,7 +47,7 @@ func (s *sourceStates) reset(now time.Time, executor fsmActionExecutor, params a
 	return n
 }
 
-func (s *sourceStates) applyFeedback(now time.Time, fb feedbackFilter, executor fsmActionExecutor, params adapterruntime.EnforcementParams, sweep bool, every time.Duration, max int) {
+func (s *sourceStates) applyFeedback(now time.Time, fb feedbackFilter, executor *brokeredActionExecutor, params adapterruntime.EnforcementParams, sweep bool, every time.Duration, max int) {
 	if fb == nil || !fb.Active() {
 		return
 	}
@@ -72,7 +72,7 @@ func (s *sourceStates) applyFeedback(now time.Time, fb feedbackFilter, executor 
 			}
 			budget--
 		}
-		entry.state = executor.ApplyDeEnforceSource(entry.target, entry.state, params, now)
+		entry.state, _ = executor.ApplySourceObserveOverride(entry.target, entry.state, params, now, "operator_feedback")
 		entry.state.Strikes = 0
 		entry.state.NonCompTicks = 0
 		entry.state.UpStreak = 0
@@ -185,6 +185,7 @@ func (s *sourceStates) processCandidates(
 	clean bool,
 	runner *shadowPDPRunner,
 	nodeID string,
+	facts runtimePDPFactProvider,
 ) processedSources {
 	processed := make(processedSources, len(cands))
 	for _, m := range cands {
@@ -194,14 +195,14 @@ func (s *sourceStates) processCandidates(
 		}
 		entry := s.ensure(sourceID, m.Target)
 		entry.target = m.Target
-		entry.state = processCandidateRuntimePDP(m, entry.state, now, c, wl, fb, resolver, executor, tuner, clean, runner, nodeID)
+		entry.state = processCandidateRuntimePDP(m, entry.state, now, c, wl, fb, resolver, executor, tuner, clean, runner, nodeID, facts)
 		s.entries[sourceID] = entry
 		processed[sourceID] = true
 	}
 	return processed
 }
 
-func (s *sourceStates) sweepInactive(processed processedSources, now time.Time, c cfg, resolver *actions.PolicyResolver, executor *brokeredActionExecutor, params adapterruntime.EnforcementParams, runner *shadowPDPRunner, nodeID string) {
+func (s *sourceStates) sweepInactive(processed processedSources, now time.Time, c cfg, resolver *actions.PolicyResolver, executor *brokeredActionExecutor, params adapterruntime.EnforcementParams, runner *shadowPDPRunner, nodeID string, facts runtimePDPFactProvider) {
 	for sourceID, entry := range s.entries {
 		if entry.state.Level == fsm.LevelObserve || processed[sourceID] {
 			continue
@@ -212,7 +213,7 @@ func (s *sourceStates) sweepInactive(processed processedSources, now time.Time, 
 			m.Target = sourceTargetFromID(sourceID)
 		}
 		intent := evaluateFSMIntent(m, entry.state, now, c)
-		entry.state = processRuntimePDPDecisionForCandidate(m, entry.state, intent, now, c, resolver, executor, runner, nodeID)
+		entry.state = processRuntimePDPDecisionForCandidate(m, entry.state, intent, now, c, resolver, executor, runner, nodeID, facts)
 		s.entries[sourceID] = entry
 	}
 }
@@ -230,6 +231,7 @@ func processCandidateRuntimePDP(
 	clean bool,
 	runner *shadowPDPRunner,
 	nodeID string,
+	facts runtimePDPFactProvider,
 ) fsm.State {
 	st.LastSeenWallTime = now
 
@@ -257,7 +259,7 @@ func processCandidateRuntimePDP(
 	}
 
 	intent := evaluateFSMIntent(m, st, now, c)
-	next := processRuntimePDPDecisionForCandidate(m, st, intent, now, c, resolver, executor, runner, nodeID)
+	next := processRuntimePDPDecisionForCandidate(m, st, intent, now, c, resolver, executor, runner, nodeID, facts)
 
 	if next.Level != st.Level {
 		kliqLog.Printf("STATE %s %s->%s authority=runtime-pdp strikes=%d up=%d down=%d noncomp=%d score=%.2f %s",
@@ -288,6 +290,7 @@ func processRuntimePDPDecisionForCandidate(
 	executor *brokeredActionExecutor,
 	runner *shadowPDPRunner,
 	nodeID string,
+	facts runtimePDPFactProvider,
 ) fsm.State {
 	if runner == nil {
 		return mergeFSMRuntimeState(current, intent.SignalState)
@@ -295,7 +298,7 @@ func processRuntimePDPDecisionForCandidate(
 
 	mode, _ := runner.getMode()
 	prefix := runtimePDPDecisionLogPrefix(mode)
-	input := runtimePDPInputForCandidate(nodeID, m, current, intent, c, now)
+	input := runtimePDPInputForCandidate(nodeID, m, current, intent, c, facts, now)
 	dec, matched, loaded, err := runner.decide(input)
 	if err != nil {
 		kliqLog.Printf("%s candidate decide error %s: %v", prefix, describeRuntimeCandidate(m, intent), err)

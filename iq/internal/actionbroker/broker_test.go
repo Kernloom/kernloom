@@ -161,6 +161,55 @@ func TestRevertExpiredRevertsMatchingLease(t *testing.T) {
 	}
 }
 
+func TestApplyRenewsMatchingActiveLease(t *testing.T) {
+	start := time.Date(2026, 6, 17, 12, 0, 0, 0, time.UTC)
+	current := start
+	pep := &fakePEP{}
+	b, store := newBroker(t, pep, func() time.Time { return current })
+	defer store.Close()
+
+	lease1, _, err := b.Apply(context.Background(), testResolution(time.Second))
+	if err != nil {
+		t.Fatalf("first apply: %v", err)
+	}
+
+	current = start.Add(500 * time.Millisecond)
+	res := testResolution(5 * time.Second)
+	res.DecisionID = "decision-renewed"
+	res.ProposalID = "proposal-renewed"
+	lease2, receipt, err := b.Apply(context.Background(), res)
+	if err != nil {
+		t.Fatalf("renew apply: %v", err)
+	}
+	if pep.applyCalls != 1 {
+		t.Fatalf("renewal should not reapply an already-active lease, got %d apply calls", pep.applyCalls)
+	}
+	if lease2.LeaseID != lease1.LeaseID || lease2.FencingToken != lease1.FencingToken {
+		t.Fatalf("expected same lease/token after renewal: first=%#v second=%#v", lease1, lease2)
+	}
+	if receipt.Status != decision.StatusApplied || receipt.Message == "" {
+		t.Fatalf("expected applied renewal receipt with message, got %#v", receipt)
+	}
+
+	current = start.Add(2 * time.Second)
+	receipts, err := b.RevertExpired(context.Background(), current)
+	if err != nil {
+		t.Fatalf("revert before renewed expiry: %v", err)
+	}
+	if len(receipts) != 0 || pep.revertCalls != 0 {
+		t.Fatalf("renewed lease should not expire at old ttl: receipts=%#v revertCalls=%d", receipts, pep.revertCalls)
+	}
+
+	current = start.Add(6 * time.Second)
+	receipts, err = b.RevertExpired(context.Background(), current)
+	if err != nil {
+		t.Fatalf("revert after renewed expiry: %v", err)
+	}
+	if len(receipts) != 1 || receipts[0].Status != decision.StatusReverted {
+		t.Fatalf("expected renewed lease to revert later, got %#v", receipts)
+	}
+}
+
 func TestRevertExpiredMarksConflictOnFencingMismatch(t *testing.T) {
 	start := time.Date(2026, 6, 17, 12, 0, 0, 0, time.UTC)
 	current := start
