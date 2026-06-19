@@ -7,8 +7,11 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
+
+	"github.com/kernloom/kernloom/pkg/adapterruntime"
 )
 
 // ---- bootstrapConfigHash ----
@@ -180,7 +183,7 @@ func TestObservedSecondsRoundTrip(t *testing.T) {
 				ObservedSeconds: 1800,
 				Phase:           "bootstrap-1",
 			},
-			Trig: trigState{TrigPPS: 200, TrigSyn: 50, TrigScan: 10},
+			Trig: &trigState{TrigPPS: 200, TrigSyn: 50, TrigScan: 10},
 		},
 	}
 
@@ -214,7 +217,7 @@ func TestObservedSecondsIncrementsAcrossRestart(t *testing.T) {
 				ObservedSeconds: 1800,
 				Phase:           "bootstrap-1",
 			},
-			Trig: trigState{TrigPPS: 200},
+			Trig: &trigState{TrigPPS: 200},
 		},
 	}
 	if err := writeStateAtomic(path, st); err != nil {
@@ -257,7 +260,7 @@ func TestConfigHashInvalidatesBootstrapState(t *testing.T) {
 				ObservedSeconds: 9000,
 				Phase:           "bootstrap-2",
 			},
-			Trig: trigState{TrigPPS: 200},
+			Trig: &trigState{TrigPPS: 200},
 		},
 	}
 	if err := writeStateAtomic(path, st); err != nil {
@@ -287,7 +290,7 @@ func TestWriteStateAtomic_NoTmpLeftover(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "state.json")
 
-	st := &stateFile{Version: 2, Active: stateActive{Trig: trigState{TrigPPS: 100}}}
+	st := &stateFile{Version: 2, Active: stateActive{Trig: &trigState{TrigPPS: 100}}}
 	if err := writeStateAtomic(path, st); err != nil {
 		t.Fatalf("write: %v", err)
 	}
@@ -359,7 +362,166 @@ func TestLoadState_OldFormatNoObservedSeconds(t *testing.T) {
 		t.Fatalf("expected 0 observed_seconds for old format, got %d", st.Active.Bootstrap.ObservedSeconds)
 	}
 	// triggers should load correctly
-	if st.Active.Trig.TrigPPS != 80.0 {
-		t.Fatalf("expected TrigPPS=80.0, got %f", st.Active.Trig.TrigPPS)
+	if st.Active.Trig == nil || st.Active.Trig.TrigPPS != 80.0 {
+		t.Fatalf("expected TrigPPS=80.0, got %#v", st.Active.Trig)
+	}
+}
+
+func TestApplyPersistedTuningThresholdsScopedKLShield(t *testing.T) {
+	now := time.Now()
+	scope := newTuningScopeRef("klshield", tuningScopeNetwork)
+	st := &stateFile{
+		Version: 2,
+		Active: stateActive{
+			Profile:   "generic",
+			Revision:  1,
+			UpdatedAt: now,
+			TuningScopes: map[string]tuningScopeState{
+				scope.Key: {
+					AdapterID: "klshield",
+					Scope:     tuningScopeNetwork,
+					Profile:   "generic",
+					Revision:  1,
+					UpdatedAt: now,
+					Metrics: thresholdsToTuningMetrics(adapterruntime.TuningThresholds{
+						PacketsPerSecond:       123,
+						SynRate:                45,
+						DestinationPortChanges: 6,
+						BytesPerSecond:         789,
+					}),
+				},
+			},
+		},
+	}
+	c := cfg{
+		Adapters: "klshield",
+		LegacyNetworkScoring: adapterruntime.LegacyNetworkScoring{
+			TrigPPS: 1, TrigSyn: 1, TrigScan: 1, TrigBPS: 1,
+		},
+	}
+	applied, reason := c.applyPersistedTuningThresholds(st, map[string]bool{}, "generic")
+	if !applied {
+		t.Fatalf("expected scoped tuning state to apply, reason=%s", reason)
+	}
+	if c.TrigPPS != 123 || c.TrigSyn != 45 || c.TrigScan != 6 || c.TrigBPS != 789 {
+		t.Fatalf("thresholds not applied: %#v", c.tuningThresholds())
+	}
+}
+
+func TestNewBootstrapStateActiveWritesScopedTuningOnly(t *testing.T) {
+	c := cfg{
+		Adapters: "klshield",
+		AutoK:    3.5,
+		LegacyNetworkScoring: adapterruntime.LegacyNetworkScoring{
+			TrigPPS: 5000, TrigSyn: 500, TrigScan: 50,
+		},
+	}
+	st := &stateFile{
+		Version: 2,
+		Active: newBootstrapStateActive("generic", c, bootstrapInfo{
+			Enabled:   true,
+			StartedAt: time.Now(),
+		}, "hash"),
+	}
+
+	if st.Active.Trig != nil {
+		t.Fatalf("new bootstrap state must not write legacy active.trig: %#v", st.Active.Trig)
+	}
+	if _, ok := st.Active.TuningScopes["klshield:network"]; !ok {
+		t.Fatalf("expected klshield:network tuning scope, got %#v", st.Active.TuningScopes)
+	}
+
+	raw, err := json.Marshal(st)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if strings.Contains(string(raw), `"trig"`) {
+		t.Fatalf("new bootstrap state JSON contains legacy trig: %s", raw)
+	}
+	if !strings.Contains(string(raw), `"tuning_scopes"`) {
+		t.Fatalf("new bootstrap state JSON missing tuning_scopes: %s", raw)
+	}
+}
+
+func TestApplyPersistedTuningThresholdsSkipsNonKLShieldAdapter(t *testing.T) {
+	now := time.Now()
+	scope := newTuningScopeRef("klshield", tuningScopeNetwork)
+	st := &stateFile{
+		Version: 2,
+		Active: stateActive{
+			Profile:   "generic",
+			Revision:  1,
+			UpdatedAt: now,
+			TuningScopes: map[string]tuningScopeState{
+				scope.Key: {
+					AdapterID: "klshield",
+					Scope:     tuningScopeNetwork,
+					Profile:   "generic",
+					Revision:  1,
+					UpdatedAt: now,
+					Metrics: thresholdsToTuningMetrics(adapterruntime.TuningThresholds{
+						PacketsPerSecond: 123,
+					}),
+				},
+			},
+		},
+	}
+	c := cfg{
+		Adapters:             "openziti",
+		LegacyNetworkScoring: adapterruntime.LegacyNetworkScoring{TrigPPS: 1},
+	}
+	applied, _ := c.applyPersistedTuningThresholds(st, map[string]bool{}, "generic")
+	if applied {
+		t.Fatal("openziti-only run must not apply klshield network thresholds")
+	}
+	if c.TrigPPS != 1 {
+		t.Fatalf("threshold changed unexpectedly: %f", c.TrigPPS)
+	}
+}
+
+func TestApplyPersistedTuningThresholdsMigratesLearnedLegacyKLShieldOnly(t *testing.T) {
+	now := time.Now()
+	learnedLegacy := &stateFile{
+		Version: 2,
+		Active: stateActive{
+			Profile:   "generic",
+			Revision:  1,
+			UpdatedAt: now,
+			Trig:      &trigState{TrigPPS: 222, TrigSyn: 33, TrigScan: 4},
+		},
+	}
+	c := cfg{
+		Adapters: "klshield",
+		LegacyNetworkScoring: adapterruntime.LegacyNetworkScoring{
+			TrigPPS: 1, TrigSyn: 1, TrigScan: 1,
+		},
+	}
+	applied, reason := c.applyPersistedTuningThresholds(learnedLegacy, map[string]bool{}, "generic")
+	if !applied {
+		t.Fatalf("expected learned legacy klshield state to apply, reason=%s", reason)
+	}
+	if c.TrigPPS != 222 || c.TrigSyn != 33 || c.TrigScan != 4 {
+		t.Fatalf("legacy thresholds not applied: %#v", c.tuningThresholds())
+	}
+
+	initialDefault := &stateFile{
+		Version: 2,
+		Active: stateActive{
+			Profile: "generic",
+			Trig:    &trigState{TrigPPS: 5000, TrigSyn: 500, TrigScan: 50},
+		},
+	}
+	c = cfg{
+		Adapters: "klshield",
+		LegacyNetworkScoring: adapterruntime.LegacyNetworkScoring{
+			TrigPPS: 1, TrigSyn: 1, TrigScan: 1,
+		},
+	}
+	applied, _ = c.applyPersistedTuningThresholds(initialDefault, map[string]bool{}, "generic")
+	if applied {
+		t.Fatal("rev=0 updated=never legacy default state must not apply as learned tuning")
+	}
+	if c.TrigPPS != 1 || c.TrigSyn != 1 || c.TrigScan != 1 {
+		t.Fatalf("default state changed thresholds: %#v", c.tuningThresholds())
 	}
 }

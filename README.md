@@ -210,6 +210,29 @@ KLIQ keeps conformance fixtures for signed runtime bundles, unsupported schema/c
 
 ---
 
+## Runtime state and baselines
+
+KLIQ keeps two different kinds of learned runtime data:
+
+- **Metric baselines** live in SQLite and describe normal behaviour for a subject or relationship, such as an edge's learned `network.packets_per_second`.
+- **Autotune thresholds** live in `state.json` and describe adapter-specific detector thresholds. These are scoped under `active.tuning_scopes`, for example `klshield:network`, so KLShield/XDP PPS/SYN/scan thresholds are not applied to an OpenZiti-only node.
+
+Legacy `active.trig` fields remain readable when loading old state files, but new state writes omit that top-level mirror and persist metric IDs only under the matching tuning scope.
+
+Baselines can be inspected and reset from the CLI:
+
+```bash
+./bin/kliq baselines list --db=/tmp/kernloom-manual/kliq-state.db --scope=relationship --sort=-obs
+./bin/kliq baselines delete --db=/tmp/kernloom-manual/kliq-state.db --scope=relationship --source-class=xdp --metric=network.xdp.edge --dry-run
+./bin/kliq baselines delete --db=/tmp/kernloom-manual/kliq-state.db --scope=relationship --source-class=xdp --metric=network.xdp.edge
+```
+
+Baseline tables support `--sort=metric|subject|source|scope|truth|window|state|baseline|peak|confidence|obs|updated`; prefix the key with `-` for descending order.
+
+Unfiltered baseline deletion is rejected unless `--all` is set explicitly.
+
+---
+
 ## Action leases and receipts
 
 Every TTL-bounded enforcement action is recorded as an `ActionLease` before the PEP is called. Leases carry:

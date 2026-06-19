@@ -10,7 +10,7 @@ func runBaselineStatus(storePath, nodeID string, showAll bool, sortBy string) {
 	// The new generic baselines are keyed by (metric_id, scope, source_class, ...).
 	// For graph edge baselines: metric_id=network.xdp.edge.*, source_class=xdp.
 	// Delegate to the generic baseline list command.
-	runBaselinesGenericList(storePath, "network.xdp.edge", "relationship", "xdp")
+	runBaselinesGenericList(storePath, "network.xdp.edge", "relationship", "xdp", "metric")
 }
 
 // runBaselineReset resets edge baselines.

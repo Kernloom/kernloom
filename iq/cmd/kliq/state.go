@@ -17,6 +17,24 @@ import (
 
 /* ---------------- Persistence (state.json) ---------------- */
 
+const (
+	tuningScopeNetwork = "network"
+)
+
+type tuningScopeRef struct {
+	AdapterID string
+	Scope     string
+	Key       string
+}
+
+func newTuningScopeRef(adapterID, scope string) tuningScopeRef {
+	key := adapterID
+	if scope != "" {
+		key += ":" + scope
+	}
+	return tuningScopeRef{AdapterID: adapterID, Scope: scope, Key: key}
+}
+
 type trigState struct {
 	TrigPPS  float64 `json:"trig_pps"`
 	TrigSyn  float64 `json:"trig_syn"`
@@ -29,6 +47,23 @@ type tuneMeta struct {
 	Window      string  `json:"window"`
 	K           float64 `json:"k"`
 	SigmaFactor float64 `json:"sigma_factor"`
+}
+
+type tuningMetricState struct {
+	Threshold float64 `json:"threshold"`
+}
+
+type tuningScopeState struct {
+	AdapterID   string                       `json:"adapter_id"`
+	Scope       string                       `json:"scope"`
+	Profile     string                       `json:"profile,omitempty"`
+	Revision    int                          `json:"revision,omitempty"`
+	UpdatedAt   time.Time                    `json:"updated_at,omitempty"`
+	Metrics     map[string]tuningMetricState `json:"metrics,omitempty"`
+	Tune        tuneMeta                     `json:"tune,omitempty"`
+	SampleCount int                          `json:"sample_count,omitempty"`
+	CleanRatio  float64                      `json:"clean_ratio,omitempty"`
+	Notes       string                       `json:"notes,omitempty"`
 }
 
 type bootstrapInfo struct {
@@ -46,15 +81,19 @@ type bootstrapInfo struct {
 }
 
 type stateActive struct {
-	Profile     string        `json:"profile"`
-	Revision    int           `json:"revision"`
-	UpdatedAt   time.Time     `json:"updated_at"`
-	Trig        trigState     `json:"trig"`
-	Tune        tuneMeta      `json:"tune"`
-	Bootstrap   bootstrapInfo `json:"bootstrap,omitempty"`
-	SampleCount int           `json:"sample_count"`
-	CleanRatio  float64       `json:"clean_ratio"`
-	Notes       string        `json:"notes,omitempty"`
+	Profile   string    `json:"profile"`
+	Revision  int       `json:"revision"`
+	UpdatedAt time.Time `json:"updated_at"`
+	// Trig is a legacy KLShield/network mirror used only when reading old
+	// state files. New writes use TuningScopes so adapter-specific metrics do
+	// not leak across KLIQ deployments.
+	Trig         *trigState                  `json:"trig,omitempty"`
+	Tune         tuneMeta                    `json:"tune"`
+	TuningScopes map[string]tuningScopeState `json:"tuning_scopes,omitempty"`
+	Bootstrap    bootstrapInfo               `json:"bootstrap,omitempty"`
+	SampleCount  int                         `json:"sample_count"`
+	CleanRatio   float64                     `json:"clean_ratio"`
+	Notes        string                      `json:"notes,omitempty"`
 
 	// ConfigHash is a short hash of autotune-relevant configuration values.
 	// A mismatch between the hash in state.json and the current config causes
@@ -100,7 +139,12 @@ type stateActive struct {
 type stateHistory struct {
 	Revision int       `json:"revision"`
 	At       time.Time `json:"at"`
-	Trig     trigState `json:"trig"`
+	// Trig is a legacy KLShield/network mirror used only when reading old
+	// histories. MetricThresholds is the generic representation keyed by
+	// adapterruntime metric IDs.
+	Trig             *trigState         `json:"trig,omitempty"`
+	TuningScope      string             `json:"tuning_scope,omitempty"`
+	MetricThresholds map[string]float64 `json:"metric_thresholds,omitempty"`
 	// AdapterStats holds adapter-specific statistics for this autotune window.
 	// Generic map keeps state.go free of adapter-domain field names.
 	AdapterStats map[string]float64 `json:"adapter_stats,omitempty"`
@@ -126,7 +170,12 @@ type stateFile struct {
 // bootstrap session. Only fields that affect the learning outcome are included:
 // changing cosmetic options (TopN, DryRun, log verbosity) does not reset.
 func bootstrapConfigHash(c *cfg) string {
-	key := fmt.Sprintf("%s|%s|%.2f|%.2f|%.2f|%.2f",
+	scopeKey := "none"
+	if scope, ok := c.tuningScopeRef(); ok {
+		scopeKey = scope.Key
+	}
+	key := fmt.Sprintf("%s|%s|%s|%.2f|%.2f|%.2f|%.2f",
+		scopeKey,
 		c.BPFfsRoot,
 		c.BootstrapWindow.String(),
 		c.AutoFloorPPS, c.AutoFloorSyn, c.AutoFloorScan, c.AutoFloorBPS)
@@ -217,6 +266,7 @@ func loadState(path string, maxAge time.Duration) (*stateFile, error) {
 func applyAutotuneStateUpdate(
 	st *stateFile,
 	profileName string,
+	scope tuningScopeRef,
 	bs bootstrapInfo,
 	cfgHash string,
 	historyKeep int,
@@ -234,46 +284,78 @@ func applyAutotuneStateUpdate(
 	}
 	stats["k"] = k
 	t := result.NewThresholds
+	updatedAt := time.Now()
 	st.History = append(st.History, stateHistory{
-		Revision:     rev,
-		At:           time.Now(),
-		Trig:         thresholdsToTrigState(t),
-		AdapterStats: stats,
-		SampleCount:  result.SampleCount,
-		CleanRatio:   result.CleanRatio,
-		Notes:        fmt.Sprintf("autotune dropRatio=%.4f phase=%s", dropRatio, result.Phase),
+		Revision:         rev,
+		At:               updatedAt,
+		TuningScope:      scope.Key,
+		MetricThresholds: thresholdsToMetricThresholds(t),
+		AdapterStats:     stats,
+		SampleCount:      result.SampleCount,
+		CleanRatio:       result.CleanRatio,
+		Notes:            fmt.Sprintf("autotune dropRatio=%.4f phase=%s", dropRatio, result.Phase),
 	})
 	if len(st.History) > historyKeep && historyKeep > 0 {
 		st.History = st.History[len(st.History)-historyKeep:]
 	}
+	scopes := cloneTuningScopes(st.Active.TuningScopes)
+	if scope.Key != "" {
+		scopes[scope.Key] = tuningScopeState{
+			AdapterID:   scope.AdapterID,
+			Scope:       scope.Scope,
+			Profile:     profileName,
+			Revision:    rev,
+			UpdatedAt:   updatedAt,
+			Metrics:     thresholdsToTuningMetrics(t),
+			Tune:        tuneMeta{Method: "median_mad", Window: "reservoir", K: k, SigmaFactor: 1.4826},
+			SampleCount: result.SampleCount,
+			CleanRatio:  result.CleanRatio,
+			Notes:       "autotune",
+		}
+	}
 	st.Active = stateActive{
-		Profile:     profileName,
-		Revision:    rev,
-		UpdatedAt:   time.Now(),
-		Trig:        thresholdsToTrigState(t),
-		Tune:        tuneMeta{Method: "median_mad", Window: "reservoir", K: k, SigmaFactor: 1.4826},
-		Bootstrap:   bs,
-		ConfigHash:  cfgHash,
-		SampleCount: result.SampleCount,
-		CleanRatio:  result.CleanRatio,
-		Notes:       "autotune",
+		Profile:      profileName,
+		Revision:     rev,
+		UpdatedAt:    updatedAt,
+		Tune:         tuneMeta{Method: "median_mad", Window: "reservoir", K: k, SigmaFactor: 1.4826},
+		TuningScopes: scopes,
+		Bootstrap:    bs,
+		ConfigHash:   cfgHash,
+		SampleCount:  result.SampleCount,
+		CleanRatio:   result.CleanRatio,
+		Notes:        "autotune",
 	}
 	return st
 }
 
 func newBootstrapStateActive(profileName string, c cfg, bs bootstrapInfo, cfgHash string) stateActive {
 	t := c.tuningThresholds()
+	scopes := map[string]tuningScopeState{}
+	if scope, ok := c.tuningScopeRef(); ok {
+		scopes[scope.Key] = tuningScopeState{
+			AdapterID:   scope.AdapterID,
+			Scope:       scope.Scope,
+			Profile:     profileName,
+			Revision:    0,
+			UpdatedAt:   time.Time{},
+			Metrics:     thresholdsToTuningMetrics(t),
+			Tune:        tuneMeta{Method: "median_mad", Window: "reservoir", K: c.AutoK, SigmaFactor: 1.4826},
+			SampleCount: 0,
+			CleanRatio:  1.0,
+			Notes:       "bootstrap initialized",
+		}
+	}
 	return stateActive{
-		Profile:     profileName,
-		Revision:    0,
-		UpdatedAt:   time.Time{},
-		Trig:        thresholdsToTrigState(t),
-		Tune:        tuneMeta{Method: "median_mad", Window: "reservoir", K: c.AutoK, SigmaFactor: 1.4826},
-		Bootstrap:   bs,
-		ConfigHash:  cfgHash,
-		SampleCount: 0,
-		CleanRatio:  1.0,
-		Notes:       "bootstrap initialized",
+		Profile:      profileName,
+		Revision:     0,
+		UpdatedAt:    time.Time{},
+		Tune:         tuneMeta{Method: "median_mad", Window: "reservoir", K: c.AutoK, SigmaFactor: 1.4826},
+		TuningScopes: scopes,
+		Bootstrap:    bs,
+		ConfigHash:   cfgHash,
+		SampleCount:  0,
+		CleanRatio:   1.0,
+		Notes:        "bootstrap initialized",
 	}
 }
 
@@ -284,4 +366,83 @@ func thresholdsToTrigState(t adapterruntime.TuningThresholds) trigState {
 		TrigScan: t.DestinationPortChanges,
 		TrigBPS:  t.BytesPerSecond,
 	}
+}
+
+func thresholdsToTuningMetrics(t adapterruntime.TuningThresholds) map[string]tuningMetricState {
+	out := make(map[string]tuningMetricState, 4)
+	if t.PacketsPerSecond > 0 {
+		out[adapterruntime.MetricNetworkPacketsPerSecond] = tuningMetricState{Threshold: t.PacketsPerSecond}
+	}
+	if t.SynRate > 0 {
+		out[adapterruntime.MetricNetworkSynRate] = tuningMetricState{Threshold: t.SynRate}
+	}
+	if t.DestinationPortChanges > 0 {
+		out[adapterruntime.MetricNetworkDestinationPortChanges] = tuningMetricState{Threshold: t.DestinationPortChanges}
+	}
+	if t.BytesPerSecond > 0 {
+		out[adapterruntime.MetricNetworkBytesPerSecond] = tuningMetricState{Threshold: t.BytesPerSecond}
+	}
+	return out
+}
+
+func thresholdsToMetricThresholds(t adapterruntime.TuningThresholds) map[string]float64 {
+	out := make(map[string]float64, 4)
+	for k, v := range thresholdsToTuningMetrics(t) {
+		out[k] = v.Threshold
+	}
+	return out
+}
+
+func metricThresholdsToThresholds(metrics map[string]float64) (adapterruntime.TuningThresholds, bool) {
+	if len(metrics) == 0 {
+		return adapterruntime.TuningThresholds{}, false
+	}
+	t := adapterruntime.TuningThresholds{
+		PacketsPerSecond:       metrics[adapterruntime.MetricNetworkPacketsPerSecond],
+		SynRate:                metrics[adapterruntime.MetricNetworkSynRate],
+		DestinationPortChanges: metrics[adapterruntime.MetricNetworkDestinationPortChanges],
+		BytesPerSecond:         metrics[adapterruntime.MetricNetworkBytesPerSecond],
+	}
+	return t, t.PacketsPerSecond > 0 || t.SynRate > 0 || t.DestinationPortChanges > 0 || t.BytesPerSecond > 0
+}
+
+func tuningMetricsToThresholds(metrics map[string]tuningMetricState) (adapterruntime.TuningThresholds, bool) {
+	if len(metrics) == 0 {
+		return adapterruntime.TuningThresholds{}, false
+	}
+	t := adapterruntime.TuningThresholds{
+		PacketsPerSecond:       metrics[adapterruntime.MetricNetworkPacketsPerSecond].Threshold,
+		SynRate:                metrics[adapterruntime.MetricNetworkSynRate].Threshold,
+		DestinationPortChanges: metrics[adapterruntime.MetricNetworkDestinationPortChanges].Threshold,
+		BytesPerSecond:         metrics[adapterruntime.MetricNetworkBytesPerSecond].Threshold,
+	}
+	return t, t.PacketsPerSecond > 0 || t.SynRate > 0 || t.DestinationPortChanges > 0 || t.BytesPerSecond > 0
+}
+
+func trigStateToThresholds(trig *trigState) (adapterruntime.TuningThresholds, bool) {
+	if trig == nil {
+		return adapterruntime.TuningThresholds{}, false
+	}
+	t := adapterruntime.TuningThresholds{
+		PacketsPerSecond:       trig.TrigPPS,
+		SynRate:                trig.TrigSyn,
+		DestinationPortChanges: trig.TrigScan,
+		BytesPerSecond:         trig.TrigBPS,
+	}
+	return t, t.PacketsPerSecond > 0 || t.SynRate > 0 || t.DestinationPortChanges > 0 || t.BytesPerSecond > 0
+}
+
+func cloneTuningScopes(in map[string]tuningScopeState) map[string]tuningScopeState {
+	out := make(map[string]tuningScopeState, len(in)+1)
+	for k, v := range in {
+		if v.Metrics != nil {
+			m := make(map[string]tuningMetricState, len(v.Metrics))
+			for mk, mv := range v.Metrics {
+				m[mk] = mv
+			}
+			v.Metrics = m
+		}
+		out[k] = v
+	}
+	return out
 }

@@ -9,10 +9,12 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"sort"
 	"strings"
 	"text/tabwriter"
 	"time"
 
+	"github.com/kernloom/kernloom/pkg/adapterruntime"
 	netfilterruntime "github.com/kernloom/kernloom/pkg/adapters/netfilter/runtime"
 	"github.com/kernloom/kernloom/pkg/componentinventory"
 	"github.com/kernloom/kernloom/pkg/core/featureset"
@@ -116,17 +118,7 @@ func runStatus(statePath, dbPath string) {
 		}
 		w.Flush()
 
-		fmt.Printf("\nAutotune triggers:\n")
-		w = tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
-		fmt.Fprintf(w, "  pps\t%.1f\n", st.Active.Trig.TrigPPS)
-		fmt.Fprintf(w, "  syn\t%.1f\n", st.Active.Trig.TrigSyn)
-		fmt.Fprintf(w, "  scan\t%.1f\n", st.Active.Trig.TrigScan)
-		if st.Active.Trig.TrigBPS > 0 {
-			fmt.Fprintf(w, "  bps\t%.0f\n", st.Active.Trig.TrigBPS)
-		} else {
-			fmt.Fprintf(w, "  bps\toff\n")
-		}
-		w.Flush()
+		printAutotuneScopes(st)
 
 		if n := len(st.History); n > 0 {
 			fmt.Printf("\nTune history (last %d of %d):\n", min3(n, 3), n)
@@ -137,13 +129,14 @@ func runStatus(statePath, dbPath string) {
 				start = n - 3
 			}
 			for _, h := range st.History[start:] {
+				t, _ := historyTuningThresholds(h)
 				bpsStr := "off"
-				if h.Trig.TrigBPS > 0 {
-					bpsStr = fmt.Sprintf("%.0f", h.Trig.TrigBPS)
+				if t.BytesPerSecond > 0 {
+					bpsStr = fmt.Sprintf("%.0f", t.BytesPerSecond)
 				}
 				fmt.Fprintf(w, "  %d\t%s\t%.1f\t%.1f\t%.1f\t%s\n",
 					h.Revision, h.At.Format("2006-01-02 15:04"),
-					h.Trig.TrigPPS, h.Trig.TrigSyn, h.Trig.TrigScan, bpsStr)
+					t.PacketsPerSecond, t.SynRate, t.DestinationPortChanges, bpsStr)
 			}
 			w.Flush()
 		}
@@ -300,6 +293,58 @@ func printRuntimeReport(statePath string, st *stateFile) {
 	}
 }
 
+func printAutotuneScopes(st *stateFile) {
+	if st == nil {
+		return
+	}
+	if len(st.Active.TuningScopes) == 0 {
+		t, ok := trigStateToThresholds(st.Active.Trig)
+		if !ok {
+			fmt.Printf("\nAutotune tuning scopes: none\n")
+			return
+		}
+		fmt.Printf("\nAutotune triggers (legacy klshield:network):\n")
+		w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
+		fmt.Fprintf(w, "  pps\t%.1f\n", t.PacketsPerSecond)
+		fmt.Fprintf(w, "  syn\t%.1f\n", t.SynRate)
+		fmt.Fprintf(w, "  scan\t%.1f\n", t.DestinationPortChanges)
+		if t.BytesPerSecond > 0 {
+			fmt.Fprintf(w, "  bps\t%.0f\n", t.BytesPerSecond)
+		} else {
+			fmt.Fprintf(w, "  bps\toff\n")
+		}
+		w.Flush()
+		return
+	}
+
+	keys := make([]string, 0, len(st.Active.TuningScopes))
+	for key := range st.Active.TuningScopes {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+
+	fmt.Printf("\nAutotune tuning scopes:\n")
+	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
+	for _, key := range keys {
+		scope := st.Active.TuningScopes[key]
+		updated := "never"
+		if !scope.UpdatedAt.IsZero() {
+			updated = fmtAge(time.Since(scope.UpdatedAt)) + " ago"
+		}
+		fmt.Fprintf(w, "  %s\tadapter=%s scope=%s rev=%d updated=%s\n",
+			key, scope.AdapterID, scope.Scope, scope.Revision, updated)
+		metricKeys := make([]string, 0, len(scope.Metrics))
+		for metric := range scope.Metrics {
+			metricKeys = append(metricKeys, metric)
+		}
+		sort.Strings(metricKeys)
+		for _, metric := range metricKeys {
+			fmt.Fprintf(w, "    %s\t%.1f\n", metric, scope.Metrics[metric].Threshold)
+		}
+	}
+	w.Flush()
+}
+
 // phaseInterval returns the default autotune cycle interval for a bootstrap phase.
 func phaseInterval(phase string) time.Duration {
 	switch phase {
@@ -312,6 +357,13 @@ func phaseInterval(phase string) time.Duration {
 	default:
 		return 0
 	}
+}
+
+func historyTuningThresholds(h stateHistory) (adapterruntime.TuningThresholds, bool) {
+	if t, ok := metricThresholdsToThresholds(h.MetricThresholds); ok {
+		return t, true
+	}
+	return trigStateToThresholds(h.Trig)
 }
 
 func fmtAge(d time.Duration) string {

@@ -332,6 +332,15 @@ func (c cfg) bindingAdapterNames() []string {
 // WantsNetfilter returns true when netfilter is in the adapter list.
 func (c cfg) WantsNetfilter() bool { return c.hasAdapter("netfilter") }
 
+func (c cfg) tuningScopeRef() (tuningScopeRef, bool) {
+	for _, name := range c.bindingAdapterNames() {
+		if catalog.CanonicalAdapterID(name) == catalog.DefaultAdapterID {
+			return newTuningScopeRef(catalog.DefaultAdapterID, tuningScopeNetwork), true
+		}
+	}
+	return tuningScopeRef{}, false
+}
+
 // toFSMConfig converts the relevant cfg fields to an fsm.Config.
 func (c cfg) toFSMConfig() fsm.Config {
 	return fsm.Config{
@@ -460,21 +469,60 @@ func (c cfg) tuningConfig() adapterruntime.TuningConfig {
 	}
 }
 
-func (c *cfg) applyPersistedTuningThresholds(st *stateFile, explicitFlags map[string]bool) {
+func (c *cfg) applyPersistedTuningThresholds(st *stateFile, explicitFlags map[string]bool, profileName string) (bool, string) {
 	if st == nil {
-		return
+		return false, "no state"
 	}
-	if st.Active.Trig.TrigPPS > 0 && !explicitFlags["trig-pps"] {
-		c.TrigPPS = st.Active.Trig.TrigPPS
+	scope, ok := c.tuningScopeRef()
+	if !ok {
+		return false, "no compatible tuning scope for configured adapters"
 	}
-	if st.Active.Trig.TrigSyn > 0 && !explicitFlags["trig-syn"] {
-		c.TrigSyn = st.Active.Trig.TrigSyn
+	if st.Active.Profile != "" && profileName != "" && st.Active.Profile != profileName {
+		return false, fmt.Sprintf("profile mismatch state=%s current=%s", st.Active.Profile, profileName)
 	}
-	if st.Active.Trig.TrigScan > 0 && !explicitFlags["trig-scan"] {
-		c.TrigScan = st.Active.Trig.TrigScan
+	if st.Active.Revision <= 0 || st.Active.UpdatedAt.IsZero() {
+		return false, "no learned tuning revision"
 	}
-	if st.Active.Trig.TrigBPS > 0 && !explicitFlags["trig-bps"] {
-		c.TrigBPS = st.Active.Trig.TrigBPS
+
+	if scoped, found := st.Active.TuningScopes[scope.Key]; found {
+		if scoped.Profile != "" && profileName != "" && scoped.Profile != profileName {
+			return false, fmt.Sprintf("scope profile mismatch scope=%s state=%s current=%s", scope.Key, scoped.Profile, profileName)
+		}
+		thresholds, ok := tuningMetricsToThresholds(scoped.Metrics)
+		if !ok {
+			return false, fmt.Sprintf("scope %s has no thresholds", scope.Key)
+		}
+		c.applyPersistedThresholdValues(thresholds, explicitFlags)
+		return true, "scope=" + scope.Key
+	}
+
+	// Legacy migration path: pre-scope state files stored KLShield/XDP network
+	// triggers as naked trig_* fields. Only migrate them into a KLShield network
+	// run, and only after a real learned revision exists.
+	if scope.AdapterID == catalog.DefaultAdapterID && scope.Scope == tuningScopeNetwork {
+		thresholds, ok := trigStateToThresholds(st.Active.Trig)
+		if !ok {
+			return false, "legacy trig state is empty"
+		}
+		c.applyPersistedThresholdValues(thresholds, explicitFlags)
+		return true, "scope=" + scope.Key + " source=legacy-trig"
+	}
+
+	return false, "no matching tuning scope " + scope.Key
+}
+
+func (c *cfg) applyPersistedThresholdValues(t adapterruntime.TuningThresholds, explicitFlags map[string]bool) {
+	if t.PacketsPerSecond > 0 && !explicitFlags["trig-pps"] {
+		c.TrigPPS = t.PacketsPerSecond
+	}
+	if t.SynRate > 0 && !explicitFlags["trig-syn"] {
+		c.TrigSyn = t.SynRate
+	}
+	if t.DestinationPortChanges > 0 && !explicitFlags["trig-scan"] {
+		c.TrigScan = t.DestinationPortChanges
+	}
+	if t.BytesPerSecond > 0 && !explicitFlags["trig-bps"] {
+		c.TrigBPS = t.BytesPerSecond
 	}
 }
 

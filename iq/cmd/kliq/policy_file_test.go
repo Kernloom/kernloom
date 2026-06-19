@@ -67,8 +67,9 @@ func TestLoadPolicyBytesVerifiesSignedRuntimePolicyPack(t *testing.T) {
 	if _, err := loadPolicyBytes(signed, "runtime-policy.yaml", pub); err != nil {
 		t.Fatalf("signed runtime policy should verify: %v", err)
 	}
-	signed[len(signed)-4] = 'X'
-	if _, err := loadPolicyBytes(signed, "runtime-policy.yaml", pub); err == nil {
+	tampered := append([]byte{}, signed...)
+	tampered[0] = 'X'
+	if _, err := loadPolicyBytes(tampered, "runtime-policy.yaml", pub); err == nil {
 		t.Fatal("tampered signed runtime policy should fail")
 	}
 }

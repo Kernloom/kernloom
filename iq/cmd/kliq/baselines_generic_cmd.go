@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"sort"
 	"strings"
 	"text/tabwriter"
 	"time"
@@ -19,8 +20,36 @@ const baselinesGenericUsage = `usage: kliq baselines <subcommand> [args]
 
 Subcommands:
   list [--db <path>] [--node <id>] [--metric <id>] [--scope <type>] [--source-class <class>]
+       [--sort=metric|subject|source|scope|truth|window|state|baseline|peak|confidence|obs|updated]
            List generic metric baselines from the state store.
+  reset|delete [--db <path>] [--id <baseline-id>] [--metric <id-fragment>]
+               [--scope <type>] [--scope-id <id>] [--source-class <class>]
+               [--subject <id|display|stable-id>] [--state <state>] [--dry-run] [--all]
+           Delete matching metric baselines. Requires at least one filter unless --all is set.
 `
+
+type baselineDeleteFilters struct {
+	ID          string
+	Metric      string
+	Scope       string
+	ScopeID     string
+	SourceClass string
+	Subject     string
+	State       string
+	DryRun      bool
+	All         bool
+}
+
+func (f baselineDeleteFilters) hasSelector() bool {
+	return f.All ||
+		f.ID != "" ||
+		f.Metric != "" ||
+		f.Scope != "" ||
+		f.ScopeID != "" ||
+		f.SourceClass != "" ||
+		f.Subject != "" ||
+		f.State != ""
+}
 
 // handleBaselinesGenericSubcommand handles "kliq baselines <sub> ..." commands.
 func handleBaselinesGenericSubcommand(defaultDB string) bool {
@@ -33,6 +62,8 @@ func handleBaselinesGenericSubcommand(defaultDB string) bool {
 	metricFilter := ""
 	scopeFilter := ""
 	sourceClassFilter := ""
+	sortSpec := "metric"
+	deleteFilters := baselineDeleteFilters{}
 	sub := "list"
 
 	filtered := args[1:]
@@ -48,18 +79,53 @@ func handleBaselinesGenericSubcommand(defaultDB string) bool {
 		case a == "--metric" && i+1 < len(filtered):
 			i++
 			metricFilter = filtered[i]
+			deleteFilters.Metric = metricFilter
 		case strings.HasPrefix(a, "--metric="):
 			metricFilter = strings.TrimPrefix(a, "--metric=")
+			deleteFilters.Metric = metricFilter
 		case a == "--scope" && i+1 < len(filtered):
 			i++
 			scopeFilter = filtered[i]
+			deleteFilters.Scope = scopeFilter
 		case strings.HasPrefix(a, "--scope="):
 			scopeFilter = strings.TrimPrefix(a, "--scope=")
+			deleteFilters.Scope = scopeFilter
+		case a == "--scope-id" && i+1 < len(filtered):
+			i++
+			deleteFilters.ScopeID = filtered[i]
+		case strings.HasPrefix(a, "--scope-id="):
+			deleteFilters.ScopeID = strings.TrimPrefix(a, "--scope-id=")
 		case a == "--source-class" && i+1 < len(filtered):
 			i++
 			sourceClassFilter = filtered[i]
+			deleteFilters.SourceClass = sourceClassFilter
 		case strings.HasPrefix(a, "--source-class="):
 			sourceClassFilter = strings.TrimPrefix(a, "--source-class=")
+			deleteFilters.SourceClass = sourceClassFilter
+		case a == "--sort" && i+1 < len(filtered):
+			i++
+			sortSpec = filtered[i]
+		case strings.HasPrefix(a, "--sort="):
+			sortSpec = strings.TrimPrefix(a, "--sort=")
+		case a == "--id" && i+1 < len(filtered):
+			i++
+			deleteFilters.ID = filtered[i]
+		case strings.HasPrefix(a, "--id="):
+			deleteFilters.ID = strings.TrimPrefix(a, "--id=")
+		case a == "--subject" && i+1 < len(filtered):
+			i++
+			deleteFilters.Subject = filtered[i]
+		case strings.HasPrefix(a, "--subject="):
+			deleteFilters.Subject = strings.TrimPrefix(a, "--subject=")
+		case a == "--state" && i+1 < len(filtered):
+			i++
+			deleteFilters.State = filtered[i]
+		case strings.HasPrefix(a, "--state="):
+			deleteFilters.State = strings.TrimPrefix(a, "--state=")
+		case a == "--dry-run" || a == "-dry-run":
+			deleteFilters.DryRun = true
+		case a == "--all" || a == "-all":
+			deleteFilters.All = true
 		case len(a) > 0 && a[0] != '-':
 			positional = append(positional, a)
 		}
@@ -71,7 +137,9 @@ func handleBaselinesGenericSubcommand(defaultDB string) bool {
 
 	switch sub {
 	case "list", "":
-		runBaselinesGenericList(dbPath, metricFilter, scopeFilter, sourceClassFilter)
+		runBaselinesGenericList(dbPath, metricFilter, scopeFilter, sourceClassFilter, sortSpec)
+	case "reset", "delete":
+		runBaselinesGenericDelete(dbPath, deleteFilters)
 	default:
 		fmt.Fprintf(os.Stderr, "unknown baselines subcommand %q\n\n%s", sub, baselinesGenericUsage)
 		os.Exit(1)
@@ -79,7 +147,118 @@ func handleBaselinesGenericSubcommand(defaultDB string) bool {
 	return true
 }
 
-func runBaselinesGenericList(dbPath, metricFilter, scopeFilter, sourceClassFilter string) {
+func runBaselinesGenericDelete(dbPath string, filters baselineDeleteFilters) {
+	s, err := sqlite.Open(sqlite.DefaultConfig(dbPath))
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: open state store %q: %v\n", dbPath, err)
+		os.Exit(1)
+	}
+	defer s.Close()
+
+	n, err := deleteMetricBaselines(context.Background(), s, filters)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: delete baselines: %v\n", err)
+		os.Exit(1)
+	}
+	if filters.DryRun {
+		fmt.Printf("Would delete %d metric baseline(s).\n", n)
+		return
+	}
+	fmt.Printf("Deleted %d metric baseline(s).\n", n)
+}
+
+func deleteMetricBaselines(ctx context.Context, s *sqlite.Store, filters baselineDeleteFilters) (int64, error) {
+	if !filters.hasSelector() {
+		return 0, fmt.Errorf("refusing to delete baselines without a filter; use --all for a full wipe")
+	}
+
+	where, args := baselineDeleteWhere(filters)
+	countSQL := `
+		SELECT COUNT(*)
+		FROM metric_baselines b
+		LEFT JOIN entities e ON e.stable_id = b.subject_entity_id
+		WHERE ` + where
+
+	var n int64
+	if err := s.DB().QueryRowContext(ctx, countSQL, args...).Scan(&n); err != nil {
+		return 0, err
+	}
+	if filters.DryRun || n == 0 {
+		return n, nil
+	}
+
+	deleteSQL := `
+		DELETE FROM metric_baselines
+		WHERE id IN (
+			SELECT b.id
+			FROM metric_baselines b
+			LEFT JOIN entities e ON e.stable_id = b.subject_entity_id
+			WHERE ` + where + `
+		)`
+	res, err := s.DB().ExecContext(ctx, deleteSQL, args...)
+	if err != nil {
+		return 0, err
+	}
+	deleted, err := res.RowsAffected()
+	if err != nil {
+		return n, nil
+	}
+	return deleted, nil
+}
+
+func baselineDeleteWhere(filters baselineDeleteFilters) (string, []any) {
+	clauses := []string{"1=1"}
+	args := []any{}
+	if filters.ID != "" {
+		clauses = append(clauses, "b.id = ?")
+		args = append(args, filters.ID)
+	}
+	if filters.Metric != "" {
+		clauses = append(clauses, "b.metric_id LIKE ?")
+		args = append(args, "%"+filters.Metric+"%")
+	}
+	if filters.Scope != "" {
+		clauses = append(clauses, "b.scope_type = ?")
+		args = append(args, filters.Scope)
+	}
+	if filters.ScopeID != "" {
+		clauses = append(clauses, "b.scope_id = ?")
+		args = append(args, filters.ScopeID)
+	}
+	if filters.SourceClass != "" {
+		clauses = append(clauses, "b.source_class = ?")
+		args = append(args, filters.SourceClass)
+	}
+	if filters.Subject != "" {
+		clauses = append(clauses, "(b.subject_entity_id = ? OR e.id = ? OR e.display_name = ?)")
+		args = append(args, filters.Subject, filters.Subject, filters.Subject)
+	}
+	if filters.State != "" {
+		clauses = append(clauses, "b.state = ?")
+		args = append(args, filters.State)
+	}
+	return strings.Join(clauses, " AND "), args
+}
+
+type baselineListRow struct {
+	MetricID        string
+	Subject         string
+	SourceClass     string
+	Scope           string
+	Truth           string
+	WindowSeconds   int64
+	State           string
+	Baseline        float64
+	BaselineDisplay string
+	Peak            float64
+	PeakDisplay     string
+	Confidence      float64
+	ConfidenceText  string
+	Observations    int64
+	LastUpdated     time.Time
+}
+
+func runBaselinesGenericList(dbPath, metricFilter, scopeFilter, sourceClassFilter, sortSpec string) {
 	s, err := sqlite.Open(sqlite.DefaultConfig(dbPath))
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: open state store %q: %v\n", dbPath, err)
@@ -102,8 +281,12 @@ func runBaselinesGenericList(dbPath, metricFilter, scopeFilter, sourceClassFilte
 	}
 	defer rows.Close()
 
-	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
-	fmt.Fprintln(w, "METRIC\tSUBJECT\tSOURCE\tSCOPE\tTRUTH\tWIN\tSTATE\tBASELINE\tPEAK\tCONF\tOBS\tLAST UPDATED")
+	outRows := []baselineListRow{}
+	sortKey, sortDesc, err := parseBaselineSortSpec(sortSpec)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n\n%s", err, baselinesGenericUsage)
+		os.Exit(1)
+	}
 
 	count := 0
 	for rows.Next() {
@@ -130,12 +313,37 @@ func runBaselinesGenericList(dbPath, metricFilter, scopeFilter, sourceClassFilte
 		if subject == "" || subject == scopeID {
 			subject = shortID(scopeID)
 		}
-		baseline, peak, confidence := formatBaselineState(ewmaState)
+		baselineState := parseBaselineState(ewmaState)
 		t, _ := time.Parse(time.RFC3339Nano, lastUpdated)
-		fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%ds\t%s\t%s\t%s\t%s\t%d\t%s\n",
-			metricID, subject, sourceClass, scope, shortTruth(truthClass),
-			windowSec, state, baseline, peak, confidence, obs, t.UTC().Format("2006-01-02T15:04"))
+		outRows = append(outRows, baselineListRow{
+			MetricID:        metricID,
+			Subject:         subject,
+			SourceClass:     sourceClass,
+			Scope:           scope,
+			Truth:           shortTruth(truthClass),
+			WindowSeconds:   windowSec,
+			State:           state,
+			Baseline:        baselineState.Baseline,
+			BaselineDisplay: baselineState.BaselineText,
+			Peak:            baselineState.Peak,
+			PeakDisplay:     baselineState.PeakText,
+			Confidence:      baselineState.Confidence,
+			ConfidenceText:  baselineState.ConfidenceText,
+			Observations:    obs,
+			LastUpdated:     t,
+		})
 		count++
+	}
+	sortBaselineListRows(outRows, sortKey, sortDesc)
+
+	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
+	fmt.Fprintln(w, "METRIC\tSUBJECT\tSOURCE\tSCOPE\tTRUTH\tWIN\tSTATE\tBASELINE\tPEAK\tCONF\tOBS\tLAST UPDATED")
+
+	for _, row := range outRows {
+		fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%ds\t%s\t%s\t%s\t%s\t%d\t%s\n",
+			row.MetricID, row.Subject, row.SourceClass, row.Scope, row.Truth,
+			row.WindowSeconds, row.State, row.BaselineDisplay, row.PeakDisplay,
+			row.ConfidenceText, row.Observations, row.LastUpdated.UTC().Format("2006-01-02T15:04"))
 	}
 	w.Flush()
 
@@ -146,25 +354,124 @@ func runBaselinesGenericList(dbPath, metricFilter, scopeFilter, sourceClassFilte
 	fmt.Printf("\nTotal: %d baseline(s)\n", count)
 }
 
-func formatBaselineState(raw string) (baseline, peak, confidence string) {
-	baseline, peak, confidence = "-", "-", "-"
+type baselineStateValues struct {
+	Baseline       float64
+	BaselineText   string
+	Peak           float64
+	PeakText       string
+	Confidence     float64
+	ConfidenceText string
+}
+
+func parseBaselineState(raw string) baselineStateValues {
+	out := baselineStateValues{
+		BaselineText:   "-",
+		PeakText:       "-",
+		ConfidenceText: "-",
+	}
 	if strings.TrimSpace(raw) == "" {
-		return baseline, peak, confidence
+		return out
 	}
 	var state map[string]float64
 	if err := json.Unmarshal([]byte(raw), &state); err != nil {
-		return baseline, peak, confidence
+		return out
 	}
 	if v, ok := state["ewma"]; ok {
-		baseline = formatBaselineNumber(v)
+		out.Baseline = v
+		out.BaselineText = formatBaselineNumber(v)
 	}
 	if v, ok := state["peak"]; ok {
-		peak = formatBaselineNumber(v)
+		out.Peak = v
+		out.PeakText = formatBaselineNumber(v)
 	}
 	if v, ok := state["confidence"]; ok {
-		confidence = fmt.Sprintf("%.2f", v)
+		out.Confidence = v
+		out.ConfidenceText = fmt.Sprintf("%.2f", v)
 	}
-	return baseline, peak, confidence
+	return out
+}
+
+func formatBaselineState(raw string) (baseline, peak, confidence string) {
+	state := parseBaselineState(raw)
+	return state.BaselineText, state.PeakText, state.ConfidenceText
+}
+
+func parseBaselineSortSpec(spec string) (key string, desc bool, err error) {
+	key = strings.TrimSpace(spec)
+	if key == "" {
+		key = "metric"
+	}
+	if strings.HasPrefix(key, "-") {
+		desc = true
+		key = strings.TrimPrefix(key, "-")
+	}
+	if strings.HasPrefix(key, "+") {
+		key = strings.TrimPrefix(key, "+")
+	}
+	if strings.HasSuffix(key, ":desc") {
+		desc = true
+		key = strings.TrimSuffix(key, ":desc")
+	}
+	if strings.HasSuffix(key, ":asc") {
+		key = strings.TrimSuffix(key, ":asc")
+	}
+	key = strings.ToLower(strings.ReplaceAll(key, "-", "_"))
+	switch key {
+	case "metric", "subject", "source", "scope", "truth", "window", "win", "state", "baseline", "peak", "confidence", "conf", "observations", "obs", "updated", "last_updated", "last":
+		return key, desc, nil
+	default:
+		return "", false, fmt.Errorf("unsupported baseline sort %q", spec)
+	}
+}
+
+func sortBaselineListRows(rows []baselineListRow, key string, desc bool) {
+	sort.SliceStable(rows, func(i, j int) bool {
+		cmp := compareBaselineRows(rows[i], rows[j], key)
+		if cmp == 0 {
+			cmp = compareString(rows[i].MetricID, rows[j].MetricID)
+		}
+		if cmp == 0 {
+			cmp = compareString(rows[i].Subject, rows[j].Subject)
+		}
+		if cmp == 0 {
+			cmp = compareString(rows[i].Scope, rows[j].Scope)
+		}
+		if desc {
+			return cmp > 0
+		}
+		return cmp < 0
+	})
+}
+
+func compareBaselineRows(a, b baselineListRow, key string) int {
+	switch key {
+	case "metric":
+		return compareString(a.MetricID, b.MetricID)
+	case "subject":
+		return compareString(a.Subject, b.Subject)
+	case "source":
+		return compareString(a.SourceClass, b.SourceClass)
+	case "scope":
+		return compareString(a.Scope, b.Scope)
+	case "truth":
+		return compareString(a.Truth, b.Truth)
+	case "window", "win":
+		return compareInt64(a.WindowSeconds, b.WindowSeconds)
+	case "state":
+		return compareString(a.State, b.State)
+	case "baseline":
+		return compareFloat64(a.Baseline, b.Baseline)
+	case "peak":
+		return compareFloat64(a.Peak, b.Peak)
+	case "confidence", "conf":
+		return compareFloat64(a.Confidence, b.Confidence)
+	case "observations", "obs":
+		return compareInt64(a.Observations, b.Observations)
+	case "updated", "last_updated", "last":
+		return compareTime(a.LastUpdated, b.LastUpdated)
+	default:
+		return compareString(a.MetricID, b.MetricID)
+	}
 }
 
 func formatBaselineNumber(v float64) string {

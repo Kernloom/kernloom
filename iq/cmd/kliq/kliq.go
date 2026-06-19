@@ -373,13 +373,18 @@ func main() {
 				st.Active.Bootstrap = bootstrapInfo{}
 			}
 			stFile = st
-			c.applyPersistedTuningThresholds(st, explicitFlags)
+			tuningApplied, tuningReason := c.applyPersistedTuningThresholds(st, explicitFlags, p.Name)
 			updatedStr := "never"
 			if !st.Active.UpdatedAt.IsZero() {
 				updatedStr = st.Active.UpdatedAt.Format(time.RFC3339)
 			}
-			kliqLog.Printf("Loaded state: profile=%s rev=%d updated=%s %s",
-				st.Active.Profile, st.Active.Revision, updatedStr, c.tuningThresholds().Summary())
+			if tuningApplied {
+				kliqLog.Printf("Loaded tuning state: profile=%s rev=%d updated=%s %s %s",
+					st.Active.Profile, st.Active.Revision, updatedStr, tuningReason, c.tuningThresholds().Summary())
+			} else {
+				kliqLog.Printf("Loaded state metadata: profile=%s rev=%d updated=%s tuning=skipped reason=%q",
+					st.Active.Profile, st.Active.Revision, updatedStr, tuningReason)
+			}
 		} else {
 			kliqLog.Printf("No usable state loaded (%s): %v", c.StatePath, err)
 		}
@@ -1560,7 +1565,8 @@ func main() {
 				tuner.LogResult(kliqLog, r, pol.K, dropRatio, clean)
 
 				if c.StatePath != "" {
-					st := applyAutotuneStateUpdate(stFile, p.Name, bs, cfgHash, c.HistoryKeep, r, pol.K, dropRatio)
+					tuningScope, _ := c.tuningScopeRef()
+					st := applyAutotuneStateUpdate(stFile, p.Name, tuningScope, bs, cfgHash, c.HistoryKeep, r, pol.K, dropRatio)
 					if err := writeStateAtomic(c.StatePath, st); err != nil {
 						kliqLog.Printf("AUTOTUNE state write failed: %v", err)
 					} else {
