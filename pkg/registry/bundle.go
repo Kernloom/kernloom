@@ -6,7 +6,6 @@
 //
 // The authoritative source is kernloom-registries. Forge pins and signs a
 // compact RegistrySnapshot; KLIQ turns that snapshot into this runtime view.
-//
 package registry
 
 import (

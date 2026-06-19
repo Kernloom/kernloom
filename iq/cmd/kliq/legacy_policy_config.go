@@ -7,8 +7,8 @@ import (
 	"strconv"
 	"strings"
 
-	registries "github.com/kernloom/kernloom-registries"
 	contracts "github.com/kernloom/kernloom-contracts"
+	registries "github.com/kernloom/kernloom-registries"
 	"github.com/kernloom/kernloom/pkg/adapterruntime"
 	"github.com/kernloom/kernloom/pkg/core/fsm"
 	"github.com/kernloom/kernloom/pkg/core/pdp"
