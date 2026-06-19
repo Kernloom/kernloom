@@ -10,10 +10,6 @@ require (
 	modernc.org/sqlite v1.50.1
 )
 
-// kernloom-contracts is a private repo; replace directive active until GOPRIVATE is configured.
-// Tag v0.1.0 is published at github.com/Kernloom/kernloom-contracts.
-replace github.com/kernloom/kernloom-contracts => ../kernloom-contracts
-
 require (
 	cel.dev/expr v0.25.2 // indirect
 	github.com/antlr4-go/antlr/v4 v4.13.1 // indirect
