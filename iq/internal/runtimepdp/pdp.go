@@ -7,6 +7,7 @@ package runtimepdp
 
 import (
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/google/cel-go/cel"
@@ -87,19 +88,22 @@ func (p *PDP) Decide(input Input) (contracts.RuntimeDecision, bool, error) {
 	}
 	vars := map[string]any{
 		"risk":     riskVars(input.Risk),
-		"device":   safeMap(input.Context.Device),
-		"session":  safeMap(input.Context.Session),
-		"features": safeMap(input.Context.Features),
-		"metrics":  safeMap(input.Context.Metrics),
-		"signals":  safeMap(input.Context.Signals),
-		"baseline": safeMap(input.Context.Baseline),
-		"graph":    safeMap(input.Context.Graph),
-		"adapter":  safeMap(input.Context.Adapter),
-		"fsm":      safeMap(input.Context.FSM),
+		"device":   deviceVars(input.Context.Device),
+		"session":  sessionVars(input.Context.Session),
+		"features": factMapVars(input.Context.Features, nil),
+		"metrics":  factMapVars(input.Context.Metrics, nil),
+		"signals":  factMapVars(input.Context.Signals, nil),
+		"baseline": factMapVars(input.Context.Baseline, nil),
+		"graph":    factMapVars(input.Context.Graph, nil),
+		"adapter":  factMapVars(input.Context.Adapter, nil),
+		"fsm":      factMapVars(input.Context.FSM, nil),
 	}
 	for _, rule := range p.rules {
 		out, _, err := rule.program.Eval(vars)
 		if err != nil {
+			if isMissingFactKeyError(err) {
+				continue
+			}
 			return contracts.RuntimeDecision{}, false, fmt.Errorf("runtimepdp: eval rule %q: %w", rule.rule.ID, err)
 		}
 		matched, ok := out.Value().(bool)
@@ -198,9 +202,96 @@ func riskVars(risk contracts.LocalRiskAssessment) map[string]any {
 	}
 }
 
-func safeMap(in map[string]any) map[string]any {
-	if in == nil {
-		return map[string]any{}
+func deviceVars(in map[string]any) map[string]any {
+	out := factMapVars(in, map[string]any{
+		"posture": map[string]any{
+			"status": "unknown",
+		},
+	})
+	insertPrefixedNestedFacts(out, in, "device.")
+	return out
+}
+
+func sessionVars(in map[string]any) map[string]any {
+	out := factMapVars(in, map[string]any{
+		"authentication": map[string]any{
+			"strength": "unknown",
+		},
+	})
+	insertPrefixedNestedFacts(out, in, "session.")
+	return out
+}
+
+func factMapVars(in map[string]any, defaults map[string]any) map[string]any {
+	out := copyFactMap(defaults)
+	mergeFactMap(out, in)
+	for key, value := range in {
+		if strings.Contains(key, ".") {
+			insertNestedFact(out, key, value)
+		}
 	}
-	return in
+	return out
+}
+
+func copyFactMap(in map[string]any) map[string]any {
+	out := map[string]any{}
+	for key, value := range in {
+		if nested, ok := value.(map[string]any); ok {
+			out[key] = copyFactMap(nested)
+			continue
+		}
+		out[key] = value
+	}
+	return out
+}
+
+func mergeFactMap(base map[string]any, extra map[string]any) {
+	for key, value := range extra {
+		if left, ok := base[key].(map[string]any); ok {
+			if right, ok := value.(map[string]any); ok {
+				mergeFactMap(left, right)
+				continue
+			}
+		}
+		if nested, ok := value.(map[string]any); ok {
+			base[key] = copyFactMap(nested)
+			continue
+		}
+		base[key] = value
+	}
+}
+
+func insertNestedFact(out map[string]any, dotted string, value any) {
+	parts := strings.Split(dotted, ".")
+	if len(parts) < 2 {
+		return
+	}
+	cursor := out
+	for _, part := range parts[:len(parts)-1] {
+		if part == "" {
+			return
+		}
+		next, ok := cursor[part].(map[string]any)
+		if !ok {
+			next = map[string]any{}
+			cursor[part] = next
+		}
+		cursor = next
+	}
+	last := parts[len(parts)-1]
+	if last != "" {
+		cursor[last] = value
+	}
+}
+
+func insertPrefixedNestedFacts(out map[string]any, in map[string]any, prefix string) {
+	for key, value := range in {
+		if strings.HasPrefix(key, prefix) {
+			insertNestedFact(out, strings.TrimPrefix(key, prefix), value)
+		}
+	}
+}
+
+func isMissingFactKeyError(err error) bool {
+	return strings.Contains(err.Error(), "no such key")
 }

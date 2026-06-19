@@ -121,6 +121,106 @@ func TestDecideMatchesGenericMetricFacts(t *testing.T) {
 	}
 }
 
+func TestDecideDefaultsMissingDevicePostureToUnknown(t *testing.T) {
+	now := time.Date(2026, 6, 19, 12, 0, 0, 0, time.UTC)
+	pdp, err := runtimepdp.Compile(testPack("device.posture.status in ['degraded', 'unhealthy', 'unknown']"))
+	if err != nil {
+		t.Fatalf("compile: %v", err)
+	}
+
+	decision, matched, err := pdp.Decide(runtimepdp.Input{
+		NodeID: "node-1",
+		Risk: contracts.LocalRiskAssessment{
+			Subject:    contracts.EntityRef{Kind: "ip", ID: "10.0.0.1"},
+			Level:      contracts.RiskLow,
+			Score:      10,
+			ValidUntil: now.Add(time.Minute),
+		},
+		Now: now,
+	})
+	if err != nil {
+		t.Fatalf("decide: %v", err)
+	}
+	if !matched {
+		t.Fatal("expected missing posture to evaluate as unknown")
+	}
+	if decision.Action.Capability != "enforce.traffic.rate_limit" {
+		t.Fatalf("capability: %s", decision.Action.Capability)
+	}
+}
+
+func TestDecideUsesCanonicalFlatDeviceAndSessionFacts(t *testing.T) {
+	now := time.Date(2026, 6, 19, 12, 0, 0, 0, time.UTC)
+	pdp, err := runtimepdp.Compile(testPack("device.posture.status == 'healthy' && session.authentication.strength == 'mfa'"))
+	if err != nil {
+		t.Fatalf("compile: %v", err)
+	}
+
+	_, matched, err := pdp.Decide(runtimepdp.Input{
+		NodeID: "node-1",
+		Risk: contracts.LocalRiskAssessment{
+			Subject:    contracts.EntityRef{Kind: "ip", ID: "10.0.0.1"},
+			Level:      contracts.RiskLow,
+			Score:      10,
+			ValidUntil: now.Add(time.Minute),
+		},
+		Context: runtimepdp.ContextSnapshot{
+			Device: map[string]any{
+				"device.posture.status": "healthy",
+			},
+			Session: map[string]any{
+				"session.authentication.strength": "mfa",
+			},
+		},
+		Now: now,
+	})
+	if err != nil {
+		t.Fatalf("decide: %v", err)
+	}
+	if !matched {
+		t.Fatal("expected canonical flat facts to be available as nested CEL facts")
+	}
+}
+
+func TestDecideSkipsRuleWithMissingOptionalFacts(t *testing.T) {
+	now := time.Date(2026, 6, 19, 12, 0, 0, 0, time.UTC)
+	pack := testPack("metrics.missing.value > 0")
+	pack.Spec.Rules = append(pack.Spec.Rules, contracts.RuntimePolicyRule{
+		ID:   "risk-fallback",
+		When: "risk.level == 'high'",
+		Then: contracts.RuntimeActionSpec{
+			Capability: "enforce.access.deny",
+			Level:      "block",
+			TTL:        contracts.NewDuration(time.Minute),
+		},
+		ReasonCodes: []string{"risk_high"},
+	})
+	pdp, err := runtimepdp.Compile(pack)
+	if err != nil {
+		t.Fatalf("compile: %v", err)
+	}
+
+	decision, matched, err := pdp.Decide(runtimepdp.Input{
+		NodeID: "node-1",
+		Risk: contracts.LocalRiskAssessment{
+			Subject:    contracts.EntityRef{Kind: "ip", ID: "10.0.0.1"},
+			Level:      contracts.RiskHigh,
+			Score:      70,
+			ValidUntil: now.Add(time.Minute),
+		},
+		Now: now,
+	})
+	if err != nil {
+		t.Fatalf("decide: %v", err)
+	}
+	if !matched {
+		t.Fatal("expected fallback rule to match")
+	}
+	if decision.Action.Capability != "enforce.access.deny" {
+		t.Fatalf("capability: %s", decision.Action.Capability)
+	}
+}
+
 func TestCompileRejectsInvalidCEL(t *testing.T) {
 	_, err := runtimepdp.Compile(testPack("risk.level in ["))
 	if err == nil {
