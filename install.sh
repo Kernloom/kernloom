@@ -58,7 +58,8 @@ Environment:
   PREFIX             Binaries dir      (default: /opt/kernloom/attested when root)
   SHARE_DIR          BPF object        (default: /opt/kernloom/attested/bpf)
   IQ_ATTESTED_DIR    Attested config   (default: /opt/kernloom/attested/etc)
-  IQ_POLICY_DIR      PolicyPack files  (default: /opt/kernloom/attested/etc/policies)
+  IQ_POLICY_DIR      LocalPolicyPack or RuntimePolicyPack YAML
+                     (default: /opt/kernloom/attested/etc/policies)
   IQ_PDP_DIR         PDPConfig files   (default: /opt/kernloom/attested/etc/pdp)
   IQ_VAR_DIR         Runtime state     (default: /var/lib/kernloom/iq)
 USAGE
@@ -248,7 +249,7 @@ ensure_iq_layout() {
 
   echo "    Attested root:   $ATTESTED_DIR    (IMA-measured by Keylime)"
   echo "    Attested config: $IQ_ATTESTED_DIR"
-  echo "    Policy files:    $IQ_POLICY_DIR   (place LocalPolicyPack YAML here)"
+  echo "    Policy files:    $IQ_POLICY_DIR   (place LocalPolicyPack or RuntimePolicyPack YAML here)"
   echo "    PDP configs:     $IQ_PDP_DIR      (place PDPConfig YAML here)"
   echo "    Runtime state:   $IQ_VAR_DIR      (not attested)"
 }
@@ -369,10 +370,15 @@ echo "  2. Choose a PDPConfig profile (see $IQ_PDP_DIR/):"
 echo "     sudo cp $IQ_PDP_DIR/ziti-controller-bootstrap.yaml \\"
 echo "             $IQ_PDP_DIR/node.yaml"
 echo ""
-echo "  3. Start kliq (14-day bootstrap, dry-run):"
+echo "  3. Optional: place a LocalPolicyPack or RuntimePolicyPack in:"
+echo "     $IQ_POLICY_DIR"
+echo ""
+echo "  4. Start kliq (14-day bootstrap, dry-run):"
 echo "     sudo $PREFIX/kliq run \\"
 echo "          --pdp-config=$IQ_PDP_DIR/node.yaml \\"
+echo "          --runtime-pdp-mode=shadow \\"
 echo "          --dry-run=true --whitelist-learn=true"
+echo "     Add --policy-file=$IQ_POLICY_DIR/runtime-policy.yaml after creating one."
 echo ""
-echo "  4. Full help:  $PREFIX/kliq run --help"
+echo "  5. Full help:  $PREFIX/kliq run --help"
 echo "                 $PREFIX/klshield"

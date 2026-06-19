@@ -2,9 +2,9 @@
 # Kernloom uninstaller
 #
 # Mirrors the paths created by install.sh.
-# Run as root:  sudo sh uninstall.sh
-# Dry-run:      sudo sh uninstall.sh --dry-run
-# Keep state:   sudo sh uninstall.sh --keep-state
+# Run as root:  sudo sh deinstaller.sh
+# Dry-run:      sudo sh deinstaller.sh --dry-run
+# Keep state:   sudo sh deinstaller.sh --keep-state
 
 set -eu
 
@@ -49,17 +49,21 @@ usage() {
   cat <<EOF
 Kernloom uninstaller
 
-Usage: sudo sh uninstall.sh [OPTIONS]
+Usage: sudo sh deinstaller.sh [OPTIONS]
 
 Options:
   --dry-run      Show what would be removed without deleting anything
-  --keep-state   Keep runtime state in $IQ_VAR_DIR (graph.db, feedback.json, state.json)
+  --keep-state   Keep runtime state in $IQ_VAR_DIR
+                 (graph.db, feedback.json, state.json, leases, receipts)
   -h, --help     Show this help
 
 Environment:
-  OPT_DIR        Override base directory     (default: /opt/kernloom)
-  BPF_FS         Override BPF filesystem     (default: /sys/fs/bpf)
-  IQ_VAR_DIR     Override runtime state dir  (default: /var/lib/kernloom/iq)
+  OPT_DIR        Override base directory       (default: /opt/kernloom)
+  ATTESTED_DIR   Override attested root        (default: /opt/kernloom/attested)
+  BPF_FS         Override BPF filesystem       (default: /sys/fs/bpf)
+  IQ_POLICY_DIR  Local/RuntimePolicyPack YAML  (default: attested/etc/policies)
+  IQ_PDP_DIR     PDPConfig YAML                (default: attested/etc/pdp)
+  IQ_VAR_DIR     Override runtime state dir    (default: /var/lib/kernloom/iq)
 EOF
 }
 
@@ -101,7 +105,7 @@ done
 
 # ── Root check ────────────────────────────────────────────────────────────────
 if [ "$(id -u)" -ne 0 ]; then
-  printf 'Error: this script must be run as root (sudo sh uninstall.sh)\n' >&2
+  printf 'Error: this script must be run as root (sudo sh deinstaller.sh)\n' >&2
   exit 1
 fi
 
@@ -182,7 +186,7 @@ log "Removing BPF object from $SHARE_DIR"
 remove_file "$SHARE_DIR/xdp_kernloom_shield.bpf.o"
 remove_dir  "$SHARE_DIR"
 
-# ── Step 6: Remove attested config ───────────────────────────────────────────
+# ── Step 6: Remove attested config and policy/PDP YAML ───────────────────────
 log "Removing attested config from $IQ_ATTESTED_DIR"
 remove_file "$IQ_ATTESTED_DIR/whitelist.txt"
 remove_dir  "$IQ_POLICY_DIR"

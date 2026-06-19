@@ -72,16 +72,17 @@ func (s *shadowPDPRunner) SetMode(mode runtimePDPMode, proposals chan<- actions.
 
 // UpdatePack (re)compiles the RuntimePDP from a new RuntimePolicyPack.
 // Called from managed mode when a bundle is activated.
-func (s *shadowPDPRunner) UpdatePack(pack contracts.RuntimePolicyPack) {
+func (s *shadowPDPRunner) UpdatePack(pack contracts.RuntimePolicyPack) error {
 	pdp, err := runtimepdp.Compile(pack)
 	if err != nil {
 		s.logger.Printf("[runtime-pdp] compile error: %v", err)
-		return
+		return err
 	}
 	s.mu.Lock()
 	s.pdp = pdp
 	s.mu.Unlock()
 	s.logger.Printf("[runtime-pdp] pack loaded: %d rules", len(pack.Spec.Rules))
+	return nil
 }
 
 // current returns the active PDP or nil if none is loaded.
@@ -163,23 +164,11 @@ func startShadowPDP(ctx context.Context, bus adapterruntime.EventBus, runner *sh
 						runner.logger.Printf("[runtime-pdp:active] DECISION subject=%s effect=%s risk=%s(%.2f) score=%d",
 							subjectID, dec.Effect, lra.Level, lra.Confidence, lra.Score)
 
-						if proposals != nil && dec.Effect == "restrict" {
-							ttl := 30 * time.Second
-							if dec.ValidUntil.After(now) {
-								ttl = dec.ValidUntil.Sub(now)
-							}
-							prop := actions.ActionProposal{
-								Source:        "runtime-pdp",
-								Reason:        "runtime_pdp_restrict",
-								DesiredAction: "enforce.network.rate_limit",
-								DesiredLevel:  "soft",
-								Target: actions.ActionTarget{
-									Granularity: actions.TargetGranularitySource,
-									Value:       subjectID,
-								},
-								TTL:        ttl,
-								Confidence: lra.Confidence,
-								CreatedAt:  now,
+						if proposals != nil {
+							prop, ok, reason := runtimeDecisionToActionProposal(dec, subjectID, lra.Confidence, now)
+							if !ok {
+								runner.logger.Printf("[runtime-pdp:active] decision skipped subject=%s reason=%s", subjectID, reason)
+								continue
 							}
 							select {
 							case proposals <- prop:

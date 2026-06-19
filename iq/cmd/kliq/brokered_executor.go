@@ -14,6 +14,7 @@ import (
 	"github.com/kernloom/kernloom/pkg/adapterruntime"
 	"github.com/kernloom/kernloom/pkg/core/decision"
 	"github.com/kernloom/kernloom/pkg/core/fsm"
+	"github.com/kernloom/kernloom/pkg/core/observation"
 	"github.com/kernloom/kernloom/pkg/statestore/sqlite"
 )
 
@@ -24,21 +25,33 @@ type receiptStore interface {
 }
 
 type brokeredActionExecutor struct {
-	legacy *actions.SourceActionExecutor
-	broker *actionbroker.Broker
-	pep    *brokeredFSMPEP
-	store  receiptStore // may be nil when running without a state store
-	nodeID string
+	legacy             *actions.SourceActionExecutor
+	sourceBroker       *actionbroker.Broker
+	sourcePEP          *brokeredFSMPEP
+	relationshipBroker *actionbroker.Broker
+	relationshipPEP    *brokeredRelationshipPEP
+	store              receiptStore // may be nil when running without a state store
+	nodeID             string
 }
 
 func newBrokeredActionExecutor(
 	legacy *actions.SourceActionExecutor,
-	broker *actionbroker.Broker,
-	pep *brokeredFSMPEP,
+	sourceBroker *actionbroker.Broker,
+	sourcePEP *brokeredFSMPEP,
+	relationshipBroker *actionbroker.Broker,
+	relationshipPEP *brokeredRelationshipPEP,
 	store *sqlite.Store,
 	nodeID string,
 ) *brokeredActionExecutor {
-	return &brokeredActionExecutor{legacy: legacy, broker: broker, pep: pep, store: store, nodeID: nodeID}
+	return &brokeredActionExecutor{
+		legacy:             legacy,
+		sourceBroker:       sourceBroker,
+		sourcePEP:          sourcePEP,
+		relationshipBroker: relationshipBroker,
+		relationshipPEP:    relationshipPEP,
+		store:              store,
+		nodeID:             nodeID,
+	}
 }
 
 func (e *brokeredActionExecutor) AddSidecar(s actions.PEPSidecar) {
@@ -56,14 +69,66 @@ func (e *brokeredActionExecutor) ApplyDeEnforceSource(target adapterruntime.Sour
 	return e.legacy.ApplyDeEnforceSource(target, st, params, now)
 }
 
-func (e *brokeredActionExecutor) ApplyRelationship(pep adapterruntime.RelationshipPEP, target adapterruntime.RelationshipTarget, r actions.ActionResolution, now time.Time) actions.ActionResult {
-	return e.legacy.ApplyRelationship(pep, target, r, now)
+func (e *brokeredActionExecutor) ApplyRelationship(target adapterruntime.RelationshipTarget, r actions.ActionResolution, now time.Time) actions.ActionResult {
+	if !r.Allowed {
+		return actions.ActionResult{
+			ProposalID: r.ProposalID,
+			DecisionID: r.DecisionID,
+			Action:     r.RequestedAction,
+			Status:     "denied",
+			Reason:     r.DenyReason,
+			AppliedAt:  now,
+		}
+	}
+	if r.ExecutableLevel != "block" {
+		return relationshipSkippedResult(r, now, r.DenyReason)
+	}
+	if r.TTL <= 0 {
+		return relationshipSkippedResult(r, now, "relationship action requires TTL")
+	}
+	if e.relationshipBroker == nil || e.relationshipPEP == nil {
+		return relationshipSkippedResult(r, now, "relationship broker unavailable")
+	}
+	e.relationshipPEP.begin(target)
+	lease, receipt, err := e.relationshipBroker.Apply(context.Background(), r)
+	applied := e.relationshipPEP.finish()
+	if receipt != nil {
+		logEnforcementReceipt(receipt)
+		e.persistReceipt(receipt)
+	}
+	if err != nil {
+		result := applied
+		if result.Status == "" {
+			result = actions.ActionResult{
+				ProposalID: r.ProposalID,
+				DecisionID: r.DecisionID,
+				Action:     r.ExecutableAction,
+				Status:     "failed",
+				Reason:     err.Error(),
+				AppliedAt:  now,
+			}
+		}
+		return result
+	}
+	if lease.LeaseID == "" {
+		return relationshipSkippedResult(r, now, "broker produced no relationship lease")
+	}
+	if applied.Status == "" {
+		applied = actions.ActionResult{
+			ProposalID: r.ProposalID,
+			DecisionID: r.DecisionID,
+			Action:     r.ExecutableAction,
+			Status:     "applied",
+			AppliedAt:  now,
+		}
+	}
+	return applied
 }
 
 func (e *brokeredActionExecutor) applyBrokered(ctx applyContext) (fsm.State, actions.ActionResult) {
-	e.pep.begin(ctx)
-	lease, receipt, err := e.broker.Apply(context.Background(), ctx.resolution)
-	applied := e.pep.finish()
+	e.sourcePEP.begin(ctx)
+	lease, receipt, err := e.sourceBroker.Apply(context.Background(), ctx.resolution)
+	applied := e.sourcePEP.finish()
 	if receipt != nil {
 		logEnforcementReceipt(receipt)
 		e.persistReceipt(receipt)
@@ -95,8 +160,39 @@ func (e *brokeredActionExecutor) applyBrokered(ctx applyContext) (fsm.State, act
 	return applied.state, applied.result
 }
 
+func (e *brokeredActionExecutor) RevertExpired(ctx context.Context, now time.Time) {
+	brokers := []*actionbroker.Broker{e.sourceBroker, e.relationshipBroker}
+	for _, broker := range brokers {
+		if broker == nil {
+			continue
+		}
+		receipts, err := broker.RevertExpired(ctx, now)
+		for _, receipt := range receipts {
+			logEnforcementReceipt(receipt)
+			e.persistReceipt(receipt)
+		}
+		if err != nil {
+			kliqLog.Printf("ACTION-RECEIPT revert expired error: %v", err)
+		}
+	}
+}
+
 func shouldBrokerLease(r actions.ActionResolution) bool {
 	return r.Allowed && r.TTL > 0 && r.ExecutableLevel != "" && r.ExecutableLevel != "observe"
+}
+
+func relationshipSkippedResult(r actions.ActionResolution, now time.Time, reason string) actions.ActionResult {
+	if reason == "" {
+		reason = r.DenyReason
+	}
+	return actions.ActionResult{
+		ProposalID: r.ProposalID,
+		DecisionID: r.DecisionID,
+		Action:     r.RequestedAction,
+		Status:     "skipped",
+		Reason:     reason,
+		AppliedAt:  now,
+	}
 }
 
 type applyContext struct {
@@ -114,12 +210,13 @@ type applyOutcome struct {
 
 type brokeredFSMPEP struct {
 	legacy *actions.SourceActionExecutor
+	params func() adapterruntime.EnforcementParams
 	active *applyContext
 	last   applyOutcome
 }
 
-func newBrokeredFSMPEP(legacy *actions.SourceActionExecutor) *brokeredFSMPEP {
-	return &brokeredFSMPEP{legacy: legacy}
+func newBrokeredFSMPEP(legacy *actions.SourceActionExecutor, params func() adapterruntime.EnforcementParams) *brokeredFSMPEP {
+	return &brokeredFSMPEP{legacy: legacy, params: params}
 }
 
 func (p *brokeredFSMPEP) AdapterID() string { return "kliq-fsm-pep" }
@@ -153,7 +250,87 @@ func (p *brokeredFSMPEP) CurrentFencingToken(_ context.Context, lease decision.A
 }
 
 func (p *brokeredFSMPEP) Revert(_ context.Context, lease decision.ActionLease) error {
-	return fmt.Errorf("brokered fsm pep revert is not wired to runtime state maps for target %s", lease.Target)
+	target := actionbroker.TargetFromLease(lease)
+	if target.Value == "" {
+		return fmt.Errorf("source revert target missing for lease %s", lease.LeaseID)
+	}
+	params := adapterruntime.EnforcementParams{}
+	if p.params != nil {
+		params = p.params()
+	}
+	p.legacy.ApplyDeEnforceSource(adapterruntime.SourceTarget{
+		SourceID:   target.Value,
+		Subject:    observation.EntityRef{ID: target.Value},
+		Attributes: copyStringMap(target.Attributes),
+	}, fsm.State{Level: actions.ParseFSMLevel(lease.Level)}, params, time.Now().UTC())
+	return nil
+}
+
+type brokeredRelationshipPEP struct {
+	pep    adapterruntime.RelationshipPEP
+	active *adapterruntime.RelationshipTarget
+	last   actions.ActionResult
+}
+
+func newBrokeredRelationshipPEP(pep adapterruntime.RelationshipPEP) *brokeredRelationshipPEP {
+	return &brokeredRelationshipPEP{pep: pep}
+}
+
+func (p *brokeredRelationshipPEP) AdapterID() string { return "kliq-relationship-pep" }
+
+func (p *brokeredRelationshipPEP) begin(target adapterruntime.RelationshipTarget) {
+	p.active = &target
+	p.last = actions.ActionResult{}
+}
+
+func (p *brokeredRelationshipPEP) finish() actions.ActionResult {
+	out := p.last
+	p.active = nil
+	p.last = actions.ActionResult{}
+	return out
+}
+
+func (p *brokeredRelationshipPEP) Apply(_ context.Context, lease decision.ActionLease) (string, error) {
+	if p.pep == nil || !p.pep.RelationshipAvailable() {
+		return "", fmt.Errorf("relationship pep unavailable")
+	}
+	if p.active == nil {
+		return "", fmt.Errorf("relationship pep apply without active target context")
+	}
+	if err := p.pep.DenyRelationship(*p.active); err != nil {
+		p.last = actions.ActionResult{
+			ProposalID: lease.ProposalID,
+			DecisionID: lease.DecisionID,
+			Action:     lease.Action,
+			Status:     "failed",
+			Reason:     err.Error(),
+			AppliedAt:  time.Now().UTC(),
+		}
+		return "", err
+	}
+	p.last = actions.ActionResult{
+		ProposalID: lease.ProposalID,
+		DecisionID: lease.DecisionID,
+		Action:     lease.Action,
+		Status:     "applied",
+		AppliedAt:  time.Now().UTC(),
+	}
+	return lease.FencingToken, nil
+}
+
+func (p *brokeredRelationshipPEP) CurrentFencingToken(_ context.Context, lease decision.ActionLease) (string, error) {
+	return lease.FencingToken, nil
+}
+
+func (p *brokeredRelationshipPEP) Revert(_ context.Context, lease decision.ActionLease) error {
+	if p.pep == nil || !p.pep.RelationshipAvailable() {
+		return fmt.Errorf("relationship pep unavailable")
+	}
+	target, ok := relationshipTargetFromActionTarget(actionbroker.TargetFromLease(lease))
+	if !ok {
+		return fmt.Errorf("relationship revert target invalid for lease %s", lease.LeaseID)
+	}
+	return p.pep.AllowRelationship(target)
 }
 
 // persistReceipt durably stores a receipt so it can be uploaded to Forge later.

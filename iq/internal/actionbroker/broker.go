@@ -11,6 +11,7 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/kernloom/kernloom/iq/internal/actions"
@@ -94,6 +95,20 @@ func (b *Broker) Apply(ctx context.Context, r actions.ActionResolution) (decisio
 		return decision.ActionLease{}, receipt, nil
 	}
 
+	metadata := map[string]string{
+		"requested_action":   r.RequestedAction,
+		"requested_level":    r.RequestedLevel,
+		"target_granularity": r.Target.Granularity,
+		"target_value":       r.Target.Value,
+	}
+	for k, v := range r.Target.Attributes {
+		metadata["target_attr."+k] = v
+	}
+	for k, v := range r.Parameters {
+		if v != nil {
+			metadata["param."+k] = fmt.Sprint(v)
+		}
+	}
 	lease := decision.ActionLease{
 		LeaseID:    "lease-" + generateID(),
 		DecisionID: decisionID,
@@ -108,10 +123,7 @@ func (b *Broker) Apply(ctx context.Context, r actions.ActionResolution) (decisio
 		Reason:     r.DenyReason,
 		AppliedAt:  now,
 		ExpiresAt:  now.Add(r.TTL),
-		Metadata: map[string]string{
-			"requested_action": r.RequestedAction,
-			"requested_level":  r.RequestedLevel,
-		},
+		Metadata:   metadata,
 	}
 	lease.FencingToken = buildFencingToken(lease)
 	if err := b.store.UpsertActionLease(ctx, lease); err != nil {
@@ -245,6 +257,29 @@ func targetString(t actions.ActionTarget) string {
 		return t.Value
 	}
 	return t.Granularity + ":" + t.Value
+}
+
+func TargetFromLease(lease decision.ActionLease) actions.ActionTarget {
+	granularity := lease.Metadata["target_granularity"]
+	value := lease.Metadata["target_value"]
+	if granularity == "" || value == "" {
+		if before, after, ok := strings.Cut(lease.Target, ":"); ok {
+			granularity = before
+			value = after
+		} else {
+			value = lease.Target
+		}
+	}
+	attrs := make(map[string]string)
+	for k, v := range lease.Metadata {
+		if attr, ok := strings.CutPrefix(k, "target_attr."); ok {
+			attrs[attr] = v
+		}
+	}
+	if len(attrs) == 0 {
+		attrs = nil
+	}
+	return actions.ActionTarget{Granularity: granularity, Value: value, Attributes: attrs}
 }
 
 func generateID() string {

@@ -177,6 +177,21 @@ func relationshipActionTargetFromAttributes(sourceID string, attrs map[string]st
 	}, true
 }
 
+func relationshipTargetFromActionTarget(target actions.ActionTarget) (adapterruntime.RelationshipTarget, bool) {
+	if target.Granularity != actions.TargetGranularityRelationship {
+		return adapterruntime.RelationshipTarget{}, false
+	}
+	sourceID := target.Attributes[actions.TargetAttrSubjectID]
+	if sourceID == "" {
+		sourceID = target.Attributes[actions.TargetAttrSourceID]
+	}
+	rel, ok := relationshipActionTargetFromAttributes(sourceID, target.Attributes)
+	if !ok {
+		return adapterruntime.RelationshipTarget{}, false
+	}
+	return rel.PEP, true
+}
+
 func relationshipTargetID(attrs map[string]string) string {
 	for _, key := range []string{
 		actions.TargetAttrTargetID,

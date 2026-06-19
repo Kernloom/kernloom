@@ -36,8 +36,8 @@ build-forge:
 	  echo "kernloom-forge not found at $(dir $(abspath .))/kernloom-forge — skipping forge build"; \
 	fi
 
-# Forge control-plane tests — no XDP/BPF required, runs on standard CI.
-# Builds forge binary from ../kernloom-forge if not already present.
+# No-XDP integration tests — Forge control plane plus RuntimePolicyPack checks.
+# Builds Forge and KLIQ binaries only when the selected scenarios need them.
 integration-forge:
 	bash tests/integration/run-forge.sh
 

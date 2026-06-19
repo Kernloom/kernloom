@@ -15,7 +15,6 @@ import (
 	"io"
 	"net/http"
 	"os"
-	"path/filepath"
 	"time"
 
 	"github.com/kernloom/kernloom/pkg/componentinventory"
@@ -364,82 +363,82 @@ func PackHash(packBytes []byte) string {
 	return hex.EncodeToString(h[:])
 }
 
-// applyForgePack saves the received pack bytes to a temp file, optionally
-// verifies the signature, then applies it to cfg via applyPolicyPackToCfg +
-// rulesFromPolicyPack. This mirrors the --policy-file path in main().
+// applyForgePack optionally verifies the received pack bytes and applies either
+// a legacy LocalPolicyPack or a contracts-based RuntimePolicyPack to cfg. This
+// mirrors the --policy-file path in main().
 //
 // activeIssuedAt tracks the IssuedAt of the currently running pack. If non-nil
 // and non-zero, packs with an earlier IssuedAt are rejected (rollback protection,
 // CLAUDE.md rule #9). On success, *activeIssuedAt is updated to the new value.
-func applyForgePack(packBytes []byte, packName, verifyKeyPath string, c *cfg, activeIssuedAt *time.Time) error {
-	// Write to a temp file so LoadFromFile / LoadAndVerify can read it.
-	dir := os.TempDir()
-	if c.StatePath != "" {
-		dir = filepath.Dir(c.StatePath)
-	}
-	tmp, err := os.CreateTemp(dir, "forge-pack-*.yaml")
-	if err != nil {
-		return fmt.Errorf("create temp pack file: %w", err)
-	}
-	defer os.Remove(tmp.Name())
-	if _, err := tmp.Write(packBytes); err != nil {
-		tmp.Close()
-		return fmt.Errorf("write temp pack: %w", err)
-	}
-	tmp.Close()
-
-	var pp *corepolicy.PolicyPack
+func applyForgePack(packBytes []byte, packName, verifyKeyPath string, c *cfg, activeIssuedAt *time.Time) (loadedPolicyFile, error) {
+	var loaded loadedPolicyFile
 	if verifyKeyPath != "" {
 		pubKey, err := corepolicy.LoadPublicKey(verifyKeyPath)
 		if err != nil {
-			return fmt.Errorf("load verify key: %w", err)
+			return loadedPolicyFile{}, fmt.Errorf("load verify key: %w", err)
 		}
-		pp, err = corepolicy.LoadAndVerify(tmp.Name(), pubKey)
+		loaded, err = loadPolicyBytes(packBytes, "forge pack "+packName, pubKey)
 		if err != nil {
-			return fmt.Errorf("load+verify forge pack %s: %w", packName, err)
+			return loadedPolicyFile{}, fmt.Errorf("load+verify forge pack %s: %w", packName, err)
 		}
 	} else {
 		var err error
-		pp, err = corepolicy.LoadFromFile(tmp.Name())
+		loaded, err = loadPolicyBytes(packBytes, "forge pack "+packName, nil)
 		if err != nil {
-			return fmt.Errorf("load forge pack %s: %w", packName, err)
+			return loadedPolicyFile{}, fmt.Errorf("load forge pack %s: %w", packName, err)
 		}
 	}
 
 	// Rollback protection: reject a pack whose IssuedAt predates the active pack.
 	if activeIssuedAt != nil && !activeIssuedAt.IsZero() {
-		if newAt, ok := pp.Metadata.ParseIssuedAt(); ok {
+		if newAt, ok := loaded.IssuedAt(); ok {
 			if newAt.Before(*activeIssuedAt) {
-				return fmt.Errorf("rollback rejected: pack %s issued_at %s is before active pack issued_at %s",
+				return loadedPolicyFile{}, fmt.Errorf("rollback rejected: pack %s issued_at %s is before active pack issued_at %s",
 					packName, newAt.Format(time.RFC3339), activeIssuedAt.Format(time.RFC3339))
 			}
 		}
 	}
 
-	applyPolicyPackToCfg(pp, c)
-	rulesFromPolicyPack(pp, c)
+	applyLoadedPolicyToCfg(loaded, c)
 
 	// Log a human-readable summary of what the pack contains.
-	caps := pp.Spec.ActionAuthorization.AllowedCapabilities
-	if len(caps) == 0 {
-		caps = pp.Spec.CapabilitiesRequired
-	}
-	kliqLog.Printf("PACK loaded: name=%s rules=%d capabilities=%v default_effect=%s issued=%s",
-		packName, len(pp.Spec.Rules), caps,
-		pp.Spec.ActionAuthorization.DefaultEffect,
-		func() string {
-			if t, ok := pp.Metadata.ParseIssuedAt(); ok {
-				return t.Format("2006-01-02T15:04Z")
-			}
-			return "unknown"
-		}(),
-	)
+	logLoadedForgePolicy(packName, loaded)
 
 	// Update the caller's issued_at tracking on success.
 	if activeIssuedAt != nil {
-		if newAt, ok := pp.Metadata.ParseIssuedAt(); ok {
+		if newAt, ok := loaded.IssuedAt(); ok {
 			*activeIssuedAt = newAt
 		}
 	}
-	return nil
+	return loaded, nil
+}
+
+func logLoadedForgePolicy(packName string, loaded loadedPolicyFile) {
+	if loaded.Local != nil {
+		pp := loaded.Local
+		caps := pp.Spec.ActionAuthorization.AllowedCapabilities
+		if len(caps) == 0 {
+			caps = pp.Spec.CapabilitiesRequired
+		}
+		kliqLog.Printf("PACK loaded: name=%s kind=%s rules=%d capabilities=%v default_effect=%s issued=%s",
+			packName, loaded.Kind, len(pp.Spec.Rules), caps,
+			pp.Spec.ActionAuthorization.DefaultEffect,
+			issuedAtString(loaded),
+		)
+		return
+	}
+	if loaded.Runtime != nil {
+		pp := loaded.Runtime
+		kliqLog.Printf("PACK loaded: name=%s kind=%s rules=%d capabilities=%v default_effect=%s issued=%s",
+			packName, loaded.Kind, len(pp.Spec.Rules), runtimePolicyCapabilities(*pp),
+			pp.Spec.DefaultEffect, issuedAtString(loaded),
+		)
+	}
+}
+
+func issuedAtString(loaded loadedPolicyFile) string {
+	if t, ok := loaded.IssuedAt(); ok {
+		return t.Format("2006-01-02T15:04Z")
+	}
+	return "unknown"
 }

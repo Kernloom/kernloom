@@ -237,6 +237,22 @@ func applyResolvedSourceAction(res actions.ActionResolution, executor fsmActionE
 	return true
 }
 
+func applyResolvedAction(res actions.ActionResolution, executor *brokeredActionExecutor, params adapterruntime.EnforcementParams, now time.Time) bool {
+	switch res.Target.Granularity {
+	case "", actions.TargetGranularitySource:
+		return applyResolvedSourceAction(res, executor, params, now)
+	case actions.TargetGranularityRelationship:
+		target, ok := relationshipTargetFromActionTarget(res.Target)
+		if !ok {
+			return false
+		}
+		executor.ApplyRelationship(target, res, now)
+		return true
+	default:
+		return false
+	}
+}
+
 func (s *sourceStates) levelCounts() (soft, hard, block int) {
 	for _, entry := range s.entries {
 		soft, hard, block = countLevel(entry.state, soft, hard, block)

@@ -79,6 +79,7 @@ DEFAULT_SCENARIOS=(
   tests/integration/scenarios/09_managed_enrollment.sh
   tests/integration/scenarios/10_adapter_definition.sh
   tests/integration/scenarios/11_netfilter_adapter.sh
+  tests/integration/scenarios/12_runtime_policy_pack.sh
 )
 
 resolve_scenarios() {

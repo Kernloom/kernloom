@@ -10,7 +10,7 @@ Full XDP/netns run:
 make integration
 ```
 
-Forge-only run without XDP/root network setup:
+Control-plane run without XDP/root network setup:
 
 ```bash
 make integration-forge
@@ -21,6 +21,7 @@ Run single scenarios:
 ```bash
 KLT_SCENARIOS="00 09 10" make integration
 KLT_SCENARIOS="09" bash tests/integration/run-forge.sh
+KLT_SCENARIOS="12" bash tests/integration/run-forge.sh
 KLT_SCENARIOS="tests/integration/scenarios/04_graph_learn_freeze.sh" sudo -E tests/integration/run.sh
 ```
 
@@ -44,6 +45,10 @@ Forge scenarios 09 and 10 do not need XDP. They need:
 - `jq`
 - a built Forge binary or a sibling checkout at `../kernloom-forge`
 
+Scenario 12 also runs without XDP. It needs:
+
+- a Go toolchain (`KLT_GO`, `go`, or `/usr/local/go/bin/go`)
+
 ## Artifacts
 
 Runtime artifacts are stored outside the repository by default:
@@ -58,7 +63,7 @@ Important files in this folder:
 - `klshield.log`: XDP attach/detach output
 - `server.log`: HTTP test server output
 - `state/`: KLIQ state, SQLite DB, feedback/whitelist copies
-- `09/`, `10/`, `11/`: scenario-specific Forge or Netfilter output
+- `09/`, `10/`, `11/`, `12/`: scenario-specific Forge, Netfilter, or RuntimePolicyPack output
 
 You can override the path:
 
@@ -109,7 +114,7 @@ KLShield/XDP is attached to the host-side client veth interfaces. This lets KLIQ
 
 ### `run-forge.sh`
 
-`tests/integration/run-forge.sh` is the small runner for CI and local control-plane checks without XDP. It only starts scenarios 09 and 10, builds Forge from `KLT_FORGE_ROOT`, and starts a local Forge HTTP server.
+`tests/integration/run-forge.sh` is the small runner for CI and local control-plane checks without XDP. By default it starts scenarios 09, 10, and 12. It builds Forge only when scenarios 09 or 10 are active, and builds `bin/kliq` when scenario 12 is active. Running only scenario 12 does not need Forge, `curl`, or `jq`.
 
 ## Important Environment Variables
 
@@ -141,6 +146,7 @@ KLShield/XDP is attached to the host-side client veth interfaces. This lets KLIQ
 | 09 | `09_managed_enrollment.sh` | Forge API | Managed enrollment, bundle pull, ACKs, receipts, findings, proposals |
 | 10 | `10_adapter_definition.sh` | Forge Compiler | Adapter manifests, AccessPolicy validation, profile compilation |
 | 11 | `11_netfilter_adapter.sh` | Netfilter | KLIQ without XDP, deny/restore, idempotent rules, safe cleanup |
+| 12 | `12_runtime_policy_pack.sh` | RuntimePDP | `--policy-file` RuntimePolicyPack loading, compile, mapper/broker/conformance fixtures |
 
 ## Scenario Details
 
@@ -393,6 +399,29 @@ Flow:
 
 This scenario is intentionally defensive: it checks not only the effect, but also idempotency and cleanup boundaries.
 
+### 12 RuntimePolicyPack Contract
+
+Goal: validate the contracts-based Runtime PDP path without XDP or root network setup.
+
+Flow:
+
+1. The scenario writes a temporary `kind: RuntimePolicyPack` YAML file into the artifact directory.
+2. `kliq run --adapter=none --policy-file=<runtime-policy.yaml> --runtime-pdp-mode=shadow` starts for a few seconds.
+3. The log must show that the policy file was loaded as `RuntimePolicyPack`.
+4. The Runtime PDP must compile the pack and log `pack loaded: 1 rules`.
+5. The run must not log unsupported-kind, parse, compile, or panic errors.
+6. Targeted Go contract tests then run for:
+   - RuntimePolicyPack loader and signature verification
+   - RuntimeDecision to ActionProposal mapping
+   - brokered relationship apply/revert receipts
+   - signed RuntimeBundle conformance and offline last-known-good validation
+
+Expected result:
+
+- Standalone `--policy-file` accepts the contracts `RuntimePolicyPack` schema.
+- Runtime PDP shadow mode can load the policy without changing enforcement.
+- The active-mode plumbing remains covered at the mapper/broker/conformance boundary.
+
 ## Cleanup
 
 The runner automatically calls `cleanup_all` at the beginning and at the end. Manual cleanup:
@@ -425,7 +454,7 @@ The cleanup logic only removes paths under the artifact directory or under `/tmp
 
 `integration.yml` is intended for self-hosted runners with XDP/netns and uploads artifacts from `/tmp/kernloom-integration-artifacts-<run-id>`.
 
-`integration-forge.yml` runs on normal GitHub-hosted Ubuntu and checks scenarios 09 and 10.
+`integration-forge.yml` runs on normal GitHub-hosted Ubuntu and checks scenarios 09, 10, and 12.
 
 ## Troubleshooting
 

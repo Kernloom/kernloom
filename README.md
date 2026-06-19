@@ -173,8 +173,22 @@ In managed mode KLIQ:
 2. Downloads a signed `RuntimeBundle` from Forge
 3. Verifies Ed25519 signature, generation monotonicity, and expiry
 4. Applies bootstrap autotune, graph lifecycle and enforcement bounds
-5. Loads local or Forge-delivered policy packs through the same policy gate
+5. Loads local or Forge-delivered `LocalPolicyPack` or `RuntimePolicyPack` files through the same policy gate
 6. Persists enforcement leases/receipts locally and uploads pending receipts to Forge
+
+Standalone nodes can also load a contracts-based RuntimePolicyPack directly:
+
+```bash
+./bin/kliq run \
+  --adapter=klshield \
+  --policy-file=/etc/kernloom/policies/runtime-policy.yaml \
+  --runtime-pdp-mode=shadow \
+  --dry-run=true
+```
+
+`--policy-file` accepts:
+- `kind: LocalPolicyPack` — legacy/local KLIQ policy and threshold tuning.
+- `kind: RuntimePolicyPack` with `apiVersion: kernloom.io/runtime/v1alpha1` — contracts-based Runtime PDP rules. In `shadow` mode decisions are logged; in `active` mode matched Runtime PDP decisions are mapped to `ActionProposal`s and enforced through the action broker.
 
 ---
 
@@ -184,12 +198,15 @@ Shared Runtime PDP wire schemas are imported from `github.com/kernloom/kernloom-
 
 ```
 RuntimeBundle          kernloom.io/runtime/v1alpha1
-RuntimePolicyPack      kernloom.io/policy/runtime/v1alpha1
-LocalRiskAssessment    kernloom.io/risk/v1alpha1
+RuntimePolicyPack      kernloom.io/runtime/v1alpha1
+LocalRiskAssessment    kernloom.io/runtime/v1alpha1
+RuntimeDecision        kernloom.io/runtime/v1alpha1
 EnforcementReceipt     kernloom.io/runtime/v1alpha1
 RuntimeFinding         kernloom.io/runtime/v1alpha1
 BundleAck              kernloom.io/runtime/v1alpha1
 ```
+
+KLIQ keeps conformance fixtures for signed runtime bundles, unsupported schema/capability/action/mode combinations, and offline last-known-good (`fail_static`) validation in `iq/internal/conformance/`.
 
 ---
 
@@ -201,6 +218,7 @@ Every TTL-bounded enforcement action is recorded as an `ActionLease` before the 
 - revert status: `pending` → `reverted` | `conflict` | `failed`
 
 Receipts are emitted for every apply/revert and persisted in SQLite (`action_receipts` table). A background goroutine uploads pending receipts to Forge every 30 seconds.
+KLIQ also reverts expired source and relationship leases from the main runtime tick, so tuple/relationship actions have the same expiry and receipt path as source actions.
 
 ---
 
@@ -233,12 +251,15 @@ kernloom/
 │   ├── cmd/kliq/                 KLIQ agent — main loop, CLI, wiring
 │   │   ├── kliq.go               main loop and CLI runtime composition
 │   │   ├── shadow_pdp.go         RuntimePDP shadow/active mode runner
+│   │   ├── policy_file.go        LocalPolicyPack/RuntimePolicyPack loader
+│   │   ├── runtime_pdp_action_mapper.go  RuntimeDecision → ActionProposal
 │   │   ├── brokered_executor.go  Action broker wiring + receipt persistence
 │   │   ├── receipt_uploader.go   Background Forge receipt upload queue
 │   │   └── forge_client.go       Forge HTTP client (enroll, bundle pull, upload)
 │   └── internal/
 │       ├── actionbroker/         Lease journal, fencing, receipt/revert handling
 │       ├── actions/              ActionProposal → PolicyResolver → ActionResolution
+│       ├── conformance/          RuntimeBundle compatibility fixtures
 │       ├── forgeagent/           Forge agent helpers and tests
 │       ├── localrisk/            LocalRiskAssessment (level, confidence, completeness)
 │       ├── runtimepdp/           CEL-based Runtime PDP (contracts.RuntimePolicyPack)
@@ -322,8 +343,6 @@ See `TECHNICAL_DEBT.md` for the full prioritised list. Key items:
 
 | Issue | Priority |
 |---|---|
-| RuntimeBundle trust contract still needs Forge/KLIQ conformance fixtures | P0 |
-| Action Broker is live for source enforcement, but tuple/de-enforce paths still need lease coverage | P0 |
 | Shared `kernloom-contracts` module is not yet fully adopted by managed bundle ingestion | P1 |
 | `iq/cmd/kliq` still owns too much runtime orchestration and should keep shrinking into internal services | P1 |
 | Historical names such as `LocalPolicyPack` and `PDPConfig` remain visible during the migration | P2 |

@@ -23,6 +23,7 @@ import (
 	"syscall"
 	"time"
 
+	contracts "github.com/kernloom/kernloom-contracts"
 	"github.com/kernloom/kernloom/iq/internal/actionbroker"
 	"github.com/kernloom/kernloom/iq/internal/actions"
 	"github.com/kernloom/kernloom/iq/internal/forgeagent"
@@ -247,12 +248,14 @@ func main() {
 		c.adapterParams = catalog.DefaultCapabilityParams(catalog.DefaultAdapterID)
 	}
 
+	var startupPolicy loadedPolicyFile
+
 	// Policy: abstract enforcement rules (autonomy, when/then, exports).
 	// Optional — without a policy file, profile defaults + CLI flags apply.
+	// --policy-file accepts both legacy LocalPolicyPack and contracts-based
+	// RuntimePolicyPack files; the top-level kind selects the loader path.
 	if c.PolicyFile != "" {
-		var pp *corepolicy.PolicyPack
-		var err error
-
+		var loaded loadedPolicyFile
 		if c.Mode == string(corepolicy.ModeManaged) {
 			// Managed mode: signature verification is mandatory (CLAUDE.md rule #8).
 			if c.PolicyVerifyKeyPath == "" {
@@ -262,7 +265,11 @@ func main() {
 			if kerr != nil {
 				log.Fatalf("load policy verify key: %v", kerr)
 			}
-			pp, err = corepolicy.LoadAndVerify(c.PolicyFile, pubKey)
+			var err error
+			loaded, err = loadPolicyFile(c.PolicyFile, pubKey)
+			if err != nil {
+				log.Fatalf("load policy file: %v", err)
+			}
 		} else {
 			// Standalone mode: signature verification is optional.
 			if c.PolicyVerifyKeyPath != "" {
@@ -270,17 +277,22 @@ func main() {
 				if kerr != nil {
 					log.Fatalf("load policy verify key: %v", kerr)
 				}
-				pp, err = corepolicy.LoadAndVerify(c.PolicyFile, pubKey)
+				var err error
+				loaded, err = loadPolicyFile(c.PolicyFile, pubKey)
+				if err != nil {
+					log.Fatalf("load policy file: %v", err)
+				}
 			} else {
-				pp, err = corepolicy.LoadFromFile(c.PolicyFile)
+				var err error
+				loaded, err = loadPolicyFile(c.PolicyFile, nil)
+				if err != nil {
+					log.Fatalf("load policy file: %v", err)
+				}
 			}
 		}
-		if err != nil {
-			log.Fatalf("load policy file: %v", err)
-		}
-		kliqLog.Printf("Policy loaded: file=%s name=%s", c.PolicyFile, pp.Metadata.Name)
-		applyPolicyPackToCfg(pp, &c)
-		rulesFromPolicyPack(pp, &c)
+		kliqLog.Printf("Policy loaded: file=%s kind=%s name=%s", c.PolicyFile, loaded.Kind, loaded.Name())
+		applyLoadedPolicyToCfg(loaded, &c)
+		startupPolicy = loaded
 	}
 
 	applyProfileDefaults(&c, p)
@@ -525,7 +537,9 @@ func main() {
 	// for TTL-bounded actions.
 	resolver := c.buildPolicyResolver()
 	legacyExecutor := buildExecutor(sourcePEP)
-	brokerPEP := newBrokeredFSMPEP(legacyExecutor)
+	brokerPEP := newBrokeredFSMPEP(legacyExecutor, func() adapterruntime.EnforcementParams {
+		return c.toPEPParams()
+	})
 	actionBroker, abErr := actionbroker.New(actionbroker.Config{
 		NodeID: nodeID,
 		Store:  stateStore,
@@ -535,7 +549,22 @@ func main() {
 	if abErr != nil {
 		log.Fatalf("action broker init: %v", abErr)
 	}
-	executor := newBrokeredActionExecutor(legacyExecutor, actionBroker, brokerPEP, stateStore, nodeID)
+	var relationshipBroker *actionbroker.Broker
+	var relationshipBrokerPEP *brokeredRelationshipPEP
+	if relationshipPEP != nil {
+		relationshipBrokerPEP = newBrokeredRelationshipPEP(relationshipPEP)
+		var rbErr error
+		relationshipBroker, rbErr = actionbroker.New(actionbroker.Config{
+			NodeID: nodeID,
+			Store:  stateStore,
+			PEP:    relationshipBrokerPEP,
+			Now:    func() time.Time { return time.Now().UTC() },
+		})
+		if rbErr != nil {
+			log.Fatalf("relationship action broker init: %v", rbErr)
+		}
+	}
+	executor := newBrokeredActionExecutor(legacyExecutor, actionBroker, brokerPEP, relationshipBroker, relationshipBrokerPEP, stateStore, nodeID)
 	for _, sidecar := range sourcePEPSidecars {
 		sidecar := sidecar
 		executor.AddSidecar(sourcePEPSidecar{
@@ -553,6 +582,16 @@ func main() {
 		kliqLog.Printf("Action broker reconciled %d pending leases", len(receipts))
 		for _, receipt := range receipts {
 			logEnforcementReceipt(receipt)
+		}
+	}
+	if relationshipBroker != nil {
+		if receipts, err := relationshipBroker.ReconcilePending(context.Background()); err != nil {
+			kliqLog.Printf("WARNING: relationship action broker pending lease reconciliation failed: %v", err)
+		} else if len(receipts) > 0 {
+			kliqLog.Printf("Relationship action broker reconciled %d pending leases", len(receipts))
+			for _, receipt := range receipts {
+				logEnforcementReceipt(receipt)
+			}
 		}
 	}
 
@@ -617,6 +656,7 @@ func main() {
 	// Declared as receive-only so it can be set from forgeAgent.BundleUpdates()
 	// or from a local channel when running without Forge.
 	var bundleUpdateCh <-chan []byte = make(chan []byte, 1)
+	runtimePolicyUpdateCh := make(chan contracts.RuntimePolicyPack, 8)
 
 	// ── Shadow metric pipeline ──────────────────────────────────────────────────
 	// Disabled by default (metric_pipeline.enabled=false). Adapter-specific
@@ -753,8 +793,16 @@ func main() {
 			},
 			func(packBytes []byte, packName string) error {
 				// Apply the pack and update rollback state.
-				if err := applyForgePack(packBytes, packName, c.PolicyVerifyKeyPath, &c, &activePackIssuedAt); err != nil {
+				loaded, err := applyForgePack(packBytes, packName, c.PolicyVerifyKeyPath, &c, &activePackIssuedAt)
+				if err != nil {
 					return err
+				}
+				if loaded.Runtime != nil {
+					select {
+					case runtimePolicyUpdateCh <- *loaded.Runtime:
+					default:
+						kliqLog.Printf("runtime policy update channel full; dropping pack %s", packName)
+					}
 				}
 				hash := PackHash(packBytes)
 				forgeAgent.SetPackHash(hash)
@@ -881,8 +929,8 @@ func main() {
 					kliqLog.Printf("[runtime-pdp:active] proposal denied: %s", res.DenyReason)
 					continue
 				}
-				if !applyResolvedSourceAction(res, executor, pepParams, time.Now()) {
-					kliqLog.Printf("[runtime-pdp:active] proposal skipped: unsupported source target %q", res.Target.Value)
+				if !applyResolvedAction(res, executor, pepParams, time.Now()) {
+					kliqLog.Printf("[runtime-pdp:active] proposal skipped: unsupported target %s:%q", res.Target.Granularity, res.Target.Value)
 				}
 			}
 		}()
@@ -891,8 +939,25 @@ func main() {
 		shadowRunner.SetMode(PDPModeShadow, nil)
 		kliqLog.Printf("RuntimePDP mode: SHADOW — decisions logged only (--runtime-pdp-mode=active to enforce)")
 	}
+	if startupPolicy.Runtime != nil {
+		if err := shadowRunner.UpdatePack(*startupPolicy.Runtime); err != nil {
+			log.Fatalf("compile runtime policy file %s: %v", c.PolicyFile, err)
+		}
+	}
 	shadowCtx, shadowCancel := context.WithCancel(context.Background())
 	defer shadowCancel()
+	go func() {
+		for {
+			select {
+			case <-shadowCtx.Done():
+				return
+			case pack := <-runtimePolicyUpdateCh:
+				if err := shadowRunner.UpdatePack(pack); err != nil {
+					kliqLog.Printf("runtime policy pack update rejected: %v", err)
+				}
+			}
+		}
+	}()
 	startShadowPDP(shadowCtx, mainBus, shadowRunner)
 
 	// Signal consumer: logs signals, injects graph strikes into FSM state.
@@ -946,6 +1011,7 @@ func main() {
 								DesiredAction: "enforce.access.deny",
 								DesiredLevel:  "block",
 								Target:        relTarget.Proposal,
+								TTL:           c.GraphFreezeTTL,
 								Confidence:    float64(sig.Confidence) / 100.0,
 								CreatedAt:     time.Now(),
 							}
@@ -955,7 +1021,7 @@ func main() {
 									relTarget.Label,
 									proposal.DesiredLevel, res.ExecutableLevel, res.DenyReason)
 							}
-							result := executor.ApplyRelationship(relationshipPEP, relTarget.PEP, res, time.Now())
+							result := executor.ApplyRelationship(relTarget.PEP, res, time.Now())
 							switch result.Status {
 							case "applied":
 								kliqLog.Printf("RELATIONSHIP deny edge: %s (freeze violation)", relTarget.Label)
@@ -1176,6 +1242,7 @@ func main() {
 	ticker := time.NewTicker(c.Interval)
 	defer ticker.Stop()
 	var tickN uint64
+	lastBrokerRevert := time.Time{}
 	lastExpiredCleanup := time.Now()
 
 	// SIGUSR1: de-escalate all enforced IPs to OBSERVE so kliq state stays in
@@ -1232,6 +1299,10 @@ func main() {
 		case <-ticker.C:
 		}
 		nowWall := time.Now()
+		if lastBrokerRevert.IsZero() || nowWall.Sub(lastBrokerRevert) >= c.Interval {
+			lastBrokerRevert = nowWall
+			executor.RevertExpired(context.Background(), nowWall)
+		}
 
 		// Process pending bundle update (non-blocking; delivered by heartbeat goroutine).
 		select {

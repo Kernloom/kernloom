@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
-# Kernloom Forge integration test runner (no XDP required).
-# Runs only scenarios 09–10 which test the Forge control-plane via HTTP.
+# Kernloom no-XDP integration test runner.
+# Runs Forge control-plane scenarios plus RuntimePolicyPack contract checks.
 # Can run on any standard Linux host without BPF/XDP/netns capabilities.
 #
 # Requirements:
-#   - forge binary at $KLT_FORGE (default: bin/forge, built from ../kernloom-forge)
-#   - curl, jq
+#   - scenarios 09/10: forge binary at $KLT_FORGE, curl, jq
+#   - scenario 12: Go toolchain; bin/kliq is built by this runner
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
@@ -31,13 +31,56 @@ restore_artifact_ownership() {
   esac
 }
 
-check_deps() {
-  local missing=()
-  for cmd in curl jq; do
-    command -v "$cmd" >/dev/null 2>&1 || missing+=("$cmd")
+DEFAULT_SCENARIOS=(
+  tests/integration/scenarios/09_managed_enrollment.sh
+  tests/integration/scenarios/10_adapter_definition.sh
+  tests/integration/scenarios/12_runtime_policy_pack.sh
+)
+
+resolve_scenarios() {
+  if [[ -z "${KLT_SCENARIOS:-}" ]]; then
+    printf '%s\n' "${DEFAULT_SCENARIOS[@]}"
+    return
+  fi
+  local item
+  for item in $KLT_SCENARIOS; do
+    if [[ -f "$item" ]]; then
+      printf '%s\n' "$item"
+    elif [[ -f "tests/integration/scenarios/$item" ]]; then
+      printf '%s\n' "tests/integration/scenarios/$item"
+    else
+      printf '%s\n' "tests/integration/scenarios/${item}"*.sh
+    fi
   done
+}
+
+check_deps() {
+  local needs_forge="$1"
+  local needs_kliq="$2"
+  local missing=()
+  if [[ "$needs_forge" == "true" ]]; then
+    for cmd in curl jq; do
+      command -v "$cmd" >/dev/null 2>&1 || missing+=("$cmd")
+    done
+  fi
+  if [[ "$needs_kliq" == "true" ]]; then
+    command -v "$KLT_GO" >/dev/null 2>&1 || missing+=("$KLT_GO")
+  fi
   if [[ ${#missing[@]} -gt 0 ]]; then
     echo "[runner] ERROR: missing dependencies: ${missing[*]}" >&2
+    exit 1
+  fi
+}
+
+build_kliq() {
+  if [[ "${KLT_KLIQ_SKIP_BUILD:-0}" != "1" ]]; then
+    echo "[runner] building kliq binary at $KLT_KLIQ"
+    mkdir -p "$(dirname "$KLT_KLIQ")"
+    GOCACHE="${KLT_GO_BUILD_CACHE:-$KLT_ARTIFACT_DIR/go-build-runner}" \
+      "$KLT_GO" build -o "$KLT_KLIQ" ./iq/cmd/kliq
+    echo "[runner] kliq built: $KLT_KLIQ"
+  elif [[ ! -x "$KLT_KLIQ" ]]; then
+    echo "[runner] ERROR: kliq binary not found at $KLT_KLIQ" >&2
     exit 1
   fi
 }
@@ -52,7 +95,8 @@ build_forge() {
       exit 1
     fi
     mkdir -p "$(dirname "$KLT_FORGE")"
-    (cd "$forge_root" && "$KLT_GO" build -o "$KLT_FORGE" ./cmd/forge/)
+    (cd "$forge_root" && GOCACHE="${KLT_GO_BUILD_CACHE:-$KLT_ARTIFACT_DIR/go-build-runner}" \
+      "$KLT_GO" build -o "$KLT_FORGE" ./cmd/forge/)
     echo "[runner] forge built: $KLT_FORGE"
   elif [[ ! -x "$KLT_FORGE" ]]; then
     echo "[runner] ERROR: forge binary not found at $KLT_FORGE" >&2
@@ -92,31 +136,6 @@ on_exit() {
 }
 trap on_exit EXIT
 
-check_deps
-build_forge
-
-DEFAULT_SCENARIOS=(
-  tests/integration/scenarios/09_managed_enrollment.sh
-  tests/integration/scenarios/10_adapter_definition.sh
-)
-
-resolve_scenarios() {
-  if [[ -z "${KLT_SCENARIOS:-}" ]]; then
-    printf '%s\n' "${DEFAULT_SCENARIOS[@]}"
-    return
-  fi
-  local item
-  for item in $KLT_SCENARIOS; do
-    if [[ -f "$item" ]]; then
-      printf '%s\n' "$item"
-    elif [[ -f "tests/integration/scenarios/$item" ]]; then
-      printf '%s\n' "tests/integration/scenarios/$item"
-    else
-      printf '%s\n' "tests/integration/scenarios/${item}"*.sh
-    fi
-  done
-}
-
 mapfile -t SCENARIOS < <(resolve_scenarios)
 for scenario in "${SCENARIOS[@]}"; do
   [[ -f "$scenario" ]] || {
@@ -124,6 +143,23 @@ for scenario in "${SCENARIOS[@]}"; do
     exit 1
   }
 done
+
+NEEDS_FORGE=false
+NEEDS_KLIQ=false
+for scenario in "${SCENARIOS[@]}"; do
+  case "$(basename "$scenario")" in
+    09_*|10_*) NEEDS_FORGE=true ;;
+    12_*) NEEDS_KLIQ=true ;;
+  esac
+done
+
+check_deps "$NEEDS_FORGE" "$NEEDS_KLIQ"
+if [[ "$NEEDS_KLIQ" == "true" ]]; then
+  build_kliq
+fi
+if [[ "$NEEDS_FORGE" == "true" ]]; then
+  build_forge
+fi
 
 PASS=0
 FAIL=0
@@ -147,4 +183,4 @@ echo "Results: $PASS passed, $FAIL failed"
 echo "=============================="
 
 [[ $FAIL -eq 0 ]] || exit 1
-echo "[PASS] all Forge integration scenarios passed"
+echo "[PASS] all no-XDP integration scenarios passed"

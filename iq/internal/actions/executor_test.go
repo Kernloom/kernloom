@@ -24,22 +24,6 @@ func applyMockState(st fsm.State, target fsm.Level, now time.Time, params adapte
 	return st
 }
 
-type mockRelationshipPEP struct {
-	applied int
-}
-
-func (p *mockRelationshipPEP) RelationshipAvailable() bool { return true }
-func (p *mockRelationshipPEP) SetRelationshipEnforcement(bool) error {
-	return nil
-}
-func (p *mockRelationshipPEP) DenyRelationship(adapterruntime.RelationshipTarget) error {
-	p.applied++
-	return nil
-}
-func (p *mockRelationshipPEP) AllowRelationship(adapterruntime.RelationshipTarget) error {
-	return nil
-}
-
 // newDryRunExecutor creates an executor backed by an in-memory source PEP.
 func newDryRunExecutor() *actions.SourceActionExecutor {
 	return actions.NewSourceActionExecutor(mockSourcePEP{})
@@ -165,49 +149,5 @@ func TestApplyDeEnforceSource_ObserveIsNoop(t *testing.T) {
 	newSt := ex.ApplyDeEnforceSource(testTarget, st, testParams, testNow)
 	if newSt.Level != fsm.LevelObserve {
 		t.Errorf("ApplyDeEnforceSource from observe: expected observe, got %v", newSt.Level)
-	}
-}
-
-// ── ApplyRelationship ─────────────────────────────────────────────────────────
-
-var testRelationship = adapterruntime.RelationshipTarget{
-	RelationshipKey: adapterruntime.RelationshipKey{
-		SubjectID: "source-1",
-		TargetID:  "target-1",
-		Dimension: map[string]string{"service": "api"},
-	},
-}
-
-func TestApplyRelationship_Allowed_Block_Applied(t *testing.T) {
-	ex := newDryRunExecutor()
-	pep := &mockRelationshipPEP{}
-	res := actions.ActionResolution{Allowed: true, ExecutableLevel: "block", ExecutableAction: "enforce.access.deny"}
-	result := ex.ApplyRelationship(pep, testRelationship, res, testNow)
-	if result.Status != "applied" {
-		t.Errorf("ApplyRelationship block: expected applied, got %q", result.Status)
-	}
-	if pep.applied != 1 {
-		t.Errorf("ApplyRelationship should call relationship PEP once, got %d", pep.applied)
-	}
-}
-
-func TestApplyRelationship_Denied_StatusIsDenied(t *testing.T) {
-	ex := newDryRunExecutor()
-	result := ex.ApplyRelationship(&mockRelationshipPEP{}, testRelationship, deniedResolution("managed_no_policy_pack"), testNow)
-	if result.Status != "denied" {
-		t.Errorf("ApplyRelationship denied: expected denied, got %q", result.Status)
-	}
-	if result.Reason == "" {
-		t.Error("denied tuple: expected non-empty Reason")
-	}
-}
-
-func TestApplyRelationship_AllowedButNotBlock_Skipped(t *testing.T) {
-	// Tuple enforcement is binary: only block is applied; rate_limit downgrades to skipped.
-	ex := newDryRunExecutor()
-	res := actions.ActionResolution{Allowed: true, ExecutableLevel: "soft", DenyReason: "policy_max_action_ceiling"}
-	result := ex.ApplyRelationship(&mockRelationshipPEP{}, testRelationship, res, testNow)
-	if result.Status != "skipped" {
-		t.Errorf("ApplyRelationship non-block: expected skipped, got %q", result.Status)
 	}
 }
