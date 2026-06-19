@@ -622,10 +622,16 @@ in new code or new data.
 
 This section is the new end-to-end path:
 
-1. Forge builds a `RuntimePolicyPack` from an `AccessPolicy`.
-2. KLIQ loads that pack in standalone mode with `--policy-file`.
-3. Forge signs the same intent as a `RuntimeBundle`.
-4. KLIQ pulls the bundle in managed mode from `forge serve`.
+1. An operator writes canonical `AccessPolicy` YAML, or runs
+   `forge intent convert` to convert natural intent text to `AccessPolicy` YAML.
+2. Forge builds a `RuntimePolicyPack` from that `AccessPolicy`.
+3. KLIQ loads that pack in standalone mode with `--policy-file`.
+4. Forge signs the same intent as a `RuntimeBundle`.
+5. KLIQ pulls the bundle in managed mode from `forge serve`.
+
+KLIQ does not load natural intent text directly. It only sees the converted
+runtime artifact: `RuntimePolicyPack` in standalone mode or signed
+`RuntimeBundle` in managed mode.
 
 The longer Forge-side guide is in
 `kernloom-forge/docs/policy-intent-examples.md`.
@@ -645,6 +651,41 @@ go build -o bin/forge ./cmd/forge
 ```
 
 ### 7.2 Write A Simple Policy Intent
+
+Optional natural authoring smoke test:
+
+```bash
+cd /home/adrian/prj/ebpf-security/kernloom-forge
+
+cat > /tmp/kernloom-manual/forge/policies/protect-ziti-controller.intent <<'EOF'
+protect "ziti-controller"
+allow group "kernloom-admins" to access "ziti-controller"
+require "subject.risk.level" eq "low"
+require "session.authentication.strength" in ["mfa", "phishing_resistant_mfa"]
+default deny access to "ziti-controller"
+when denied access to "ziti-controller" exceeds 5 within 15m then alert
+never auto_block group "kernloom-admins"
+EOF
+
+./bin/forge intent convert \
+  --input /tmp/kernloom-manual/forge/policies/protect-ziti-controller.intent \
+  --output /tmp/kernloom-manual/forge/policies/protect-ziti-controller.yaml \
+  --owner security
+
+./bin/forge validate \
+  --policy /tmp/kernloom-manual/forge/policies/protect-ziti-controller.yaml
+```
+
+Expected:
+- `forge intent convert` writes an `AccessPolicy` YAML file.
+- Warnings for `default deny`, `when ... then ...`, and `never ...` are normal
+  for now. They are intent lines that will later map to runtime defaults,
+  response rules, or guardrails.
+- `alert` is the readable alias for the canonical observe action
+  `observe.signal.emit`. Runtime enforcement aliases such as `rate_limit`,
+  `deny`, `drop`, and `quarantine` are defined by the registries and must obey
+  the target's allowed action level.
+- `forge validate` prints `OK: AccessPolicy "protect-ziti-controller" is valid`.
 
 This intent says: for a local KLShield node, risk must be `low` and device
 posture must be `healthy`. Both are canonical registry keys.

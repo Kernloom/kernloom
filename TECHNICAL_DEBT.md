@@ -212,7 +212,48 @@ Recommended fix:
 - Continue adding conformance fixtures around generic fact variables, unsupported capabilities, LKG/offline
   behavior, and source/relationship RuntimeDecision mapping.
 
-### 8. Lease and state-store hardening is incomplete
+### 8. Natural intent response rules need deterministic compiler priority
+
+Natural policy intent can express several response rules for the same protected resource, for example
+alert at a low threshold, rate limit at a higher threshold, and temporarily drop or deny when risk and
+enforcement feedback keep rising. Operators should be allowed to write those rules in a readable order,
+including mild-to-hard escalation order.
+
+Current risk:
+
+- KLIQ RuntimePDP evaluates `RuntimePolicyPack.spec.rules[]` in order and returns the first matching
+  rule.
+- If Forge emits natural `when ... then ...` rules in author order, a broad mild rule such as
+  `denied access exceeds 5 then alert` can shadow a stricter rule such as
+  `denied access exceeds 20 then rate_limit`.
+- The natural intent parser currently recognizes response intent text only as warnings and does not yet
+  emit a response-rule IR, runtime rules, priorities, or side-effect notifications.
+- "Also alert" semantics should not become a second competing enforcement decision. Alerting should be a
+  side effect/export/finding attached to the matched enforcement rule, or a separate non-enforcing rule
+  with explicit priority behavior.
+
+Recommended fix:
+
+- Introduce a Forge response-rule IR for natural intent before emitting `RuntimePolicyPack` rules.
+- Give every response rule an explicit compiler priority derived from registry semantics:
+  action severity/level, threshold, risk predicate, specificity, and optional author override.
+- Compile stricter/more specific rules before softer/broader rules when targeting the current
+  first-match RuntimePDP contract.
+- Consider adding an explicit `priority` or `order` field to the shared `RuntimePolicyRule` contract so
+  rule ordering is visible and auditable instead of only implied by list position.
+- Add compiler diagnostics for shadowed rules and ambiguous equal-priority rules.
+- Add tests for common escalation policies: alert-only, rate limit, drop/deny with TTL, sustained
+  rate-limit drops, and `also alert` side effects.
+
+Relevant areas:
+
+- `kernloom-forge/pkg/core/naturalintent`
+- `kernloom-forge/pkg/bundler`
+- `github.com/kernloom/kernloom-contracts.RuntimePolicyRule`
+- `iq/internal/runtimepdp`
+- `kernloom-registries/registries/actions/runtime-action-contracts.yaml`
+
+### 9. Lease and state-store hardening is incomplete
 
 The SQLite state store now has `action_leases` and `action_receipts`. The runtime reconciles pending
 leases at startup, reverts expired source/relationship leases during the tick, persists receipts, uploads
@@ -229,7 +270,7 @@ Recommended fix:
 - Add managed-mode integration tests for receipt upload failure/retry/prune.
 - Add migration tests for empty DB, old DB, and interrupted migration scenarios.
 
-### 9. Adapter role split is only partially complete
+### 10. Adapter role split is only partially complete
 
 KLShield code has been moved into adapter subpackages, but the runtime still carries historical
 assumptions around telemetry, PEP sidecars, feedback, and action execution.
@@ -253,7 +294,7 @@ Recommended fix:
 
 ## P2 - Cleanup
 
-### 10. README contains stale migration notes
+### 11. README contains stale migration notes
 
 Status: fixed. The repository layout now points vendor extractors at `pkg/adapters/` and lists the
 OpenZiti adapter package.
@@ -266,7 +307,7 @@ Recommended fix:
 
 - Keep README layout updates in the same commits as future package moves.
 
-### 11. Historical config and naming remains visible
+### 12. Historical config and naming remains visible
 
 The docs call for clearer RuntimeBundle, Runtime Policy Pack, and Runtime PDP terminology, but
 current config and docs still expose old names such as `LocalPolicyPack` and `PDPConfig`.
@@ -283,7 +324,7 @@ Recommended fix:
 - Introduce new names at boundaries first.
 - Keep deprecated aliases only with explicit comments and removal criteria.
 
-### 12. Tracked release artifacts and ignored paths need a decision
+### 13. Tracked release artifacts and ignored paths need a decision
 
 Several generated or binary-like artifacts appear to be tracked while also being covered by ignore
 rules.
@@ -307,7 +348,7 @@ Recommended fix:
 - If not, remove them in a dedicated cleanup commit and document the release build path.
 - Remove Windows `Zone.Identifier` sidecar files unless they are intentionally archived evidence.
 
-### 13. Generic comments and examples still lean on old vendor names
+### 14. Generic comments and examples still lean on old vendor names
 
 Some generic packages use KLShield, Nginx, Ziti, or Cilium examples in comments and tests. Examples
 are less severe than exported identifiers, but they keep the old mental model alive.
@@ -328,8 +369,10 @@ Recommended fix:
 1. Migrate managed RuntimeBundle ingestion to `github.com/kernloom/kernloom-contracts`.
 2. Introduce a runtime fact/context registry for metrics, baselines, graph predicates, adapter facts, and
    required/missing context.
-3. Extend non-network adapters to publish rich generic facts and relationships against that registry.
-4. Continue shrinking `iq/cmd/kliq`: graph pipeline setup, adapter startup, and the main tick body are the
+3. Define the Forge response-rule IR and deterministic priority rules before compiling natural
+   `when ... then ...` escalation policies into RuntimePolicyPacks.
+4. Extend non-network adapters to publish rich generic facts and relationships against that registry.
+5. Continue shrinking `iq/cmd/kliq`: graph pipeline setup, adapter startup, and the main tick body are the
    next high-value extraction targets after RuntimePDP/signal handling.
-5. Add managed-mode outage/restart integration tests for bundle validation, receipt retry, and lease
+6. Add managed-mode outage/restart integration tests for bundle validation, receipt retry, and lease
    reconciliation.

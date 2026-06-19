@@ -29,6 +29,3 @@ require (
 	modernc.org/mathutil v1.7.1 // indirect
 	modernc.org/memory v1.11.0 // indirect
 )
-
-replace github.com/kernloom/kernloom-registries => ../kernloom-registries
-replace github.com/kernloom/kernloom-contracts => ../kernloom-contracts
