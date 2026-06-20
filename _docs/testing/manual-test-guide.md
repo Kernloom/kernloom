@@ -823,6 +823,21 @@ sudo ./bin/kliq run \
 Expected: RuntimePDP is active, but `--dry-run=true` prevents real PEP writes.
 Use `--dry-run=false` only after a successful dry-run.
 
+To test persisted source baselines, run the KLShield dry-run with
+`--feature-profile=iq-learning`, let it observe traffic for at least one flush
+window or stop it cleanly, then inspect the source scope:
+
+```bash
+./bin/kliq storage status --db=/tmp/kernloom-manual/kliq-forge-klshield.db
+./bin/kliq baselines list \
+  --db=/tmp/kernloom-manual/kliq-forge-klshield.db \
+  --scope=source
+```
+
+Expected: `metric_baselines` contains source-scoped rows for observed KLShield
+metrics such as `network.packets_per_second`, `network.bytes_per_second`,
+`network.syn_rate`, and `network.scan_rate`.
+
 ### 7.5 Managed Mode With A Signed RuntimeBundle
 
 Managed mode is more than "KLIQ can reach Forge". The important test is: KLIQ

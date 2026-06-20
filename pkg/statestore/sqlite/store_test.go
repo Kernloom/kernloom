@@ -117,6 +117,62 @@ func TestUpsertBaseline_RoundTrip(t *testing.T) {
 	}
 }
 
+func TestListBaselinesByScope(t *testing.T) {
+	s := openMemStore(t)
+	ctx := context.Background()
+	now := time.Date(2026, 6, 20, 10, 30, 0, 0, time.UTC)
+
+	rows := []BaselineRow{
+		{
+			Key: baseline.Key{
+				MetricID:        "network.packets_per_second",
+				ScopeType:       "source",
+				ScopeID:         "klshield-source",
+				SubjectEntityID: "10.0.0.1",
+				SourceClass:     "xdp",
+				WindowSeconds:   2,
+			},
+			State:        "candidate",
+			EWMAState:    map[string]any{"ewma": 100.0},
+			Observations: 3,
+			LastUpdated:  now,
+			CreatedAt:    now.Add(-time.Minute),
+		},
+		{
+			Key: baseline.Key{
+				MetricID:        "network.packets_per_second",
+				ScopeType:       "relationship",
+				ScopeID:         "edge",
+				SubjectEntityID: "10.0.0.1",
+				ObjectEntityID:  "10.0.0.2",
+				SourceClass:     "xdp",
+				WindowSeconds:   60,
+			},
+			State:        "candidate",
+			EWMAState:    map[string]any{"ewma": 50.0},
+			Observations: 1,
+			LastUpdated:  now,
+			CreatedAt:    now,
+		},
+	}
+	for _, row := range rows {
+		if err := s.UpsertBaseline(ctx, row); err != nil {
+			t.Fatalf("upsert baseline: %v", err)
+		}
+	}
+
+	got, err := s.ListBaselinesByScope(ctx, "source", "klshield-source")
+	if err != nil {
+		t.Fatalf("list baselines by scope: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("rows = %d, want 1", len(got))
+	}
+	if got[0].Key.SubjectEntityID != "10.0.0.1" || got[0].CreatedAt.IsZero() {
+		t.Fatalf("unexpected row: %#v", got[0])
+	}
+}
+
 func TestUpsertExclusion_ActiveLookup(t *testing.T) {
 	s := openMemStore(t)
 	ctx := context.Background()

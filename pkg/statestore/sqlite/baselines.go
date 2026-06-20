@@ -6,6 +6,7 @@ package sqlite
 import (
 	"context"
 	"crypto/sha256"
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"sort"
@@ -69,6 +70,10 @@ func (s *Store) UpsertBaseline(ctx context.Context, row BaselineRow) error {
 	if row.LastUpdated.IsZero() {
 		lastUpdated = now
 	}
+	createdAt := row.CreatedAt.UTC().Format(time.RFC3339Nano)
+	if row.CreatedAt.IsZero() {
+		createdAt = now
+	}
 
 	_, err = s.db.ExecContext(ctx, `
 		INSERT INTO metric_baselines
@@ -90,7 +95,7 @@ func (s *Store) UpsertBaseline(ctx context.Context, row BaselineRow) error {
 		row.Key.MetricID, row.Key.ScopeType, row.Key.ScopeID, row.Key.SubjectEntityID,
 		row.Key.ObjectEntityID, row.Key.DimensionsHash, row.Key.SourceClass,
 		row.Key.VisibilityPoint, row.Key.MeasurementType, row.Key.TruthClass, row.Key.WindowSeconds,
-		row.State, string(ewmaJSON), row.Observations, lastUpdated, now,
+		row.State, string(ewmaJSON), row.Observations, lastUpdated, createdAt,
 	)
 	return err
 }
@@ -132,7 +137,26 @@ func (s *Store) ListBaselinesBySubject(ctx context.Context, subjectEntityID stri
 		return nil, err
 	}
 	defer rows.Close()
+	return scanBaselineRows(rows)
+}
 
+// ListBaselinesByScope returns all baseline rows for a scope.
+func (s *Store) ListBaselinesByScope(ctx context.Context, scopeType, scopeID string) ([]BaselineRow, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT id, metric_id, scope_type, scope_id, subject_entity_id,
+		       object_entity_id, dimensions_hash, source_class, visibility_point,
+		       measurement_type, truth_class, window_seconds,
+		       state, ewma_state, observations, last_updated_at, created_at
+		FROM metric_baselines WHERE scope_type=? AND scope_id=?
+	`, scopeType, scopeID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	return scanBaselineRows(rows)
+}
+
+func scanBaselineRows(rows *sql.Rows) ([]BaselineRow, error) {
 	var result []BaselineRow
 	for rows.Next() {
 		var r BaselineRow

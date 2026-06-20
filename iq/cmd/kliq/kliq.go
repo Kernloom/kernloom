@@ -535,6 +535,18 @@ func main() {
 		log.Fatalf("open state store %s: %v", c.StateStorePath, ssErr)
 	}
 	defer stateStore.Close()
+	if n, err := loadRuntimeSourceBaselines(context.Background(), sourceBaseline, stateStore, c.Interval); err != nil {
+		kliqLog.Printf("WARN: load source baselines: %v", err)
+	} else if n > 0 {
+		kliqLog.Printf("Source baseline restore: profiles=%d", n)
+	}
+	defer func() {
+		if n, err := flushRuntimeSourceBaselines(context.Background(), sourceBaseline, stateStore, c.Interval, true); err != nil {
+			kliqLog.Printf("WARN: final flush source baselines: %v", err)
+		} else if n > 0 {
+			kliqLog.Printf("Source baseline final flush: baselines=%d", n)
+		}
+	}()
 
 	// Central enforcement pipeline: resolver is the policy gate; executor is the
 	// only component authorized to call the source PEP, through the action broker
@@ -921,6 +933,7 @@ func main() {
 
 	runtimeCtx, runtimeCancel := context.WithCancel(context.Background())
 	defer runtimeCancel()
+	startRuntimeSourceBaselineFlush(runtimeCtx, sourceBaseline, stateStore, c.Interval)
 	shadowRunner, err := startRuntimePDPService(runtimeCtx, runtimePDPServiceConfig{
 		NodeID:      nodeID,
 		Mode:        c.RuntimePDPMode,

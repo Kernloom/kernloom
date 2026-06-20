@@ -14,8 +14,8 @@
 //	kliq main loop → Update(src, pps, bps, syn, scan)
 //	               → EffectiveTrigPPS(src, globalTrig) → engine.EvaluateAt(...)
 //
-// Storage: in-memory only. Persistence is optional and batched externally.
-// The cache is bounded by MaxSources and entries expire after TTL.
+// Storage: in-memory with snapshot/restore hooks for batched external
+// persistence. The cache is bounded by MaxSources and entries expire after TTL.
 package sourcebaseline
 
 import (
@@ -43,6 +43,12 @@ type Profile struct {
 	LastSeen   time.Time
 	Promoted   bool    // true once obs >= MinObs
 	Confidence float64 // 0..1; computed from obs/windows/age
+}
+
+// Snapshot is a point-in-time copy of one per-source traffic profile.
+type Snapshot struct {
+	SourceID string
+	Profile  Profile
 }
 
 // recomputeConfidence updates the Confidence field.
@@ -121,15 +127,16 @@ func (c *Config) applyDefaults() {
 // Cache is the in-memory source baseline store.
 // All methods are safe for concurrent use.
 type Cache struct {
-	mu  sync.RWMutex
-	cfg Config
-	m   map[string]*Profile
+	mu    sync.RWMutex
+	cfg   Config
+	m     map[string]*Profile
+	dirty map[string]struct{}
 }
 
 // New creates a new Cache with the provided Config.
 func New(cfg Config) *Cache {
 	cfg.applyDefaults()
-	return &Cache{cfg: cfg, m: make(map[string]*Profile, 1024)}
+	return &Cache{cfg: cfg, m: make(map[string]*Profile, 1024), dirty: make(map[string]struct{}, 1024)}
 }
 
 // Update records a new observation for srcIP.
@@ -186,6 +193,7 @@ func (c *Cache) Update(srcIP string, pps, bps, syn, scan float64, isSuspicious b
 	p.ObsCount++
 	p.Windows++
 	p.LastSeen = now
+	c.dirty[srcIP] = struct{}{}
 
 	if !p.Promoted && p.ObsCount >= c.cfg.MinObs {
 		p.Promoted = true
@@ -253,6 +261,60 @@ func (c *Cache) Len() int {
 	return len(c.m)
 }
 
+// Snapshot returns a copy of all cached source profiles.
+func (c *Cache) Snapshot() []Snapshot {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	out := make([]Snapshot, 0, len(c.m))
+	for sourceID, p := range c.m {
+		out = append(out, Snapshot{SourceID: sourceID, Profile: *p})
+	}
+	return out
+}
+
+// SnapshotDirty returns profiles updated since the previous dirty snapshot.
+func (c *Cache) SnapshotDirty() []Snapshot {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if len(c.dirty) == 0 {
+		return nil
+	}
+	out := make([]Snapshot, 0, len(c.dirty))
+	for sourceID := range c.dirty {
+		if p, ok := c.m[sourceID]; ok {
+			out = append(out, Snapshot{SourceID: sourceID, Profile: *p})
+		}
+	}
+	c.dirty = make(map[string]struct{}, 1024)
+	return out
+}
+
+// Restore inserts persisted profiles without marking them dirty.
+func (c *Cache) Restore(snapshots []Snapshot) int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	restored := 0
+	for _, snap := range snapshots {
+		if snap.SourceID == "" {
+			continue
+		}
+		if current, ok := c.m[snap.SourceID]; ok {
+			if !current.LastSeen.Before(snap.Profile.LastSeen) {
+				continue
+			}
+		} else if len(c.m) >= c.cfg.MaxSources {
+			break
+		}
+		profile := snap.Profile
+		if profile.FirstSeen.IsZero() {
+			profile.FirstSeen = profile.LastSeen
+		}
+		c.m[snap.SourceID] = &profile
+		restored++
+	}
+	return restored
+}
+
 // Evict removes profiles not seen since cutoff.
 // Call periodically to bound memory (e.g. every 5 minutes).
 func (c *Cache) Evict(cutoff time.Time) int {
@@ -262,6 +324,7 @@ func (c *Cache) Evict(cutoff time.Time) int {
 	for k, p := range c.m {
 		if p.LastSeen.Before(cutoff) {
 			delete(c.m, k)
+			delete(c.dirty, k)
 			n++
 		}
 	}
