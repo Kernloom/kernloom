@@ -137,6 +137,16 @@ func TestParseBaselineStateIncludesTriggerVisibility(t *testing.T) {
 	}
 }
 
+func TestParseBaselineStateDisplaysOptionalZeroAsUnset(t *testing.T) {
+	state := parseBaselineState(`{"ewma":0,"peak":0,"global_trigger":0,"effective_trigger":0,"confidence":0.5}`)
+	if state.BaselineText != "0" {
+		t.Fatalf("baseline zero should stay visible, got %q", state.BaselineText)
+	}
+	if state.PeakText != "-" || state.GlobalTriggerText != "-" || state.EffectiveTriggerText != "-" {
+		t.Fatalf("optional zeros should render unset, peak=%q global=%q effective=%q", state.PeakText, state.GlobalTriggerText, state.EffectiveTriggerText)
+	}
+}
+
 func openBaselineDeleteTestStore(t *testing.T) *sstore.Store {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "state.db")

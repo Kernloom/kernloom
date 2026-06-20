@@ -406,15 +406,15 @@ func parseBaselineState(raw string) baselineStateValues {
 	}
 	if v, ok := state["peak"]; ok {
 		out.Peak = v
-		out.PeakText = formatBaselineNumber(v)
+		out.PeakText = formatOptionalBaselineNumber(v)
 	}
 	if v, ok := state["global_trigger"]; ok {
 		out.GlobalTrigger = v
-		out.GlobalTriggerText = formatBaselineNumber(v)
+		out.GlobalTriggerText = formatOptionalBaselineNumber(v)
 	}
 	if v, ok := state["effective_trigger"]; ok {
 		out.EffectiveTrigger = v
-		out.EffectiveTriggerText = formatBaselineNumber(v)
+		out.EffectiveTriggerText = formatOptionalBaselineNumber(v)
 	}
 	if v, ok := state["confidence"]; ok {
 		out.Confidence = v
@@ -521,6 +521,13 @@ func formatBaselineNumber(v float64) string {
 	default:
 		return fmt.Sprintf("%.2f", v)
 	}
+}
+
+func formatOptionalBaselineNumber(v float64) string {
+	if v <= 0 {
+		return "-"
+	}
+	return formatBaselineNumber(v)
 }
 
 func shortTruth(tc string) string {
