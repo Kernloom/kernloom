@@ -253,18 +253,23 @@ Relevant areas:
 - `iq/internal/runtimepdp`
 - `kernloom-registries/registries/actions/runtime-action-contracts.yaml`
 
-### 9. RuntimePDP active mode needs a lease-derived effective state view
+### 9. RuntimePDP active mode needs a first-class effective state view
 
-Status: initial renewal fix landed; broader coverage remains.
+Status: partly fixed.
 
-The Action Broker already applies, renews, persists and reverts TTL-bounded runtime action leases. However,
-the visible source `STATE` line and some in-memory FSM state still follow the instantaneous signal/FSM
-state. In active RuntimePDP mode this can make the logs show `BLOCK->OBSERVE` immediately after a block
-lease was applied and renewed, because traffic drops below the trigger while the lease is still active.
+Done:
 
-The first fix makes renewed source leases return the active lease state instead of the instantaneous
-signal/FSM state. The remaining debt is to expose this as a general effective enforcement state view and
-apply it consistently across all active lease, relationship and revert paths.
+- Renewed source leases now return the active lease state.
+- Expired lease reverts now run after the candidate/sweep step, so a matching
+  RuntimePDP decision can renew before revert.
+- This reduces `BLOCK -> OBSERVE -> BLOCK` bounce at TTL boundaries.
+
+Remaining debt:
+
+- The visible source `STATE` line and some in-memory FSM state can still follow
+  instantaneous signal/FSM state instead of active lease state.
+- KLIQ needs one clear effective state view:
+  `active lease state > matched RuntimePDP decision state > signal/FSM observe state`.
 
 Observed symptom:
 
@@ -426,7 +431,7 @@ Recommended fix:
    required/missing context.
 3. Define the Forge response-rule IR and deterministic priority rules before compiling natural
    `when ... then ...` escalation policies into RuntimePolicyPacks.
-4. Add the RuntimePDP effective enforcement state view so active leases drive visible source state.
+4. Finish the RuntimePDP effective enforcement state view so active leases drive visible source state everywhere.
 5. Extend non-network adapters to publish rich generic facts and relationships against that registry.
 6. Continue shrinking `iq/cmd/kliq`: graph pipeline setup, adapter startup, and the main tick body are the
    next high-value extraction targets after RuntimePDP/signal handling.

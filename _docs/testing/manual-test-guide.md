@@ -3,9 +3,21 @@
 This guide shows a simple manual test path after the KLIQ move to a generic
 runtime orchestrator.
 
-Goal: first prove that `kliq run` starts without privileged adapters. Then add
-`RuntimePolicyPack`/RuntimePDP, optional netfilter, KLShield, Forge, and
-graph/baseline paths.
+Goal:
+
+- Start `kliq run` without privileged adapters.
+- Load a `RuntimePolicyPack` locally.
+- Test KLShield and netfilter paths in dry-run first.
+- Test Forge standalone packs and managed mode.
+- Inspect source baselines, graph data, leases and receipts.
+
+Current `v0.3.0` focus:
+
+- RuntimePDP can run in `shadow` or `active` mode.
+- Active RuntimePDP emits brokered runtime actions.
+- Runtime actions are TTL leased and auto-reverted.
+- Source baselines persist in SQLite when `iq-learning` or higher is enabled.
+- Baseline output shows global and effective triggers.
 
 **Requirements:**
 - Go >= 1.23
@@ -601,9 +613,16 @@ timeout 20s sudo ./bin/kliq run \
 Expected:
 - `storage status --db=/tmp/kernloom-manual/kliq-graph.db` shows rows in
   `entities`, `relationships`, and `metric_baselines`.
-- `baselines list` shows the learned `BASELINE` value for each metric. This is
-  the EWMA normal value for that metric and scope. `PEAK` is the learned peak,
-  `CONF` is baseline confidence from 0 to 1, and `OBS` is the observation count.
+- `baselines list` shows one row per learned metric and subject.
+- `BASELINE` is the EWMA normal value.
+- `PEAK` is the learned peak. `-` means not set yet.
+- `GTRIG` is the global trigger. `-` means disabled or not set.
+- `ETRIG` is the effective trigger after source-baseline adjustment. `-` means
+  disabled or not set.
+- `CONF` is baseline confidence from `0` to `1`.
+- `OBS` is the observation count.
+- `ETRIG` is never lower than `GTRIG`. Source baselines only raise triggers
+  for learned high-traffic sources; they do not weaken global guardrails.
 - `--scope=relationship` filters baselines bound to a learned relationship, for
   example a network edge such as "source IP connects_to target tuple". Other
   scopes can be entity- or subject-based baselines.
@@ -812,9 +831,10 @@ sudo ./bin/kliq run \
   --policy-file=/tmp/kernloom-manual/forge/out/manual-edge-runtime-pack.yaml \
   --runtime-pdp-mode=active \
   --dry-run=true \
-  --feature-profile=dos-light \
+  --feature-profile=iq-learning \
   --bootstrap=false \
   --autotune=false \
+  --whitelist-learn=true \
   --state-file=/tmp/kernloom-manual/state-forge-klshield.json \
   --db=/tmp/kernloom-manual/kliq-forge-klshield.db \
   --interval=1s
@@ -823,9 +843,8 @@ sudo ./bin/kliq run \
 Expected: RuntimePDP is active, but `--dry-run=true` prevents real PEP writes.
 Use `--dry-run=false` only after a successful dry-run.
 
-To test persisted source baselines, run the KLShield dry-run with
-`--feature-profile=iq-learning`, let it observe traffic for at least one flush
-window or stop it cleanly, then inspect the source scope:
+To test persisted source baselines, let KLIQ observe traffic for at least one
+flush window or stop it cleanly, then inspect the source scope:
 
 ```bash
 ./bin/kliq storage status --db=/tmp/kernloom-manual/kliq-forge-klshield.db
@@ -836,7 +855,9 @@ window or stop it cleanly, then inspect the source scope:
 
 Expected: `metric_baselines` contains source-scoped rows for observed KLShield
 metrics such as `network.packets_per_second`, `network.bytes_per_second`,
-`network.syn_rate`, and `network.scan_rate`.
+`network.syn_rate`, and `network.scan_rate`. `GTRIG` and `ETRIG` show the
+global and effective trigger. `-` means disabled or unset, not "trigger at
+zero".
 
 ### 7.5 Managed Mode With A Signed RuntimeBundle
 

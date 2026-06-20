@@ -11,6 +11,20 @@ Official docs: https://kernloom.com/
 
 ---
 
+## Current Release Line
+
+`v0.3.0` focuses on the local runtime path:
+
+- RuntimePDP supports `shadow` and `active` mode.
+- Active RuntimePDP is the action authority.
+- KLIQ persists source baselines in SQLite.
+- Source baselines can raise effective triggers for known good high-traffic sources.
+- Runtime actions use TTL leases, fencing, receipts and auto-revert.
+- Forge can export standalone `RuntimePolicyPack` files and serve signed `RuntimeBundle` files.
+- Registry snapshots from `kernloom-registries` define the allowed runtime vocabulary.
+
+---
+
 ## Architecture
 
 ```
@@ -108,15 +122,19 @@ sudo ./bin/klshield attach-xdp --iface eth0 \
   --obj shield/bpf/out/xdp_kernloom_shield.bpf.o
 sudo ./bin/kliq run \
   --adapter=klshield \
-  --feature-profile=dos-light \
+  --feature-profile=iq-learning \
   --pdp-config=configs/pdp/ziti-controller-bootstrap.yaml \
   --runtime-pdp-mode=shadow \
   --dry-run=true \
-  --whitelist-learn=true
+  --whitelist-learn=true \
+  --db=/var/lib/kernloom/iq/kliq-state.db
 ./bin/kliq status
+./bin/kliq baselines list --db=/var/lib/kernloom/iq/kliq-state.db --scope=source
 ```
 
-See `configs/pdp/` for all PDPConfig profiles.
+- Use `dos-light` for the smallest source-heuristic runtime.
+- Use `iq-learning` when source baselines should persist across restarts.
+- See `configs/pdp/` for all PDPConfig profiles.
 
 ---
 
@@ -221,7 +239,7 @@ Standalone nodes can also load a contracts-based RuntimePolicyPack directly:
 
 ## Forge compatibility contract
 
-Shared Runtime PDP wire schemas are imported from `github.com/kernloom/kernloom-contracts` (v0.1.0). During the migration, managed bundle ingestion still uses the local `pkg/core/bundle` model.
+Shared Runtime PDP wire schemas are imported from `github.com/kernloom/kernloom-contracts` (v0.2.0). During the migration, some managed bundle paths still use local core models.
 
 ```
 RuntimeBundle          kernloom.io/runtime/v1alpha1
@@ -255,7 +273,24 @@ Baselines can be inspected and reset from the CLI:
 ./bin/kliq baselines delete --db=/tmp/kernloom-manual/kliq-state.db --scope=relationship --source-class=xdp --metric=network.xdp.edge
 ```
 
-Baseline tables support `--sort=metric|subject|source|scope|truth|window|state|baseline|peak|confidence|obs|updated`; prefix the key with `-` for descending order.
+Baseline columns:
+
+| Column | Meaning |
+|---|---|
+| `BASELINE` | EWMA normal value |
+| `PEAK` | learned peak; `-` means unset |
+| `GTRIG` | global trigger; `-` means disabled or unset |
+| `ETRIG` | effective trigger after source-baseline adjustment; `-` means disabled or unset |
+| `CONF` | confidence from `0` to `1` |
+| `OBS` | observation count |
+
+Notes:
+
+- `-` in a trigger column does not mean "trigger at zero".
+- KLIQ only uses detector thresholds when they are greater than zero.
+- `ETRIG` is never lower than `GTRIG`.
+
+Baseline tables support `--sort=metric|subject|source|scope|truth|window|state|baseline|peak|global-trigger|effective-trigger|confidence|obs|updated`; prefix the key with `-` for descending order.
 
 Unfiltered baseline deletion is rejected unless `--all` is set explicitly.
 
@@ -398,6 +433,7 @@ See `TECHNICAL_DEBT.md` for the full prioritised list. Key items:
 | Shared `kernloom-contracts` module is not yet fully adopted by managed bundle ingestion | P1 |
 | Runtime fact/context registry for adapter-published metrics, graph predicates, and missing inputs is still needed | P1 |
 | `iq/cmd/kliq` still owns too much runtime orchestration and should keep shrinking into internal services | P1 |
+| Active lease state is partly stabilized, but still needs a first-class effective state view | P1 |
 | Historical names such as `LocalPolicyPack` and `PDPConfig` remain visible during the migration | P2 |
 
 ---
