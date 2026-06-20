@@ -12,7 +12,7 @@
 // Data flow:
 //
 //	kliq main loop → Update(src, pps, bps, syn, scan)
-//	               → EffectiveTrigPPS(src, globalTrig) → engine.EvaluateAt(...)
+//	               → EffectiveTrig*(src, globalTrig) → engine.EvaluateAt(...)
 //
 // Storage: in-memory with snapshot/restore hooks for batched external
 // persistence. The cache is bounded by MaxSources and entries expire after TTL.
@@ -33,8 +33,10 @@ type Profile struct {
 	EWMAScan float64
 
 	// Running peak (highest observed value after baseline is promoted).
-	PeakPPS float64
-	PeakBPS float64
+	PeakPPS  float64
+	PeakBPS  float64
+	PeakSyn  float64
+	PeakScan float64
 
 	// Observation counters.
 	ObsCount   uint64
@@ -188,6 +190,12 @@ func (c *Cache) Update(srcIP string, pps, bps, syn, scan float64, isSuspicious b
 		if bps > p.PeakBPS {
 			p.PeakBPS = bps
 		}
+		if syn > p.PeakSyn {
+			p.PeakSyn = syn
+		}
+		if scan > p.PeakScan {
+			p.PeakScan = scan
+		}
 	}
 
 	p.ObsCount++
@@ -200,6 +208,8 @@ func (c *Cache) Update(srcIP string, pps, bps, syn, scan float64, isSuspicious b
 		// Seed peak from current EWMA at promotion time.
 		p.PeakPPS = p.EWMAPPS * 1.5
 		p.PeakBPS = p.EWMABPS * 1.5
+		p.PeakSyn = p.EWMASyn * 1.5
+		p.PeakScan = p.EWMAScan * 1.5
 	}
 
 	p.recomputeConfidence(c.cfg.MinConfObs)
@@ -221,18 +231,10 @@ func (c *Cache) Get(srcIP string) (Profile, bool) {
 // is raised so legitimate high-traffic sources are not false-positived.
 // Falls back to globalTrig when the source is unknown or not yet confident.
 func (c *Cache) EffectiveTrigPPS(srcIP string, globalTrig float64) float64 {
-	c.mu.RLock()
-	p, ok := c.m[srcIP]
-	if !ok || !p.Promoted || p.Confidence < c.cfg.MinConfidence {
-		c.mu.RUnlock()
-		return globalTrig
+	if globalTrig <= 0 {
+		return 0
 	}
-	effective := p.PeakPPS * c.cfg.PeakMultiplier
-	c.mu.RUnlock()
-	if effective > globalTrig {
-		return effective
-	}
-	return globalTrig
+	return c.effectiveTrigger(srcIP, globalTrig, func(p *Profile) float64 { return p.PeakPPS })
 }
 
 // EffectiveTrigBPS returns the effective BPS trigger for srcIP.
@@ -240,13 +242,33 @@ func (c *Cache) EffectiveTrigBPS(srcIP string, globalTrig float64) float64 {
 	if globalTrig <= 0 {
 		return 0
 	}
+	return c.effectiveTrigger(srcIP, globalTrig, func(p *Profile) float64 { return p.PeakBPS })
+}
+
+// EffectiveTrigSyn returns the effective SYN/s trigger for srcIP.
+func (c *Cache) EffectiveTrigSyn(srcIP string, globalTrig float64) float64 {
+	if globalTrig <= 0 {
+		return 0
+	}
+	return c.effectiveTrigger(srcIP, globalTrig, func(p *Profile) float64 { return p.PeakSyn })
+}
+
+// EffectiveTrigScan returns the effective scan-rate trigger for srcIP.
+func (c *Cache) EffectiveTrigScan(srcIP string, globalTrig float64) float64 {
+	if globalTrig <= 0 {
+		return 0
+	}
+	return c.effectiveTrigger(srcIP, globalTrig, func(p *Profile) float64 { return p.PeakScan })
+}
+
+func (c *Cache) effectiveTrigger(srcIP string, globalTrig float64, value func(*Profile) float64) float64 {
 	c.mu.RLock()
 	p, ok := c.m[srcIP]
 	if !ok || !p.Promoted || p.Confidence < c.cfg.MinConfidence {
 		c.mu.RUnlock()
 		return globalTrig
 	}
-	effective := p.PeakBPS * c.cfg.PeakMultiplier
+	effective := value(p) * c.cfg.PeakMultiplier
 	c.mu.RUnlock()
 	if effective > globalTrig {
 		return effective

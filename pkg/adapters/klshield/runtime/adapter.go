@@ -39,6 +39,8 @@ type SourceBaseline interface {
 	Update(sourceID string, pps, bps, synRate, scanRate float64, anomalous bool, now time.Time)
 	EffectiveTrigPPS(sourceID string, global float64) float64
 	EffectiveTrigBPS(sourceID string, global float64) float64
+	EffectiveTrigSyn(sourceID string, global float64) float64
+	EffectiveTrigScan(sourceID string, global float64) float64
 }
 
 type Config struct {
@@ -339,6 +341,8 @@ func (a *Adapter) observationFor(ctx context.Context, now time.Time, subject obs
 		a.cfg.Baseline.Update(subject.ID, sample.PPS, sample.BPS, sample.SynRate, sample.ScanRate, false, now)
 		cfg.TrigPPS = a.cfg.Baseline.EffectiveTrigPPS(subject.ID, cfg.TrigPPS)
 		cfg.TrigBPS = a.cfg.Baseline.EffectiveTrigBPS(subject.ID, cfg.TrigBPS)
+		cfg.TrigSyn = a.cfg.Baseline.EffectiveTrigSyn(subject.ID, cfg.TrigSyn)
+		cfg.TrigScan = a.cfg.Baseline.EffectiveTrigScan(subject.ID, cfg.TrigScan)
 	}
 
 	fsmMetrics, sigs := a.engine.EvaluateAt(subject,

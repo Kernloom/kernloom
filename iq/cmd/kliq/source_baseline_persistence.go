@@ -125,8 +125,8 @@ func sourceBaselineRows(snapshot sourcebaseline.Snapshot, windowSeconds int) []s
 	}{
 		{id: adapterruntime.MetricNetworkPacketsPerSecond, ewma: p.EWMAPPS, peak: p.PeakPPS},
 		{id: adapterruntime.MetricNetworkBytesPerSecond, ewma: p.EWMABPS, peak: p.PeakBPS},
-		{id: adapterruntime.MetricNetworkSynRate, ewma: p.EWMASyn},
-		{id: sourceBaselineScanRate, ewma: p.EWMAScan},
+		{id: adapterruntime.MetricNetworkSynRate, ewma: p.EWMASyn, peak: p.PeakSyn},
+		{id: sourceBaselineScanRate, ewma: p.EWMAScan, peak: p.PeakScan},
 	}
 
 	rows := make([]sstore.BaselineRow, 0, len(metrics))
@@ -180,8 +180,10 @@ func sourceBaselineSnapshotsFromRows(rows []sstore.BaselineRow, windowSeconds in
 			p.PeakBPS = peak
 		case adapterruntime.MetricNetworkSynRate:
 			p.EWMASyn = ewma
+			p.PeakSyn = peak
 		case sourceBaselineScanRate:
 			p.EWMAScan = ewma
+			p.PeakScan = peak
 		default:
 			continue
 		}
@@ -212,6 +214,14 @@ func sourceBaselineSnapshotsFromRows(rows []sstore.BaselineRow, windowSeconds in
 		}
 		if profile.Windows == 0 {
 			profile.Windows = profile.ObsCount
+		}
+		if profile.Promoted {
+			if profile.PeakSyn == 0 && profile.EWMASyn > 0 {
+				profile.PeakSyn = profile.EWMASyn * 1.5
+			}
+			if profile.PeakScan == 0 && profile.EWMAScan > 0 {
+				profile.PeakScan = profile.EWMAScan * 1.5
+			}
 		}
 		out = append(out, sourcebaseline.Snapshot{
 			SourceID: sourceID,

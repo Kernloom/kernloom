@@ -115,6 +115,18 @@ func TestSortBaselineListRows(t *testing.T) {
 	}
 }
 
+func TestBaselineSubjectDisplayUsesSubjectEntityWithoutEntityJoin(t *testing.T) {
+	if got := baselineSubjectDisplay("", "172.21.112.1", "klshield-source"); got != "172.21.112.1" {
+		t.Fatalf("subject display = %q, want source IP", got)
+	}
+	if got := baselineSubjectDisplay("source-name", "172.21.112.1", "klshield-source"); got != "source-name" {
+		t.Fatalf("entity display should win, got %q", got)
+	}
+	if got := baselineSubjectDisplay("", "", "klshield-source"); got != "…hield-source" {
+		t.Fatalf("scope fallback = %q", got)
+	}
+}
+
 func openBaselineDeleteTestStore(t *testing.T) *sstore.Store {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "state.db")

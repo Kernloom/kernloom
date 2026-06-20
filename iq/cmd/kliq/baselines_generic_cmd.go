@@ -268,7 +268,7 @@ func runBaselinesGenericList(dbPath, metricFilter, scopeFilter, sourceClassFilte
 
 	// Join with entities to resolve subject_entity_id → human-readable IP.
 	rows, err := s.DB().QueryContext(context.Background(), `
-		SELECT b.metric_id, b.scope_type, b.scope_id, b.source_class, b.visibility_point,
+		SELECT b.metric_id, b.scope_type, b.scope_id, b.subject_entity_id, b.source_class, b.visibility_point,
 		       b.truth_class, b.window_seconds, b.state, b.ewma_state, b.observations, b.last_updated_at,
 		       COALESCE(e.id, '') as entity_display
 		FROM metric_baselines b
@@ -290,9 +290,9 @@ func runBaselinesGenericList(dbPath, metricFilter, scopeFilter, sourceClassFilte
 
 	count := 0
 	for rows.Next() {
-		var metricID, scopeType, scopeID, sourceClass, visPoint, truthClass, state, ewmaState, lastUpdated, entityDisplay string
+		var metricID, scopeType, scopeID, subjectEntityID, sourceClass, visPoint, truthClass, state, ewmaState, lastUpdated, entityDisplay string
 		var windowSec, obs int64
-		if err := rows.Scan(&metricID, &scopeType, &scopeID, &sourceClass, &visPoint,
+		if err := rows.Scan(&metricID, &scopeType, &scopeID, &subjectEntityID, &sourceClass, &visPoint,
 			&truthClass, &windowSec, &state, &ewmaState, &obs, &lastUpdated, &entityDisplay); err != nil {
 			continue
 		}
@@ -309,10 +309,7 @@ func runBaselinesGenericList(dbPath, metricFilter, scopeFilter, sourceClassFilte
 		if scopeID != "" {
 			scope = scopeType + ":" + shortID(scopeID)
 		}
-		subject := entityDisplay
-		if subject == "" || subject == scopeID {
-			subject = shortID(scopeID)
-		}
+		subject := baselineSubjectDisplay(entityDisplay, subjectEntityID, scopeID)
 		baselineState := parseBaselineState(ewmaState)
 		t, _ := time.Parse(time.RFC3339Nano, lastUpdated)
 		outRows = append(outRows, baselineListRow{
@@ -352,6 +349,19 @@ func runBaselinesGenericList(dbPath, metricFilter, scopeFilter, sourceClassFilte
 		return
 	}
 	fmt.Printf("\nTotal: %d baseline(s)\n", count)
+}
+
+func baselineSubjectDisplay(entityDisplay, subjectEntityID, scopeID string) string {
+	switch {
+	case entityDisplay != "" && entityDisplay != scopeID:
+		return entityDisplay
+	case subjectEntityID != "":
+		return subjectEntityID
+	case scopeID != "":
+		return shortID(scopeID)
+	default:
+		return ""
+	}
 }
 
 type baselineStateValues struct {

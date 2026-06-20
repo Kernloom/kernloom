@@ -53,7 +53,8 @@ func TestRuntimeSourceBaselinePersistenceRoundTrip(t *testing.T) {
 	if !ok {
 		t.Fatal("restored source profile missing")
 	}
-	if !profile.Promoted || profile.EWMAPPS == 0 || profile.EWMABPS == 0 || profile.EWMASyn == 0 || profile.EWMAScan == 0 {
+	if !profile.Promoted || profile.EWMAPPS == 0 || profile.EWMABPS == 0 || profile.EWMASyn == 0 || profile.EWMAScan == 0 ||
+		profile.PeakPPS == 0 || profile.PeakBPS == 0 || profile.PeakSyn == 0 || profile.PeakScan == 0 {
 		t.Fatalf("restored profile incomplete: %#v", profile)
 	}
 
