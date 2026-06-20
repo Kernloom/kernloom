@@ -1220,10 +1220,6 @@ func main() {
 		case <-ticker.C:
 		}
 		nowWall := time.Now()
-		if lastBrokerRevert.IsZero() || nowWall.Sub(lastBrokerRevert) >= c.Interval {
-			lastBrokerRevert = nowWall
-			executor.RevertExpired(context.Background(), nowWall)
-		}
 
 		// Process pending bundle update (non-blocking; delivered by heartbeat goroutine).
 		select {
@@ -1361,6 +1357,10 @@ func main() {
 		// had no qualifying observation this tick. RuntimePDP decides whether the
 		// resulting downscale/observe intent becomes an action.
 		sources.sweepInactive(processed, nowWall, c, resolver, executor, pepParams, shadowRunner, nodeID, runtimeFacts)
+		if lastBrokerRevert.IsZero() || nowWall.Sub(lastBrokerRevert) >= c.Interval {
+			lastBrokerRevert = nowWall
+			executor.RevertExpired(context.Background(), nowWall)
+		}
 
 		tickN++
 		if tickN%30 == 1 {

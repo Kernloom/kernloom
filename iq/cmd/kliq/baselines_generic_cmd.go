@@ -20,7 +20,7 @@ const baselinesGenericUsage = `usage: kliq baselines <subcommand> [args]
 
 Subcommands:
   list [--db <path>] [--node <id>] [--metric <id>] [--scope <type>] [--source-class <class>]
-       [--sort=metric|subject|source|scope|truth|window|state|baseline|peak|confidence|obs|updated]
+       [--sort=metric|subject|source|scope|truth|window|state|baseline|peak|global-trigger|effective-trigger|confidence|obs|updated]
            List generic metric baselines from the state store.
   reset|delete [--db <path>] [--id <baseline-id>] [--metric <id-fragment>]
                [--scope <type>] [--scope-id <id>] [--source-class <class>]
@@ -241,21 +241,25 @@ func baselineDeleteWhere(filters baselineDeleteFilters) (string, []any) {
 }
 
 type baselineListRow struct {
-	MetricID        string
-	Subject         string
-	SourceClass     string
-	Scope           string
-	Truth           string
-	WindowSeconds   int64
-	State           string
-	Baseline        float64
-	BaselineDisplay string
-	Peak            float64
-	PeakDisplay     string
-	Confidence      float64
-	ConfidenceText  string
-	Observations    int64
-	LastUpdated     time.Time
+	MetricID             string
+	Subject              string
+	SourceClass          string
+	Scope                string
+	Truth                string
+	WindowSeconds        int64
+	State                string
+	Baseline             float64
+	BaselineDisplay      string
+	Peak                 float64
+	PeakDisplay          string
+	GlobalTrigger        float64
+	GlobalTriggerText    string
+	EffectiveTrigger     float64
+	EffectiveTriggerText string
+	Confidence           float64
+	ConfidenceText       string
+	Observations         int64
+	LastUpdated          time.Time
 }
 
 func runBaselinesGenericList(dbPath, metricFilter, scopeFilter, sourceClassFilter, sortSpec string) {
@@ -313,34 +317,38 @@ func runBaselinesGenericList(dbPath, metricFilter, scopeFilter, sourceClassFilte
 		baselineState := parseBaselineState(ewmaState)
 		t, _ := time.Parse(time.RFC3339Nano, lastUpdated)
 		outRows = append(outRows, baselineListRow{
-			MetricID:        metricID,
-			Subject:         subject,
-			SourceClass:     sourceClass,
-			Scope:           scope,
-			Truth:           shortTruth(truthClass),
-			WindowSeconds:   windowSec,
-			State:           state,
-			Baseline:        baselineState.Baseline,
-			BaselineDisplay: baselineState.BaselineText,
-			Peak:            baselineState.Peak,
-			PeakDisplay:     baselineState.PeakText,
-			Confidence:      baselineState.Confidence,
-			ConfidenceText:  baselineState.ConfidenceText,
-			Observations:    obs,
-			LastUpdated:     t,
+			MetricID:             metricID,
+			Subject:              subject,
+			SourceClass:          sourceClass,
+			Scope:                scope,
+			Truth:                shortTruth(truthClass),
+			WindowSeconds:        windowSec,
+			State:                state,
+			Baseline:             baselineState.Baseline,
+			BaselineDisplay:      baselineState.BaselineText,
+			Peak:                 baselineState.Peak,
+			PeakDisplay:          baselineState.PeakText,
+			GlobalTrigger:        baselineState.GlobalTrigger,
+			GlobalTriggerText:    baselineState.GlobalTriggerText,
+			EffectiveTrigger:     baselineState.EffectiveTrigger,
+			EffectiveTriggerText: baselineState.EffectiveTriggerText,
+			Confidence:           baselineState.Confidence,
+			ConfidenceText:       baselineState.ConfidenceText,
+			Observations:         obs,
+			LastUpdated:          t,
 		})
 		count++
 	}
 	sortBaselineListRows(outRows, sortKey, sortDesc)
 
 	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
-	fmt.Fprintln(w, "METRIC\tSUBJECT\tSOURCE\tSCOPE\tTRUTH\tWIN\tSTATE\tBASELINE\tPEAK\tCONF\tOBS\tLAST UPDATED")
+	fmt.Fprintln(w, "METRIC\tSUBJECT\tSOURCE\tSCOPE\tTRUTH\tWIN\tSTATE\tBASELINE\tPEAK\tGTRIG\tETRIG\tCONF\tOBS\tLAST UPDATED")
 
 	for _, row := range outRows {
-		fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%ds\t%s\t%s\t%s\t%s\t%d\t%s\n",
+		fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%ds\t%s\t%s\t%s\t%s\t%s\t%s\t%d\t%s\n",
 			row.MetricID, row.Subject, row.SourceClass, row.Scope, row.Truth,
 			row.WindowSeconds, row.State, row.BaselineDisplay, row.PeakDisplay,
-			row.ConfidenceText, row.Observations, row.LastUpdated.UTC().Format("2006-01-02T15:04"))
+			row.GlobalTriggerText, row.EffectiveTriggerText, row.ConfidenceText, row.Observations, row.LastUpdated.UTC().Format("2006-01-02T15:04"))
 	}
 	w.Flush()
 
@@ -365,19 +373,25 @@ func baselineSubjectDisplay(entityDisplay, subjectEntityID, scopeID string) stri
 }
 
 type baselineStateValues struct {
-	Baseline       float64
-	BaselineText   string
-	Peak           float64
-	PeakText       string
-	Confidence     float64
-	ConfidenceText string
+	Baseline             float64
+	BaselineText         string
+	Peak                 float64
+	PeakText             string
+	GlobalTrigger        float64
+	GlobalTriggerText    string
+	EffectiveTrigger     float64
+	EffectiveTriggerText string
+	Confidence           float64
+	ConfidenceText       string
 }
 
 func parseBaselineState(raw string) baselineStateValues {
 	out := baselineStateValues{
-		BaselineText:   "-",
-		PeakText:       "-",
-		ConfidenceText: "-",
+		BaselineText:         "-",
+		PeakText:             "-",
+		GlobalTriggerText:    "-",
+		EffectiveTriggerText: "-",
+		ConfidenceText:       "-",
 	}
 	if strings.TrimSpace(raw) == "" {
 		return out
@@ -393,6 +407,14 @@ func parseBaselineState(raw string) baselineStateValues {
 	if v, ok := state["peak"]; ok {
 		out.Peak = v
 		out.PeakText = formatBaselineNumber(v)
+	}
+	if v, ok := state["global_trigger"]; ok {
+		out.GlobalTrigger = v
+		out.GlobalTriggerText = formatBaselineNumber(v)
+	}
+	if v, ok := state["effective_trigger"]; ok {
+		out.EffectiveTrigger = v
+		out.EffectiveTriggerText = formatBaselineNumber(v)
 	}
 	if v, ok := state["confidence"]; ok {
 		out.Confidence = v
@@ -427,7 +449,7 @@ func parseBaselineSortSpec(spec string) (key string, desc bool, err error) {
 	}
 	key = strings.ToLower(strings.ReplaceAll(key, "-", "_"))
 	switch key {
-	case "metric", "subject", "source", "scope", "truth", "window", "win", "state", "baseline", "peak", "confidence", "conf", "observations", "obs", "updated", "last_updated", "last":
+	case "metric", "subject", "source", "scope", "truth", "window", "win", "state", "baseline", "peak", "global_trigger", "gtrig", "effective_trigger", "etrig", "confidence", "conf", "observations", "obs", "updated", "last_updated", "last":
 		return key, desc, nil
 	default:
 		return "", false, fmt.Errorf("unsupported baseline sort %q", spec)
@@ -473,6 +495,10 @@ func compareBaselineRows(a, b baselineListRow, key string) int {
 		return compareFloat64(a.Baseline, b.Baseline)
 	case "peak":
 		return compareFloat64(a.Peak, b.Peak)
+	case "global_trigger", "gtrig":
+		return compareFloat64(a.GlobalTrigger, b.GlobalTrigger)
+	case "effective_trigger", "etrig":
+		return compareFloat64(a.EffectiveTrigger, b.EffectiveTrigger)
 	case "confidence", "conf":
 		return compareFloat64(a.Confidence, b.Confidence)
 	case "observations", "obs":

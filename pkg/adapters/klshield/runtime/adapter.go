@@ -26,13 +26,19 @@ import (
 const (
 	AdapterID = "klshield-runtime"
 
-	AttributeIPVersion = "ip_version"
-	AttributePPS       = "klshield.pps"
-	AttributeBPS       = "klshield.bps"
-	AttributeSynRate   = "klshield.syn_rate"
-	AttributeScanRate  = "klshield.scan_rate"
-	AttributeDropRL    = "klshield.drop_rl_rate"
-	AttributeSeverity  = "klshield.severity"
+	AttributeIPVersion            = "ip_version"
+	AttributePPS                  = "klshield.pps"
+	AttributeBPS                  = "klshield.bps"
+	AttributeSynRate              = "klshield.syn_rate"
+	AttributeScanRate             = "klshield.scan_rate"
+	AttributeDropRL               = "klshield.drop_rl_rate"
+	AttributeSeverity             = "klshield.severity"
+	AttributeTrigPPS              = "klshield.trig_pps"
+	AttributeTrigBPS              = "klshield.trig_bps"
+	AttributeTrigSyn              = "klshield.trig_syn"
+	AttributeTrigScan             = "klshield.trig_scan"
+	AttributeBaselineLearnSkipped = "klshield.source_baseline.learn_skipped"
+	AttributeBaselineSkipReason   = "klshield.source_baseline.skip_reason"
 )
 
 type SourceBaseline interface {
@@ -338,7 +344,6 @@ func (a *Adapter) observe6(ctx context.Context, tick adapterruntime.RuntimeTick)
 func (a *Adapter) observationFor(ctx context.Context, now time.Time, subject observation.EntityRef, ipVersion string, sample rateSample) adapterruntime.SourceObservation {
 	cfg := a.engine.Config()
 	if a.cfg.Baseline != nil {
-		a.cfg.Baseline.Update(subject.ID, sample.PPS, sample.BPS, sample.SynRate, sample.ScanRate, false, now)
 		cfg.TrigPPS = a.cfg.Baseline.EffectiveTrigPPS(subject.ID, cfg.TrigPPS)
 		cfg.TrigBPS = a.cfg.Baseline.EffectiveTrigBPS(subject.ID, cfg.TrigBPS)
 		cfg.TrigSyn = a.cfg.Baseline.EffectiveTrigSyn(subject.ID, cfg.TrigSyn)
@@ -355,6 +360,11 @@ func (a *Adapter) observationFor(ctx context.Context, now time.Time, subject obs
 	}
 
 	severity := fsmMetrics.Severity
+	baselineSkipReason := ""
+	if a.cfg.Baseline != nil {
+		baselineSkipReason = sourceBaselineSkipReason(severity, len(sigs), sample.DropRLRate)
+		a.cfg.Baseline.Update(subject.ID, sample.PPS, sample.BPS, sample.SynRate, sample.ScanRate, baselineSkipReason != "", now)
+	}
 	if sample.PPS < a.cfg.MinPPS && !(a.cfg.MinSeverity > 0 && severity >= a.cfg.MinSeverity) && sample.DropRLRate == 0 {
 		return adapterruntime.SourceObservation{}
 	}
@@ -368,15 +378,34 @@ func (a *Adapter) observationFor(ctx context.Context, now time.Time, subject obs
 		Confidence: 1,
 		Metrics:    sampleMetrics(sample),
 		Attributes: map[string]string{
-			AttributeIPVersion: ipVersion,
-			AttributePPS:       formatFloat(sample.PPS),
-			AttributeBPS:       formatFloat(sample.BPS),
-			AttributeSynRate:   formatFloat(sample.SynRate),
-			AttributeScanRate:  formatFloat(sample.ScanRate),
-			AttributeDropRL:    formatFloat(sample.DropRLRate),
-			AttributeSeverity:  formatFloat(severity),
+			AttributeIPVersion:            ipVersion,
+			AttributePPS:                  formatFloat(sample.PPS),
+			AttributeBPS:                  formatFloat(sample.BPS),
+			AttributeSynRate:              formatFloat(sample.SynRate),
+			AttributeScanRate:             formatFloat(sample.ScanRate),
+			AttributeDropRL:               formatFloat(sample.DropRLRate),
+			AttributeSeverity:             formatFloat(severity),
+			AttributeTrigPPS:              formatFloat(cfg.TrigPPS),
+			AttributeTrigBPS:              formatFloat(cfg.TrigBPS),
+			AttributeTrigSyn:              formatFloat(cfg.TrigSyn),
+			AttributeTrigScan:             formatFloat(cfg.TrigScan),
+			AttributeBaselineLearnSkipped: fmt.Sprintf("%t", baselineSkipReason != ""),
+			AttributeBaselineSkipReason:   baselineSkipReason,
 		},
 		Signals: sigs,
+	}
+}
+
+func sourceBaselineSkipReason(severity float64, signalCount int, dropRLRate float64) string {
+	switch {
+	case dropRLRate > 0:
+		return "enforcement_feedback"
+	case signalCount > 0:
+		return "signal_emitted"
+	case severity >= 1.0:
+		return "severity_high"
+	default:
+		return ""
 	}
 }
 

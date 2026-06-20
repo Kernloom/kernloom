@@ -119,14 +119,16 @@ func sourceBaselineRows(snapshot sourcebaseline.Snapshot, windowSeconds int) []s
 		WindowSeconds:   windowSeconds,
 	}
 	metrics := []struct {
-		id   string
-		ewma float64
-		peak float64
+		id        string
+		ewma      float64
+		peak      float64
+		global    float64
+		effective float64
 	}{
-		{id: adapterruntime.MetricNetworkPacketsPerSecond, ewma: p.EWMAPPS, peak: p.PeakPPS},
-		{id: adapterruntime.MetricNetworkBytesPerSecond, ewma: p.EWMABPS, peak: p.PeakBPS},
-		{id: adapterruntime.MetricNetworkSynRate, ewma: p.EWMASyn, peak: p.PeakSyn},
-		{id: sourceBaselineScanRate, ewma: p.EWMAScan, peak: p.PeakScan},
+		{id: adapterruntime.MetricNetworkPacketsPerSecond, ewma: p.EWMAPPS, peak: p.PeakPPS, global: p.GlobalPPS, effective: p.EffectivePPS},
+		{id: adapterruntime.MetricNetworkBytesPerSecond, ewma: p.EWMABPS, peak: p.PeakBPS, global: p.GlobalBPS, effective: p.EffectiveBPS},
+		{id: adapterruntime.MetricNetworkSynRate, ewma: p.EWMASyn, peak: p.PeakSyn, global: p.GlobalSyn, effective: p.EffectiveSyn},
+		{id: sourceBaselineScanRate, ewma: p.EWMAScan, peak: p.PeakScan, global: p.GlobalScan, effective: p.EffectiveScan},
 	}
 
 	rows := make([]sstore.BaselineRow, 0, len(metrics))
@@ -137,11 +139,13 @@ func sourceBaselineRows(snapshot sourcebaseline.Snapshot, windowSeconds int) []s
 			Key:   key,
 			State: state,
 			EWMAState: map[string]any{
-				"ewma":       metric.ewma,
-				"baseline":   metric.ewma,
-				"peak":       metric.peak,
-				"confidence": p.Confidence,
-				"windows":    p.Windows,
+				"ewma":              metric.ewma,
+				"baseline":          metric.ewma,
+				"peak":              metric.peak,
+				"global_trigger":    metric.global,
+				"effective_trigger": metric.effective,
+				"confidence":        p.Confidence,
+				"windows":           p.Windows,
 			},
 			Observations: int64(p.ObsCount),
 			LastUpdated:  p.LastSeen,
@@ -171,19 +175,29 @@ func sourceBaselineSnapshotsFromRows(rows []sstore.BaselineRow, windowSeconds in
 		}
 		ewma := numericBaselineState(row.EWMAState, "ewma", "baseline", "median")
 		peak := numericBaselineState(row.EWMAState, "peak")
+		globalTrigger := numericBaselineState(row.EWMAState, "global_trigger")
+		effectiveTrigger := numericBaselineState(row.EWMAState, "effective_trigger")
 		switch row.Key.MetricID {
 		case adapterruntime.MetricNetworkPacketsPerSecond:
 			p.EWMAPPS = ewma
 			p.PeakPPS = peak
+			p.GlobalPPS = globalTrigger
+			p.EffectivePPS = effectiveTrigger
 		case adapterruntime.MetricNetworkBytesPerSecond:
 			p.EWMABPS = ewma
 			p.PeakBPS = peak
+			p.GlobalBPS = globalTrigger
+			p.EffectiveBPS = effectiveTrigger
 		case adapterruntime.MetricNetworkSynRate:
 			p.EWMASyn = ewma
 			p.PeakSyn = peak
+			p.GlobalSyn = globalTrigger
+			p.EffectiveSyn = effectiveTrigger
 		case sourceBaselineScanRate:
 			p.EWMAScan = ewma
 			p.PeakScan = peak
+			p.GlobalScan = globalTrigger
+			p.EffectiveScan = effectiveTrigger
 		default:
 			continue
 		}

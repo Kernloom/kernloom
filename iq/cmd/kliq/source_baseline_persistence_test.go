@@ -25,6 +25,10 @@ func TestRuntimeSourceBaselinePersistenceRoundTrip(t *testing.T) {
 	cache := sourcebaseline.New(sourcebaseline.Config{MinObs: 2, MinUpdatePPS: 1})
 	cache.Update("10.0.0.1", 100, 1000, 10, 1, false, now)
 	cache.Update("10.0.0.1", 120, 1200, 12, 2, false, now.Add(2*time.Second))
+	_ = cache.EffectiveTrigPPS("10.0.0.1", 50)
+	_ = cache.EffectiveTrigBPS("10.0.0.1", 500)
+	_ = cache.EffectiveTrigSyn("10.0.0.1", 5)
+	_ = cache.EffectiveTrigScan("10.0.0.1", 1)
 
 	flushed, err := flushRuntimeSourceBaselines(ctx, cache, store, 2*time.Second, false)
 	if err != nil {
@@ -56,6 +60,9 @@ func TestRuntimeSourceBaselinePersistenceRoundTrip(t *testing.T) {
 	if !profile.Promoted || profile.EWMAPPS == 0 || profile.EWMABPS == 0 || profile.EWMASyn == 0 || profile.EWMAScan == 0 ||
 		profile.PeakPPS == 0 || profile.PeakBPS == 0 || profile.PeakSyn == 0 || profile.PeakScan == 0 {
 		t.Fatalf("restored profile incomplete: %#v", profile)
+	}
+	if profile.GlobalPPS != 50 || profile.EffectivePPS == 0 || profile.GlobalSyn != 5 || profile.EffectiveSyn == 0 {
+		t.Fatalf("restored trigger fields incomplete: %#v", profile)
 	}
 
 	foundPPS := false

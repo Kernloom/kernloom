@@ -38,6 +38,16 @@ type Profile struct {
 	PeakSyn  float64
 	PeakScan float64
 
+	// Last trigger values seen by the runtime adapter for this source.
+	GlobalPPS     float64
+	EffectivePPS  float64
+	GlobalBPS     float64
+	EffectiveBPS  float64
+	GlobalSyn     float64
+	EffectiveSyn  float64
+	GlobalScan    float64
+	EffectiveScan float64
+
 	// Observation counters.
 	ObsCount   uint64
 	Windows    uint64 // ticks where pps >= MinUpdatePPS
@@ -232,48 +242,95 @@ func (c *Cache) Get(srcIP string) (Profile, bool) {
 // Falls back to globalTrig when the source is unknown or not yet confident.
 func (c *Cache) EffectiveTrigPPS(srcIP string, globalTrig float64) float64 {
 	if globalTrig <= 0 {
+		c.recordDisabledTrigger(srcIP, func(p *Profile, global, effective float64) { p.GlobalPPS, p.EffectivePPS = global, effective })
 		return 0
 	}
-	return c.effectiveTrigger(srcIP, globalTrig, func(p *Profile) float64 { return p.PeakPPS })
+	return c.effectiveTrigger(srcIP, globalTrig,
+		func(p *Profile) float64 { return p.PeakPPS },
+		func(p *Profile, global, effective float64) { p.GlobalPPS, p.EffectivePPS = global, effective },
+	)
 }
 
 // EffectiveTrigBPS returns the effective BPS trigger for srcIP.
 func (c *Cache) EffectiveTrigBPS(srcIP string, globalTrig float64) float64 {
 	if globalTrig <= 0 {
+		c.recordDisabledTrigger(srcIP, func(p *Profile, global, effective float64) { p.GlobalBPS, p.EffectiveBPS = global, effective })
 		return 0
 	}
-	return c.effectiveTrigger(srcIP, globalTrig, func(p *Profile) float64 { return p.PeakBPS })
+	return c.effectiveTrigger(srcIP, globalTrig,
+		func(p *Profile) float64 { return p.PeakBPS },
+		func(p *Profile, global, effective float64) { p.GlobalBPS, p.EffectiveBPS = global, effective },
+	)
 }
 
 // EffectiveTrigSyn returns the effective SYN/s trigger for srcIP.
 func (c *Cache) EffectiveTrigSyn(srcIP string, globalTrig float64) float64 {
 	if globalTrig <= 0 {
+		c.recordDisabledTrigger(srcIP, func(p *Profile, global, effective float64) { p.GlobalSyn, p.EffectiveSyn = global, effective })
 		return 0
 	}
-	return c.effectiveTrigger(srcIP, globalTrig, func(p *Profile) float64 { return p.PeakSyn })
+	return c.effectiveTrigger(srcIP, globalTrig,
+		func(p *Profile) float64 { return p.PeakSyn },
+		func(p *Profile, global, effective float64) { p.GlobalSyn, p.EffectiveSyn = global, effective },
+	)
 }
 
 // EffectiveTrigScan returns the effective scan-rate trigger for srcIP.
 func (c *Cache) EffectiveTrigScan(srcIP string, globalTrig float64) float64 {
 	if globalTrig <= 0 {
+		c.recordDisabledTrigger(srcIP, func(p *Profile, global, effective float64) { p.GlobalScan, p.EffectiveScan = global, effective })
 		return 0
 	}
-	return c.effectiveTrigger(srcIP, globalTrig, func(p *Profile) float64 { return p.PeakScan })
+	return c.effectiveTrigger(srcIP, globalTrig,
+		func(p *Profile) float64 { return p.PeakScan },
+		func(p *Profile, global, effective float64) { p.GlobalScan, p.EffectiveScan = global, effective },
+	)
 }
 
-func (c *Cache) effectiveTrigger(srcIP string, globalTrig float64, value func(*Profile) float64) float64 {
-	c.mu.RLock()
+func (c *Cache) effectiveTrigger(srcIP string, globalTrig float64, value func(*Profile) float64, record func(*Profile, float64, float64)) float64 {
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	p, ok := c.m[srcIP]
 	if !ok || !p.Promoted || p.Confidence < c.cfg.MinConfidence {
-		c.mu.RUnlock()
+		if ok {
+			c.recordTriggerLocked(srcIP, p, globalTrig, globalTrig, record)
+		}
 		return globalTrig
 	}
 	effective := value(p) * c.cfg.PeakMultiplier
-	c.mu.RUnlock()
 	if effective > globalTrig {
+		c.recordTriggerLocked(srcIP, p, globalTrig, effective, record)
 		return effective
 	}
+	c.recordTriggerLocked(srcIP, p, globalTrig, globalTrig, record)
 	return globalTrig
+}
+
+func (c *Cache) recordDisabledTrigger(srcIP string, record func(*Profile, float64, float64)) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	p, ok := c.m[srcIP]
+	if !ok {
+		return
+	}
+	c.recordTriggerLocked(srcIP, p, 0, 0, record)
+}
+
+func (c *Cache) recordTriggerLocked(srcIP string, p *Profile, globalTrig, effectiveTrig float64, record func(*Profile, float64, float64)) {
+	before := triggerFingerprint(*p)
+	record(p, globalTrig, effectiveTrig)
+	if triggerFingerprint(*p) != before {
+		c.dirty[srcIP] = struct{}{}
+	}
+}
+
+func triggerFingerprint(p Profile) [8]float64 {
+	return [8]float64{
+		p.GlobalPPS, p.EffectivePPS,
+		p.GlobalBPS, p.EffectiveBPS,
+		p.GlobalSyn, p.EffectiveSyn,
+		p.GlobalScan, p.EffectiveScan,
+	}
 }
 
 // Len returns the number of cached source profiles.

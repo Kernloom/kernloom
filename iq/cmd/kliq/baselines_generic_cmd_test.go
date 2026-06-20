@@ -127,6 +127,16 @@ func TestBaselineSubjectDisplayUsesSubjectEntityWithoutEntityJoin(t *testing.T) 
 	}
 }
 
+func TestParseBaselineStateIncludesTriggerVisibility(t *testing.T) {
+	state := parseBaselineState(`{"ewma":10,"peak":20,"global_trigger":50,"effective_trigger":75,"confidence":0.5}`)
+	if state.GlobalTrigger != 50 || state.GlobalTriggerText != "50.0" {
+		t.Fatalf("global trigger = %.2f/%q", state.GlobalTrigger, state.GlobalTriggerText)
+	}
+	if state.EffectiveTrigger != 75 || state.EffectiveTriggerText != "75.0" {
+		t.Fatalf("effective trigger = %.2f/%q", state.EffectiveTrigger, state.EffectiveTriggerText)
+	}
+}
+
 func openBaselineDeleteTestStore(t *testing.T) *sstore.Store {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "state.db")

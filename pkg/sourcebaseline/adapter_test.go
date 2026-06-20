@@ -72,4 +72,14 @@ func TestEffectiveTriggersUseGlobalAsFloor(t *testing.T) {
 	if got := cache.EffectiveTrigSyn("10.0.0.1", 0); got != 0 {
 		t.Fatalf("disabled syn trigger must remain disabled, got %.2f", got)
 	}
+	profile, ok := cache.Get("10.0.0.1")
+	if !ok {
+		t.Fatal("profile missing")
+	}
+	if profile.GlobalScan != 500 || profile.EffectiveScan != 500 {
+		t.Fatalf("scan trigger visibility mismatch: global=%.2f effective=%.2f", profile.GlobalScan, profile.EffectiveScan)
+	}
+	if profile.GlobalSyn != 0 || profile.EffectiveSyn != 0 {
+		t.Fatalf("disabled syn trigger visibility mismatch: global=%.2f effective=%.2f", profile.GlobalSyn, profile.EffectiveSyn)
+	}
 }
