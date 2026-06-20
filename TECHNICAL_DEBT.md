@@ -253,7 +253,62 @@ Relevant areas:
 - `iq/internal/runtimepdp`
 - `kernloom-registries/registries/actions/runtime-action-contracts.yaml`
 
-### 9. Lease and state-store hardening is incomplete
+### 9. RuntimePDP active mode needs a lease-derived effective state view
+
+Status: initial renewal fix landed; broader coverage remains.
+
+The Action Broker already applies, renews, persists and reverts TTL-bounded runtime action leases. However,
+the visible source `STATE` line and some in-memory FSM state still follow the instantaneous signal/FSM
+state. In active RuntimePDP mode this can make the logs show `BLOCK->OBSERVE` immediately after a block
+lease was applied and renewed, because traffic drops below the trigger while the lease is still active.
+
+The first fix makes renewed source leases return the active lease state instead of the instantaneous
+signal/FSM state. The remaining debt is to expose this as a general effective enforcement state view and
+apply it consistently across all active lease, relationship and revert paths.
+
+Observed symptom:
+
+- `ACTION ip=<source> OBSERVE->BLOCK` applies a runtime decision.
+- `ACTION-RECEIPT ... message="lease renewed"` keeps the block lease alive.
+- A later `STATE <source> BLOCK->OBSERVE authority=runtime-pdp` appears because the signal/FSM view cooled
+  down, even though the effective enforcement lease is still active.
+
+Risk:
+
+- Operators see apparent oscillation even when the PEP lease is stable.
+- Future hold/escalation behavior may be modeled in policy intent by mistake, even though lease hold is a
+  runtime action contract concern.
+- Active RuntimePDP semantics remain split between "decision/lease state" and "source FSM state".
+
+Recommended fix:
+
+- Add a small effective enforcement state view in KLIQ:
+  `active lease state > matched RuntimePDP decision state > signal/FSM observe state`.
+- Derive visible source state from active Action Broker leases while they are active, including renewed
+  leases.
+- Map canonical runtime actions to source levels:
+  `enforce.traffic.rate_limit` -> soft/hard rate limit, `enforce.access.deny`,
+  `enforce.network.deny`, and traffic drop actions -> block.
+- Keep FSM/analyzers as fact producers in active RuntimePDP mode; do not let the signal-only FSM state
+  override an active lease.
+- Add tests for block/rate-limit staying visible while metrics cool down, and for returning to observe only
+  after lease expiry/revert.
+
+Estimated effort:
+
+- Clean first implementation: about one day.
+- Minimal log-only patch: a few hours, but less useful because it does not make the runtime state model
+  explicit.
+
+Relevant areas:
+
+- `iq/cmd/kliq/source_fsm.go`
+- `iq/cmd/kliq/runtime_pdp_candidate.go`
+- `iq/cmd/kliq/brokered_executor.go`
+- `iq/internal/actionbroker`
+- `pkg/statestore/sqlite/action_leases.go`
+
+### 10. Lease and state-store hardening is incomplete
 
 The SQLite state store now has `action_leases` and `action_receipts`. The runtime reconciles pending
 leases at startup, reverts expired source/relationship leases during the tick, persists receipts, uploads
@@ -270,7 +325,7 @@ Recommended fix:
 - Add managed-mode integration tests for receipt upload failure/retry/prune.
 - Add migration tests for empty DB, old DB, and interrupted migration scenarios.
 
-### 10. Adapter role split is only partially complete
+### 11. Adapter role split is only partially complete
 
 KLShield code has been moved into adapter subpackages, but the runtime still carries historical
 assumptions around telemetry, PEP sidecars, feedback, and action execution.
@@ -294,7 +349,7 @@ Recommended fix:
 
 ## P2 - Cleanup
 
-### 11. README contains stale migration notes
+### 12. README contains stale migration notes
 
 Status: fixed. The repository layout now points vendor extractors at `pkg/adapters/` and lists the
 OpenZiti adapter package.
@@ -307,7 +362,7 @@ Recommended fix:
 
 - Keep README layout updates in the same commits as future package moves.
 
-### 12. Historical config and naming remains visible
+### 13. Historical config and naming remains visible
 
 The docs call for clearer RuntimeBundle, Runtime Policy Pack, and Runtime PDP terminology, but
 current config and docs still expose old names such as `LocalPolicyPack` and `PDPConfig`.
@@ -324,7 +379,7 @@ Recommended fix:
 - Introduce new names at boundaries first.
 - Keep deprecated aliases only with explicit comments and removal criteria.
 
-### 13. Tracked release artifacts and ignored paths need a decision
+### 14. Tracked release artifacts and ignored paths need a decision
 
 Several generated or binary-like artifacts appear to be tracked while also being covered by ignore
 rules.
@@ -348,7 +403,7 @@ Recommended fix:
 - If not, remove them in a dedicated cleanup commit and document the release build path.
 - Remove Windows `Zone.Identifier` sidecar files unless they are intentionally archived evidence.
 
-### 14. Generic comments and examples still lean on old vendor names
+### 15. Generic comments and examples still lean on old vendor names
 
 Some generic packages use KLShield, Nginx, Ziti, or Cilium examples in comments and tests. Examples
 are less severe than exported identifiers, but they keep the old mental model alive.
@@ -371,8 +426,9 @@ Recommended fix:
    required/missing context.
 3. Define the Forge response-rule IR and deterministic priority rules before compiling natural
    `when ... then ...` escalation policies into RuntimePolicyPacks.
-4. Extend non-network adapters to publish rich generic facts and relationships against that registry.
-5. Continue shrinking `iq/cmd/kliq`: graph pipeline setup, adapter startup, and the main tick body are the
+4. Add the RuntimePDP effective enforcement state view so active leases drive visible source state.
+5. Extend non-network adapters to publish rich generic facts and relationships against that registry.
+6. Continue shrinking `iq/cmd/kliq`: graph pipeline setup, adapter startup, and the main tick body are the
    next high-value extraction targets after RuntimePDP/signal handling.
-6. Add managed-mode outage/restart integration tests for bundle validation, receipt retry, and lease
+7. Add managed-mode outage/restart integration tests for bundle validation, receipt retry, and lease
    reconciliation.

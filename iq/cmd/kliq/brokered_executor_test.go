@@ -140,6 +140,50 @@ func TestBrokeredSourceFencingPreventsOlderLeaseRevertingNewerLevel(t *testing.T
 	}
 }
 
+func TestBrokeredSourceRenewReturnsLeaseState(t *testing.T) {
+	store, err := sstore.Open(sstore.DefaultConfig(":memory:"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer store.Close()
+
+	start := time.Date(2026, 6, 20, 9, 0, 0, 0, time.UTC)
+	now := start
+	pep := &recordingSourcePEP{}
+	sourceExecutor := actions.NewSourceActionExecutor(pep)
+	brokerPEP := newBrokeredSourcePEP(sourceExecutor, func() adapterruntime.EnforcementParams {
+		return adapterruntime.EnforcementParams{HardTTL: 5 * time.Second}
+	})
+	sourceBroker, err := actionbroker.New(actionbroker.Config{
+		NodeID: "node-1",
+		Store:  store,
+		PEP:    brokerPEP,
+		Now:    func() time.Time { return now },
+	})
+	if err != nil {
+		t.Fatalf("new source broker: %v", err)
+	}
+	executor := newBrokeredActionExecutor(sourceExecutor, sourceBroker, brokerPEP, nil, nil, store, "node-1")
+	target := adapterruntime.SourceTarget{SourceID: "10.0.0.1"}
+
+	state, result := executor.ApplySource(target, fsm.State{}, sourceResolution("decision-hard-1", "hard", 5*time.Second), adapterruntime.EnforcementParams{HardTTL: 5 * time.Second}, now)
+	if result.Status != "applied" || state.Level != fsm.LevelHard {
+		t.Fatalf("first apply: state=%s result=%#v", state.Level, result)
+	}
+
+	now = start.Add(time.Second)
+	state, result = executor.ApplySource(target, fsm.State{Level: fsm.LevelObserve}, sourceResolution("decision-hard-2", "hard", 5*time.Second), adapterruntime.EnforcementParams{HardTTL: 5 * time.Second}, now)
+	if result.Status != "applied" || state.Level != fsm.LevelHard {
+		t.Fatalf("renew apply must return lease state hard, state=%s result=%#v", state.Level, result)
+	}
+	if result.Reason != "lease renewed" {
+		t.Fatalf("renew result reason = %q", result.Reason)
+	}
+	if len(pep.levels) != 1 {
+		t.Fatalf("renew must not call PEP transition again, transitions=%#v", pep.levels)
+	}
+}
+
 func sourceResolution(decisionID, level string, ttl time.Duration) actions.ActionResolution {
 	return actions.ActionResolution{
 		ProposalID:       "proposal-" + decisionID,

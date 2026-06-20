@@ -753,6 +753,8 @@ Expected:
 - `compile --output summary` shows `manual-edge-access -> klshield-local`.
 - The report shows `risk_level` and `device_posture` as
   `compensating_control`.
+- The report includes `runtimeNotes` for context-sensitive controls, so missing
+  or unknown evidence is visible before you load the pack.
 - The exported pack is `kind: RuntimePolicyPack`.
 
 Quick check:
@@ -765,7 +767,12 @@ grep -E 'kind: RuntimePolicyPack|capabilities_required:|when:|capability:|level:
 Expected in the pack:
 - `capability: enforce.access.deny`
 - a rule for `risk.level in ['high', 'critical']`
-- a rule for `device.posture.status in ['degraded', 'unhealthy', 'unknown']`
+- a rule for `device.posture.status in ['degraded', 'unhealthy']`
+
+Missing or unknown context should be visible in the Forge report, not silently
+compiled into a hard block. For example, a KLShield-only test target that cannot
+prove device posture must not keep renewing a block just because posture is
+`unknown`.
 
 Important: `forge compile --output yaml` creates an `EnforcementPlan`. That is
 a report. KLIQ standalone loads the file from `export-runtime-policy`.

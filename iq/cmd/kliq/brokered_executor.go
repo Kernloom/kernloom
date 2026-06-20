@@ -193,7 +193,27 @@ func (e *brokeredActionExecutor) applyBrokered(ctx applyContext) (fsm.State, act
 			AppliedAt:  ctx.now,
 		}
 	}
+	if applied.result.Status == "" {
+		applied = sourceApplyOutcomeFromLease(ctx, lease)
+	}
 	return applied.state, applied.result
+}
+
+func sourceApplyOutcomeFromLease(ctx applyContext, lease decision.ActionLease) applyOutcome {
+	state := ctx.state
+	state.Level = actions.ParseFSMLevel(lease.Level)
+	state.ExpiresAt = lease.ExpiresAt
+	return applyOutcome{
+		state: state,
+		result: actions.ActionResult{
+			ProposalID: ctx.resolution.ProposalID,
+			DecisionID: ctx.resolution.DecisionID,
+			Action:     lease.Action,
+			Status:     "applied",
+			Reason:     "lease renewed",
+			AppliedAt:  ctx.now,
+		},
+	}
 }
 
 func (e *brokeredActionExecutor) RevertExpired(ctx context.Context, now time.Time) {

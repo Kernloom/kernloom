@@ -79,6 +79,76 @@ func TestRuntimePDPActiveOwnsNetworkCandidateAction(t *testing.T) {
 	}
 }
 
+func TestRuntimePDPActiveRenewalKeepsEffectiveLeaseState(t *testing.T) {
+	start := time.Date(2026, 6, 20, 9, 15, 0, 0, time.UTC)
+	c := newTestCfg("")
+	c.RuntimePDPMode = string(PDPModeActive)
+	c.HardTTL = 30 * time.Second
+
+	runner := newShadowPDPRunner("node-test", log.New(testWriter{t}, "", 0))
+	runner.SetMode(PDPModeActive, nil)
+	if err := runner.UpdatePack(runtimeCandidateTestPack(
+		"device.posture.status == 'unknown'",
+		"enforce.access.deny",
+		"block",
+	)); err != nil {
+		t.Fatalf("update runtime pack: %v", err)
+	}
+
+	pep := &recordingSourcePEP{}
+	executor, cleanup := newRuntimePDPTestExecutor(t, pep, c)
+	defer cleanup()
+
+	state := processCandidateRuntimePDP(
+		highSeverityRuntimeMetrics(),
+		fsm.State{},
+		start,
+		c,
+		sourcefilters.NewWhitelist(""),
+		sourcefilters.NewFeedback(""),
+		c.buildPolicyResolver(),
+		executor,
+		nil,
+		false,
+		runner,
+		"node-test",
+		nil,
+	)
+	if state.Level != fsm.LevelBlock {
+		t.Fatalf("initial runtime decision should block, got %s", state.Level)
+	}
+
+	coolMetrics := metrics{
+		Target: adapterruntime.SourceTarget{
+			SourceID: "10.0.0.1",
+			Subject:  observation.EntityRef{Kind: "ip", ID: "10.0.0.1"},
+		},
+		Score:   0,
+		Signals: map[string]float64{},
+	}
+	state = processCandidateRuntimePDP(
+		coolMetrics,
+		state,
+		start.Add(2*time.Second),
+		c,
+		sourcefilters.NewWhitelist(""),
+		sourcefilters.NewFeedback(""),
+		c.buildPolicyResolver(),
+		executor,
+		nil,
+		true,
+		runner,
+		"node-test",
+		nil,
+	)
+	if state.Level != fsm.LevelBlock {
+		t.Fatalf("renewed active lease should keep visible state block, got %s", state.Level)
+	}
+	if len(pep.levels) != 1 {
+		t.Fatalf("renewed lease should not call PEP transition again, transitions=%#v", pep.levels)
+	}
+}
+
 func TestRuntimePDPShadowObservesNetworkCandidateOnly(t *testing.T) {
 	now := time.Date(2026, 6, 19, 13, 5, 0, 0, time.UTC)
 	c := newTestCfg("")
