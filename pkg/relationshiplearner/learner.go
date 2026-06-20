@@ -260,7 +260,20 @@ func (l *Learner) FlushDirty(ctx context.Context) (int, error) {
 		return 0, nil
 	}
 
+	now := time.Now().UTC()
 	l.mu.Lock()
+	// Promote eligible candidates before flushing so that a shutdown or
+	// periodic flush does not persist stale candidate state when the
+	// MinAge/MinSeen criteria are already met.
+	if l.cfg.Mode == ModeLearn {
+		for _, e := range l.cache {
+			if e.rel.State == relationship.StateCandidate && l.shouldPromote(e, now) {
+				e.rel.State = relationship.StateLearned
+				e.rel.Confidence = 0.8
+				e.dirtyAt = now
+			}
+		}
+	}
 	var dirty []relationship.Relationship
 	for _, e := range l.cache {
 		if !e.dirtyAt.IsZero() {

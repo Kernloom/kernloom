@@ -268,6 +268,7 @@ start_forge() {
     --addr "$KLT_FORGE_ADDR" \
     --adapters "${KLT_FORGE_ADAPTERS:-}" \
     --profiles "${KLT_FORGE_PROFILES:-}" \
+    --enroll-token "it-test" \
     > "$KLT_FORGE_LOG" 2>&1 &
   record_pid forge "$!"
   # Wait for forge to be ready.
