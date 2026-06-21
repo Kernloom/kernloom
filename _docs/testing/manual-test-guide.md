@@ -812,6 +812,14 @@ Expected:
   `spec.detection_rules`.
 - If `--response` and `--alert-route` were used, the exported pack contains
   `spec.response_rules` and `spec.alert_routes`.
+- KLIQ evaluates `spec.detection_rules` with local window counters when matching
+  source facts are present.
+- KLIQ evaluates `spec.response_rules` after a detection fires.
+- Technical response actions such as `enforce.traffic.rate_limit` only mutate a
+  PEP in `--runtime-pdp-mode=active`.
+- `notify.alert.emit` is currently logged as a routed reaction event. Real
+  Slack, email or pager delivery belongs behind the AlertRoute notification
+  backend.
 
 Quick check:
 

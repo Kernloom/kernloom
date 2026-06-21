@@ -186,6 +186,7 @@ func (s *sourceStates) processCandidates(
 	runner *shadowPDPRunner,
 	nodeID string,
 	facts runtimePDPFactProvider,
+	reactions *runtimeReactionEngine,
 ) processedSources {
 	processed := make(processedSources, len(cands))
 	for _, m := range cands {
@@ -195,14 +196,14 @@ func (s *sourceStates) processCandidates(
 		}
 		entry := s.ensure(sourceID, m.Target)
 		entry.target = m.Target
-		entry.state = processCandidateRuntimePDP(m, entry.state, now, c, wl, fb, resolver, executor, tuner, clean, runner, nodeID, facts)
+		entry.state = processCandidateRuntimePDP(m, entry.state, now, c, wl, fb, resolver, executor, tuner, clean, runner, nodeID, facts, reactions)
 		s.entries[sourceID] = entry
 		processed[sourceID] = true
 	}
 	return processed
 }
 
-func (s *sourceStates) sweepInactive(processed processedSources, now time.Time, c cfg, resolver *actions.PolicyResolver, executor *brokeredActionExecutor, params adapterruntime.EnforcementParams, runner *shadowPDPRunner, nodeID string, facts runtimePDPFactProvider) {
+func (s *sourceStates) sweepInactive(processed processedSources, now time.Time, c cfg, resolver *actions.PolicyResolver, executor *brokeredActionExecutor, params adapterruntime.EnforcementParams, runner *shadowPDPRunner, nodeID string, facts runtimePDPFactProvider, reactions *runtimeReactionEngine) {
 	for sourceID, entry := range s.entries {
 		if entry.state.Level == fsm.LevelObserve || processed[sourceID] {
 			continue
@@ -214,6 +215,9 @@ func (s *sourceStates) sweepInactive(processed processedSources, now time.Time, 
 		}
 		intent := evaluateFSMIntent(m, entry.state, now, c)
 		entry.state = processRuntimePDPDecisionForCandidate(m, entry.state, intent, now, c, resolver, executor, runner, nodeID, facts)
+		if reactions != nil {
+			entry.state = reactions.EvaluateCandidate(m, entry.state, now, c, resolver, executor, nodeID)
+		}
 		s.entries[sourceID] = entry
 	}
 }
@@ -232,6 +236,7 @@ func processCandidateRuntimePDP(
 	runner *shadowPDPRunner,
 	nodeID string,
 	facts runtimePDPFactProvider,
+	reactions *runtimeReactionEngine,
 ) fsm.State {
 	st.LastSeenWallTime = now
 
@@ -260,6 +265,9 @@ func processCandidateRuntimePDP(
 
 	intent := evaluateFSMIntent(m, st, now, c)
 	next := processRuntimePDPDecisionForCandidate(m, st, intent, now, c, resolver, executor, runner, nodeID, facts)
+	if reactions != nil {
+		next = reactions.EvaluateCandidate(m, next, now, c, resolver, executor, nodeID)
+	}
 
 	if next.Level != st.Level {
 		kliqLog.Printf("STATE %s %s->%s authority=runtime-pdp strikes=%d up=%d down=%d noncomp=%d score=%.2f %s",

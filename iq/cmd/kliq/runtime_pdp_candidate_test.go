@@ -69,6 +69,7 @@ func TestRuntimePDPActiveOwnsNetworkCandidateAction(t *testing.T) {
 		runner,
 		"node-test",
 		nil,
+		nil,
 	)
 
 	if state.Level != fsm.LevelHard {
@@ -113,6 +114,7 @@ func TestRuntimePDPActiveRenewalKeepsEffectiveLeaseState(t *testing.T) {
 		runner,
 		"node-test",
 		nil,
+		nil,
 	)
 	if state.Level != fsm.LevelBlock {
 		t.Fatalf("initial runtime decision should block, got %s", state.Level)
@@ -139,6 +141,7 @@ func TestRuntimePDPActiveRenewalKeepsEffectiveLeaseState(t *testing.T) {
 		true,
 		runner,
 		"node-test",
+		nil,
 		nil,
 	)
 	if state.Level != fsm.LevelBlock {
@@ -182,6 +185,7 @@ func TestRuntimePDPShadowObservesNetworkCandidateOnly(t *testing.T) {
 		false,
 		runner,
 		"node-test",
+		nil,
 		nil,
 	)
 

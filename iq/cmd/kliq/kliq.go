@@ -582,6 +582,7 @@ func main() {
 	}
 	executor := newBrokeredActionExecutor(sourceExecutor, actionBroker, brokerPEP, relationshipBroker, relationshipBrokerPEP, stateStore, nodeID)
 	runtimeFacts := newRuntimePDPFactStore(stateStore)
+	reactionEngine := newRuntimeReactionEngine()
 	for _, sidecar := range sourcePEPSidecars {
 		sidecar := sidecar
 		executor.AddSidecar(sourcePEPSidecar{
@@ -1352,12 +1353,12 @@ func main() {
 			}
 		}
 
-		processed := sources.processCandidates(cands, nowWall, c, wl, fb, resolver, executor, tuner, clean, shadowRunner, nodeID, runtimeFacts)
+		processed := sources.processCandidates(cands, nowWall, c, wl, fb, resolver, executor, tuner, clean, shadowRunner, nodeID, runtimeFacts, reactionEngine)
 
 		// Maintenance sweep: advance source intent for non-OBSERVE sources that
 		// had no qualifying observation this tick. RuntimePDP decides whether the
 		// resulting downscale/observe intent becomes an action.
-		sources.sweepInactive(processed, nowWall, c, resolver, executor, pepParams, shadowRunner, nodeID, runtimeFacts)
+		sources.sweepInactive(processed, nowWall, c, resolver, executor, pepParams, shadowRunner, nodeID, runtimeFacts, reactionEngine)
 		if lastBrokerRevert.IsZero() || nowWall.Sub(lastBrokerRevert) >= c.Interval {
 			lastBrokerRevert = nowWall
 			executor.RevertExpired(context.Background(), nowWall)
