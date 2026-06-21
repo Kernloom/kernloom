@@ -690,6 +690,7 @@ EOF
   --input /tmp/kernloom-manual/forge/policies/protect-ziti-controller.intent \
   --output /tmp/kernloom-manual/forge/policies/protect-ziti-controller.yaml \
   --guardrails-output /tmp/kernloom-manual/forge/policies/protect-ziti-controller-guardrails.yaml \
+  --detection-output /tmp/kernloom-manual/forge/policies/protect-ziti-controller-detections.yaml \
   --response-output /tmp/kernloom-manual/forge/policies/protect-ziti-controller-responses.yaml \
   --owner security
 
@@ -701,8 +702,10 @@ Expected:
 - `forge intent convert` writes an `AccessPolicy` YAML file.
 - `never ...` writes a `GuardrailPolicy` YAML file when `--guardrails-output`
   is set.
-- `when ... then alert route ...` writes a `ResponsePolicy` YAML file when
-  `--response-output` is set.
+- `when ...` writes a `DetectionPolicy` YAML file when `--detection-output` is
+  set.
+- `then alert route ...` writes a `ResponsePolicy` YAML file when
+  `--response-output` is set. The response references the detection ID.
 - Warnings for `default deny` are normal for now. It will later map to target
   defaults or runtime default behavior.
 - `alert` is a routed notification action, not a signal alias. Runtime
@@ -748,9 +751,10 @@ EOF
 
 ### 7.3 Check With Forge And Export A RuntimePolicyPack
 
-The `--guardrail`, `--response`, and `--alert-route` flags are optional. Use
-them when you ran the natural intent conversion in section 7.2 and want safety
-invariants or response rules in the runtime artifact.
+The `--guardrail`, `--detection`, `--response`, and `--alert-route` flags are
+optional. Use them when you ran the natural intent conversion in section 7.2
+and want safety invariants, detections or response rules in the runtime
+artifact.
 For source-only adapters, a group guardrail can reject hard actions when the
 subject is unknown. That is safe, but it can also prevent source blocks until
 identity context is available.
@@ -789,6 +793,7 @@ Optional guarded and routed response pack:
   --profiles examples/profiles \
   --target klshield-local \
   --guardrail /tmp/kernloom-manual/forge/policies/protect-ziti-controller-guardrails.yaml \
+  --detection /tmp/kernloom-manual/forge/policies/protect-ziti-controller-detections.yaml \
   --response /tmp/kernloom-manual/forge/policies/protect-ziti-controller-responses.yaml \
   --alert-route examples/policies/security-ops-alert-route.yaml \
   --ttl 30s \
@@ -803,13 +808,15 @@ Expected:
   or unknown evidence is visible before you load the pack.
 - The exported pack is `kind: RuntimePolicyPack`.
 - If `--guardrail` was used, the exported pack contains `spec.guardrails`.
+- If `--detection` was used, the exported pack contains
+  `spec.detection_rules`.
 - If `--response` and `--alert-route` were used, the exported pack contains
   `spec.response_rules` and `spec.alert_routes`.
 
 Quick check:
 
 ```bash
-grep -E 'kind: RuntimePolicyPack|capabilities_required:|guardrails:|response_rules:|alert_routes:|when:|capability:|level:' \
+grep -E 'kind: RuntimePolicyPack|capabilities_required:|guardrails:|detection_rules:|response_rules:|alert_routes:|when:|capability:|level:' \
   /tmp/kernloom-manual/forge/out/manual-edge-runtime-pack.yaml
 ```
 
@@ -898,10 +905,11 @@ activates the embedded registry snapshot plus `RuntimePolicyPack`.
 Build keys and a bundle:
 
 Add `--guardrail /tmp/kernloom-manual/forge/policies/protect-ziti-controller-guardrails.yaml`,
+`--detection /tmp/kernloom-manual/forge/policies/protect-ziti-controller-detections.yaml`,
 `--response /tmp/kernloom-manual/forge/policies/protect-ziti-controller-responses.yaml`,
 and `--alert-route examples/policies/security-ops-alert-route.yaml` to
 `build-runtime-bundle` and `serve` when the signed bundle should carry the
-optional guardrail and routed response IR.
+optional guardrail, detection and routed response IR.
 
 ```bash
 cd /home/adrian/prj/ebpf-security/kernloom-forge

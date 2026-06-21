@@ -32,13 +32,20 @@ spec:
       enforcement:
         violation_behavior: reject_action
         unknown_behavior: reject_hard_action
+  detection_rules:
+    - id: admin-deny
+      type: access.denied_threshold
+      subject:
+        type: group
+        ref: kernloom-admins
+      resource_ref: ziti-controller
+      threshold: 5
+      window: 15m
+      scope: source
   response_rules:
     - id: denied-access-alert
       when:
-        type: access.denied_threshold
-        resource_ref: ziti-controller
-        threshold: 5
-        window: 15m
+        detection: admin-deny
       then:
         - id: notify.alert.emit
           route: alert-route.security-ops
@@ -87,7 +94,10 @@ func TestLoadPolicyBytesRecognizesRuntimePolicyPack(t *testing.T) {
 	if len(c.RuntimeGuardrails) != 1 || c.RuntimeGuardrails[0].ID != "never-auto-block-admins" {
 		t.Fatalf("guardrails not applied: %#v", c.RuntimeGuardrails)
 	}
-	if len(c.RuntimeResponseRules) != 1 || c.RuntimeResponseRules[0].Then[0].Route != "alert-route.security-ops" {
+	if len(c.RuntimeDetectionRules) != 1 || c.RuntimeDetectionRules[0].ID != "admin-deny" {
+		t.Fatalf("detection rules not applied: %#v", c.RuntimeDetectionRules)
+	}
+	if len(c.RuntimeResponseRules) != 1 || c.RuntimeResponseRules[0].When.Detection != "admin-deny" || c.RuntimeResponseRules[0].Then[0].Route != "alert-route.security-ops" {
 		t.Fatalf("response rules not applied: %#v", c.RuntimeResponseRules)
 	}
 	if len(c.RuntimeAlertRoutes) != 1 || c.RuntimeAlertRoutes[0].ID != "alert-route.security-ops" {

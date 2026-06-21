@@ -160,6 +160,7 @@ func applyLoadedPolicyToCfg(p loadedPolicyFile, c *cfg) {
 
 func applyRuntimePolicyPackToCfg(pack contracts.RuntimePolicyPack, c *cfg) {
 	c.RuntimeGuardrails = append([]contracts.RuntimeGuardrail(nil), pack.Spec.Guardrails...)
+	c.RuntimeDetectionRules = append([]contracts.RuntimeDetectionRule(nil), pack.Spec.DetectionRules...)
 	c.RuntimeResponseRules = append([]contracts.RuntimeResponseRule(nil), pack.Spec.ResponseRules...)
 	c.RuntimeAlertRoutes = append([]contracts.RuntimeAlertRoute(nil), pack.Spec.AlertRoutes...)
 	caps := runtimePolicyCapabilities(pack)

@@ -22,10 +22,10 @@ github.com/josharian/native v1.1.0 h1:uuaP0hAbW7Y4l0ZRQ6C9zfb7Mg1mbFKry/xzDAfmtL
 github.com/josharian/native v1.1.0/go.mod h1:7X/raswPFr05uY3HiLlYeyQntB6OO7E/d2Cu7qoaN2w=
 github.com/jsimonetti/rtnetlink/v2 v2.0.1 h1:xda7qaHDSVOsADNouv7ukSuicKZO7GgVUCXxpaIEIlM=
 github.com/jsimonetti/rtnetlink/v2 v2.0.1/go.mod h1:7MoNYNbb3UaDHtF8udiJo/RH6VsTKP1pqKLUTVCvToE=
-github.com/kernloom/kernloom-contracts v0.3.1 h1:HfxI3ua1q0zxgn2NdyywmYjICOy/Z9zTNnXu+oxut1M=
-github.com/kernloom/kernloom-contracts v0.3.1/go.mod h1:MivRdravn+GJYmQgC5j2wjTsHaN2lWFnxEVm9hwoui8=
-github.com/kernloom/kernloom-registries v0.3.1 h1:W9HcDS08pVd1XEBQb3AI/yZxqAjrP9vNmKkLMrfLzVs=
-github.com/kernloom/kernloom-registries v0.3.1/go.mod h1:wq5tmNUweFcBl2Gv4cudgV22O/bEzCA4Udv43+4IsWM=
+github.com/kernloom/kernloom-contracts v0.3.2 h1:Q302Pv0F59tiuiww1mgZrUR138zFnkxRaXzj4YWmam4=
+github.com/kernloom/kernloom-contracts v0.3.2/go.mod h1:MivRdravn+GJYmQgC5j2wjTsHaN2lWFnxEVm9hwoui8=
+github.com/kernloom/kernloom-registries v0.3.2 h1:hUDaMNSKL+Da0+Q+WaFJk9UqOgGKD4KE7CopUyF+FgI=
+github.com/kernloom/kernloom-registries v0.3.2/go.mod h1:wq5tmNUweFcBl2Gv4cudgV22O/bEzCA4Udv43+4IsWM=
 github.com/kr/pretty v0.3.1 h1:flRD4NNwYAUpkphVc1HcthR4KEIFJ65n8Mw5qdRn3LE=
 github.com/kr/pretty v0.3.1/go.mod h1:hoEshYVHaxMs3cyo3Yncou5ZscifuDolrwPKZanG3xk=
 github.com/kr/text v0.2.0 h1:5Nx0Ya0ZqY2ygV366QzturHI13Jq95ApcVaJBhpS+AY=
