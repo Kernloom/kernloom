@@ -6,7 +6,7 @@ require (
 	github.com/cilium/ebpf v0.19.0
 	github.com/google/cel-go v0.28.1
 	github.com/kernloom/kernloom-contracts v0.3.1
-	github.com/kernloom/kernloom-registries v0.3.0
+	github.com/kernloom/kernloom-registries v0.3.1
 	gopkg.in/yaml.v3 v3.0.1
 	modernc.org/sqlite v1.50.1
 )
