@@ -196,6 +196,12 @@ type cfg struct {
 	// RuntimePolicyPack. The PolicyResolver checks them before any PEP action.
 	RuntimeGuardrails []contracts.RuntimeGuardrail
 
+	// RuntimeResponseRules and RuntimeAlertRoutes are Forge-compiled response IR
+	// from a RuntimePolicyPack. They are loaded and preserved for the response
+	// evaluator/notification path; they are not access authorization rules.
+	RuntimeResponseRules []contracts.RuntimeResponseRule
+	RuntimeAlertRoutes   []contracts.RuntimeAlertRoute
+
 	// Per-level Forge capability IDs read from PolicyPack rules (then.capability).
 	// Used for logging and future capability-based adapter dispatch.
 	// Values are normalised to KLIQ internal IDs via normalizeCapabilityID.

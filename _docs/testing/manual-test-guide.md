@@ -682,7 +682,7 @@ allow group "kernloom-admins" to access "ziti-controller"
 require "subject.risk.level" eq "low"
 require "session.authentication.strength" in ["mfa", "phishing_resistant_mfa"]
 default deny access to "ziti-controller"
-when denied access to "ziti-controller" exceeds 5 within 15m then alert
+when denied access to "ziti-controller" exceeds 5 within 15m then alert route "security-ops" severity "medium" dedupe 15m
 never auto_block group "kernloom-admins"
 EOF
 
@@ -690,6 +690,7 @@ EOF
   --input /tmp/kernloom-manual/forge/policies/protect-ziti-controller.intent \
   --output /tmp/kernloom-manual/forge/policies/protect-ziti-controller.yaml \
   --guardrails-output /tmp/kernloom-manual/forge/policies/protect-ziti-controller-guardrails.yaml \
+  --response-output /tmp/kernloom-manual/forge/policies/protect-ziti-controller-responses.yaml \
   --owner security
 
 ./bin/forge validate \
@@ -700,10 +701,12 @@ Expected:
 - `forge intent convert` writes an `AccessPolicy` YAML file.
 - `never ...` writes a `GuardrailPolicy` YAML file when `--guardrails-output`
   is set.
-- Warnings for `default deny` and `when ... then ...` are normal for now. They
-  are intent lines that will later map to runtime defaults or response rules.
-- `alert` is the readable alias for the canonical observe action
-  `observe.signal.emit`. Runtime enforcement aliases such as `rate_limit`,
+- `when ... then alert route ...` writes a `ResponsePolicy` YAML file when
+  `--response-output` is set.
+- Warnings for `default deny` are normal for now. It will later map to target
+  defaults or runtime default behavior.
+- `alert` is a routed notification action, not a signal alias. Runtime
+  enforcement aliases such as `rate_limit`,
   `deny`, `drop`, and `quarantine` are defined by the registries and must obey
   the target's allowed action level.
 - `forge validate` prints `OK: AccessPolicy "protect-ziti-controller" is valid`.
@@ -745,8 +748,9 @@ EOF
 
 ### 7.3 Check With Forge And Export A RuntimePolicyPack
 
-The `--guardrail` flag is optional. Use it when you ran the natural intent
-conversion in section 7.2 and want safety invariants in the runtime artifact.
+The `--guardrail`, `--response`, and `--alert-route` flags are optional. Use
+them when you ran the natural intent conversion in section 7.2 and want safety
+invariants or response rules in the runtime artifact.
 For source-only adapters, a group guardrail can reject hard actions when the
 subject is unknown. That is safe, but it can also prevent source blocks until
 identity context is available.
@@ -776,7 +780,7 @@ identity context is available.
   --output /tmp/kernloom-manual/forge/out/manual-edge-runtime-pack.yaml
 ```
 
-Optional guarded pack:
+Optional guarded and routed response pack:
 
 ```bash
 ./bin/forge export-runtime-policy \
@@ -785,8 +789,10 @@ Optional guarded pack:
   --profiles examples/profiles \
   --target klshield-local \
   --guardrail /tmp/kernloom-manual/forge/policies/protect-ziti-controller-guardrails.yaml \
+  --response /tmp/kernloom-manual/forge/policies/protect-ziti-controller-responses.yaml \
+  --alert-route examples/policies/security-ops-alert-route.yaml \
   --ttl 30s \
-  --output /tmp/kernloom-manual/forge/out/manual-edge-runtime-pack-guarded.yaml
+  --output /tmp/kernloom-manual/forge/out/manual-edge-runtime-pack-routed.yaml
 ```
 
 Expected:
@@ -797,11 +803,13 @@ Expected:
   or unknown evidence is visible before you load the pack.
 - The exported pack is `kind: RuntimePolicyPack`.
 - If `--guardrail` was used, the exported pack contains `spec.guardrails`.
+- If `--response` and `--alert-route` were used, the exported pack contains
+  `spec.response_rules` and `spec.alert_routes`.
 
 Quick check:
 
 ```bash
-grep -E 'kind: RuntimePolicyPack|capabilities_required:|guardrails:|when:|capability:|level:' \
+grep -E 'kind: RuntimePolicyPack|capabilities_required:|guardrails:|response_rules:|alert_routes:|when:|capability:|level:' \
   /tmp/kernloom-manual/forge/out/manual-edge-runtime-pack.yaml
 ```
 
@@ -889,9 +897,11 @@ activates the embedded registry snapshot plus `RuntimePolicyPack`.
 
 Build keys and a bundle:
 
-Add `--guardrail /tmp/kernloom-manual/forge/policies/protect-ziti-controller-guardrails.yaml`
-to `build-runtime-bundle` and `serve` when the signed bundle should carry the
-optional guardrail.
+Add `--guardrail /tmp/kernloom-manual/forge/policies/protect-ziti-controller-guardrails.yaml`,
+`--response /tmp/kernloom-manual/forge/policies/protect-ziti-controller-responses.yaml`,
+and `--alert-route examples/policies/security-ops-alert-route.yaml` to
+`build-runtime-bundle` and `serve` when the signed bundle should carry the
+optional guardrail and routed response IR.
 
 ```bash
 cd /home/adrian/prj/ebpf-security/kernloom-forge
