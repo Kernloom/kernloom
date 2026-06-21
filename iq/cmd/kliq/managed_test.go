@@ -29,7 +29,7 @@ func TestApplyBundleUpdate_ManagedRejectsUnsignedBundle(t *testing.T) {
 		t.Fatalf("marshal unsigned bundle: %v", err)
 	}
 
-	applyBundleUpdate(raw, c, &bsCtl, &graphCtl, ms, nil, nil)
+	applyBundleUpdate(raw, c, &bsCtl, &graphCtl, ms, nil, nil, nil)
 
 	if ms.BundleGeneration != 0 {
 		t.Fatalf("unsigned bundle applied generation=%d", ms.BundleGeneration)
@@ -43,7 +43,7 @@ func TestApplyBundleUpdate_RejectsSameGenerationDifferentHash(t *testing.T) {
 	c, priv, ms, bsCtl, graphCtl := managedBundleTestHarness(t)
 	first := signContractsRuntimeBundleFixture(t, contractsRuntimeBundleFixture(t, 1), priv)
 
-	applyBundleUpdate(first, c, &bsCtl, &graphCtl, ms, nil, nil)
+	applyBundleUpdate(first, c, &bsCtl, &graphCtl, ms, nil, nil, nil)
 
 	if ms.BundleGeneration != 1 {
 		t.Fatalf("first bundle did not apply generation=%d", ms.BundleGeneration)
@@ -53,7 +53,7 @@ func TestApplyBundleUpdate_RejectsSameGenerationDifferentHash(t *testing.T) {
 
 	mutated := contractsRuntimeBundleFixture(t, 1)
 	mutated.Spec.EnforcementBounds.MaxActionDuringBootstrap = "block"
-	applyBundleUpdate(signContractsRuntimeBundleFixture(t, mutated, priv), c, &bsCtl, &graphCtl, ms, nil, nil)
+	applyBundleUpdate(signContractsRuntimeBundleFixture(t, mutated, priv), c, &bsCtl, &graphCtl, ms, nil, nil, nil)
 
 	if ms.BundleHash != firstHash {
 		t.Fatalf("same-generation mutation changed hash: got %s want %s", ms.BundleHash, firstHash)
@@ -66,10 +66,10 @@ func TestApplyBundleUpdate_RejectsSameGenerationDifferentHash(t *testing.T) {
 func TestApplyBundleUpdate_AppliesSignedNewGeneration(t *testing.T) {
 	c, priv, ms, bsCtl, graphCtl := managedBundleTestHarness(t)
 
-	applyBundleUpdate(signContractsRuntimeBundleFixture(t, contractsRuntimeBundleFixture(t, 1), priv), c, &bsCtl, &graphCtl, ms, nil, nil)
+	applyBundleUpdate(signContractsRuntimeBundleFixture(t, contractsRuntimeBundleFixture(t, 1), priv), c, &bsCtl, &graphCtl, ms, nil, nil, nil)
 	next := contractsRuntimeBundleFixture(t, 2)
 	next.Spec.EnforcementBounds.MaxActionDuringBootstrap = "rate_limit"
-	applyBundleUpdate(signContractsRuntimeBundleFixture(t, next, priv), c, &bsCtl, &graphCtl, ms, nil, nil)
+	applyBundleUpdate(signContractsRuntimeBundleFixture(t, next, priv), c, &bsCtl, &graphCtl, ms, nil, nil, nil)
 
 	if ms.BundleGeneration != 2 {
 		t.Fatalf("new generation did not apply: got %d", ms.BundleGeneration)
@@ -84,7 +84,7 @@ func TestApplyBundleUpdate_AppliesSignedContractsRuntimeBundle(t *testing.T) {
 	updates := make(chan contracts.RuntimePolicyPack, 1)
 
 	raw := signContractsRuntimeBundleFixture(t, contractsRuntimeBundleFixture(t, 1), priv)
-	applyBundleUpdate(raw, c, &bsCtl, &graphCtl, ms, nil, updates)
+	applyBundleUpdate(raw, c, &bsCtl, &graphCtl, ms, nil, updates, nil)
 
 	if ms.BundleGeneration != 1 {
 		t.Fatalf("contracts bundle did not apply generation=%d", ms.BundleGeneration)

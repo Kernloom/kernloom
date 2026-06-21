@@ -5,7 +5,9 @@ package actions
 
 import (
 	"fmt"
+	"strings"
 
+	contracts "github.com/kernloom/kernloom-contracts"
 	"github.com/kernloom/kernloom/pkg/core/fsm"
 )
 
@@ -34,6 +36,11 @@ type PolicyResolver struct {
 	// explicitly allows (from capabilities_required). Nil or empty = all allowed.
 	// Only enforced in managed mode.
 	CapabilitiesAllowed map[string]bool
+
+	// RuntimeGuardrails are safety invariants compiled by Forge. They are
+	// evaluated after action ceilings and capability checks, before any PEP
+	// mutation is authorized.
+	RuntimeGuardrails []contracts.RuntimeGuardrail
 }
 
 // Resolve evaluates a proposal and returns an authorized (or denied/downgraded) resolution.
@@ -109,11 +116,153 @@ func (r *PolicyResolver) Resolve(p ActionProposal) ActionResolution {
 		}
 	}
 
+	if reason := r.guardrailDenyReason(execAction, execLevel, p.Target); reason != "" {
+		base.Allowed = false
+		base.DenyReason = reason
+		base.ExecutableAction = ""
+		base.ExecutableLevel = "observe"
+		return base
+	}
+
 	base.Allowed = true
 	base.ExecutableAction = execAction
 	base.ExecutableLevel = execLevel
 	base.DenyReason = downgradeReason
 	return base
+}
+
+func (r *PolicyResolver) guardrailDenyReason(action, level string, target ActionTarget) string {
+	if action == "" || level == "observe" {
+		return ""
+	}
+	for _, g := range r.RuntimeGuardrails {
+		if strings.TrimSpace(g.Type) != "never" {
+			continue
+		}
+		if !guardrailForbidsAction(g, action, level) {
+			continue
+		}
+		matched, unknown := guardrailSubjectMatch(g.Subject, target)
+		if matched {
+			return fmt.Sprintf("guardrail_violation(%s)", g.ID)
+		}
+		if unknown && guardrailUnknownRejectsHardAction(g, action, level) {
+			return fmt.Sprintf("guardrail_unknown_match_for_hard_action(%s)", g.ID)
+		}
+	}
+	return ""
+}
+
+func guardrailForbidsAction(g contracts.RuntimeGuardrail, action, level string) bool {
+	for _, forbidden := range g.ForbiddenActions {
+		if guardrailActionMatches(forbidden, action, level) {
+			return true
+		}
+	}
+	return false
+}
+
+func guardrailActionMatches(forbidden, action, level string) bool {
+	forbidden = normalizeGuardrailAction(forbidden)
+	action = normalizeGuardrailAction(action)
+	if forbidden == "" {
+		return false
+	}
+	if forbidden == "auto_block" {
+		return level == "block" || action == "enforce.access.deny" ||
+			action == "enforce.traffic.drop" ||
+			action == "enforce.network.quarantine" ||
+			action == "enforce.identity.disable"
+	}
+	return forbidden == action
+}
+
+func normalizeGuardrailAction(action string) string {
+	action = strings.TrimSpace(strings.ReplaceAll(action, " ", "_"))
+	switch action {
+	case "network.flow_deny", "network.block_source", "deny", "network_deny":
+		return "enforce.access.deny"
+	case "auto_block":
+		return "auto_block"
+	case "block", "temporary_block":
+		return "enforce.traffic.drop"
+	case "quarantine", "network_quarantine":
+		return "enforce.network.quarantine"
+	case "disable_identity", "identity_disable", "identity.disable":
+		return "enforce.identity.disable"
+	default:
+		return action
+	}
+}
+
+func guardrailSubjectMatch(subject contracts.RuntimeGuardrailSubject, target ActionTarget) (matched bool, unknown bool) {
+	if subject.Type == "" || subject.Ref == "" {
+		return false, false
+	}
+	if target.Granularity == "subject" {
+		if target.Value == subject.Ref || target.Value == subject.Type+":"+subject.Ref {
+			return true, false
+		}
+	}
+	attrs := target.Attributes
+	if attrs == nil {
+		return false, true
+	}
+	subjectType := firstAttr(attrs, "subject_type", "subject.type", "subjectType")
+	subjectRef := firstAttr(attrs, "subject_ref", "subject.ref", "subjectRef")
+	if subjectType != "" || subjectRef != "" {
+		return subjectType == subject.Type && subjectRef == subject.Ref, false
+	}
+	if subject.Type == "group" {
+		groups := firstAttr(attrs, "subject.groups", "subject_groups", "subjectGroups", "group")
+		if groups != "" {
+			return listContains(groups, subject.Ref), false
+		}
+	}
+	return false, true
+}
+
+func guardrailUnknownRejectsHardAction(g contracts.RuntimeGuardrail, action, level string) bool {
+	behavior := g.Enforcement.UnknownBehavior
+	if behavior == "" {
+		behavior = "reject_hard_action"
+	}
+	if behavior != "reject_hard_action" && behavior != "reject_action" {
+		return false
+	}
+	return behavior == "reject_action" || isHardRuntimeAction(action, level)
+}
+
+func isHardRuntimeAction(action, level string) bool {
+	if level == "hard" || level == "block" {
+		return true
+	}
+	switch normalizeGuardrailAction(action) {
+	case "enforce.access.deny", "enforce.traffic.drop", "enforce.network.quarantine", "enforce.identity.disable":
+		return true
+	default:
+		return false
+	}
+}
+
+func firstAttr(attrs map[string]string, keys ...string) string {
+	for _, key := range keys {
+		if v := strings.TrimSpace(attrs[key]); v != "" {
+			return v
+		}
+	}
+	return ""
+}
+
+func listContains(values, want string) bool {
+	for _, part := range strings.FieldsFunc(values, func(r rune) bool {
+		return r == ',' || r == ' ' || r == ';'
+	}) {
+		if strings.TrimSpace(part) == want {
+			return true
+		}
+	}
+	return false
 }
 
 // ── FSM level helpers ─────────────────────────────────────────────────────────

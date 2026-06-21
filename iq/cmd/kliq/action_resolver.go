@@ -6,6 +6,7 @@ package main
 import (
 	"time"
 
+	contracts "github.com/kernloom/kernloom-contracts"
 	"github.com/kernloom/kernloom/iq/internal/actions"
 	"github.com/kernloom/kernloom/pkg/adapterruntime"
 	"github.com/kernloom/kernloom/pkg/core/decision"
@@ -21,7 +22,16 @@ func (c cfg) buildPolicyResolver() *actions.PolicyResolver {
 		HasPolicyPack:       c.HasPolicyPack,
 		PolicyMaxAction:     c.PolicyMaxAction,
 		CapabilitiesAllowed: c.CapabilitiesRequired,
+		RuntimeGuardrails:   append([]contracts.RuntimeGuardrail(nil), c.RuntimeGuardrails...),
 	}
+}
+
+func syncPolicyResolverFromCfg(c cfg, resolver *actions.PolicyResolver) {
+	if resolver == nil {
+		return
+	}
+	next := c.buildPolicyResolver()
+	*resolver = *next
 }
 
 // buildExecutor creates the source action executor. Pass nil for adapter to run

@@ -689,6 +689,7 @@ EOF
 ./bin/forge intent convert \
   --input /tmp/kernloom-manual/forge/policies/protect-ziti-controller.intent \
   --output /tmp/kernloom-manual/forge/policies/protect-ziti-controller.yaml \
+  --guardrails-output /tmp/kernloom-manual/forge/policies/protect-ziti-controller-guardrails.yaml \
   --owner security
 
 ./bin/forge validate \
@@ -697,9 +698,10 @@ EOF
 
 Expected:
 - `forge intent convert` writes an `AccessPolicy` YAML file.
-- Warnings for `default deny`, `when ... then ...`, and `never ...` are normal
-  for now. They are intent lines that will later map to runtime defaults,
-  response rules, or guardrails.
+- `never ...` writes a `GuardrailPolicy` YAML file when `--guardrails-output`
+  is set.
+- Warnings for `default deny` and `when ... then ...` are normal for now. They
+  are intent lines that will later map to runtime defaults or response rules.
 - `alert` is the readable alias for the canonical observe action
   `observe.signal.emit`. Runtime enforcement aliases such as `rate_limit`,
   `deny`, `drop`, and `quarantine` are defined by the registries and must obey
@@ -743,6 +745,12 @@ EOF
 
 ### 7.3 Check With Forge And Export A RuntimePolicyPack
 
+The `--guardrail` flag is optional. Use it when you ran the natural intent
+conversion in section 7.2 and want safety invariants in the runtime artifact.
+For source-only adapters, a group guardrail can reject hard actions when the
+subject is unknown. That is safe, but it can also prevent source blocks until
+identity context is available.
+
 ```bash
 ./bin/forge validate \
   --policy /tmp/kernloom-manual/forge/policies/manual-edge-access.yaml
@@ -768,6 +776,19 @@ EOF
   --output /tmp/kernloom-manual/forge/out/manual-edge-runtime-pack.yaml
 ```
 
+Optional guarded pack:
+
+```bash
+./bin/forge export-runtime-policy \
+  --policy /tmp/kernloom-manual/forge/policies/manual-edge-access.yaml \
+  --adapters examples/adapters \
+  --profiles examples/profiles \
+  --target klshield-local \
+  --guardrail /tmp/kernloom-manual/forge/policies/protect-ziti-controller-guardrails.yaml \
+  --ttl 30s \
+  --output /tmp/kernloom-manual/forge/out/manual-edge-runtime-pack-guarded.yaml
+```
+
 Expected:
 - `compile --output summary` shows `manual-edge-access -> klshield-local`.
 - The report shows `risk_level` and `device_posture` as
@@ -775,11 +796,12 @@ Expected:
 - The report includes `runtimeNotes` for context-sensitive controls, so missing
   or unknown evidence is visible before you load the pack.
 - The exported pack is `kind: RuntimePolicyPack`.
+- If `--guardrail` was used, the exported pack contains `spec.guardrails`.
 
 Quick check:
 
 ```bash
-grep -E 'kind: RuntimePolicyPack|capabilities_required:|when:|capability:|level:' \
+grep -E 'kind: RuntimePolicyPack|capabilities_required:|guardrails:|when:|capability:|level:' \
   /tmp/kernloom-manual/forge/out/manual-edge-runtime-pack.yaml
 ```
 
@@ -866,6 +888,10 @@ gets a signed `RuntimeBundle`, verifies it with `--policy-verify-key`, and
 activates the embedded registry snapshot plus `RuntimePolicyPack`.
 
 Build keys and a bundle:
+
+Add `--guardrail /tmp/kernloom-manual/forge/policies/protect-ziti-controller-guardrails.yaml`
+to `build-runtime-bundle` and `serve` when the signed bundle should carry the
+optional guardrail.
 
 ```bash
 cd /home/adrian/prj/ebpf-security/kernloom-forge

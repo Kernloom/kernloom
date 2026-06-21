@@ -23,6 +23,7 @@ import (
 	"time"
 
 	contracts "github.com/kernloom/kernloom-contracts"
+	"github.com/kernloom/kernloom/iq/internal/actions"
 	"github.com/kernloom/kernloom/iq/internal/lifecycle/bootstrapautotune"
 	lgraph "github.com/kernloom/kernloom/iq/internal/lifecycle/graph"
 	"github.com/kernloom/kernloom/pkg/core/bundle"
@@ -52,6 +53,7 @@ func applyBundleUpdate(
 	ms *managedState,
 	stFile *stateFile,
 	runtimePolicyUpdates chan<- contracts.RuntimePolicyPack,
+	resolver *actions.PolicyResolver,
 ) {
 	// Skip if the bundle hasn't changed — prevents repeated log spam every heartbeat.
 	newHash := fmt.Sprintf("%x", hashBundleBytes(rawBundle))[:16]
@@ -77,6 +79,7 @@ func applyBundleUpdate(
 
 	if runtimePack != nil {
 		applyRuntimePolicyPackToCfg(*runtimePack, c)
+		syncPolicyResolverFromCfg(*c, resolver)
 	}
 
 	// Apply baseline lifecycle.

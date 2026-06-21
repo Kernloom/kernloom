@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	contracts "github.com/kernloom/kernloom-contracts"
 	"github.com/kernloom/kernloom/iq/internal/actions"
 	"github.com/kernloom/kernloom/pkg/adapterruntime"
 	"github.com/kernloom/kernloom/pkg/adapters/catalog"
@@ -190,6 +191,10 @@ type cfg struct {
 	// ActionResolver will deny any capability not in this set.
 	// Nil means "all capabilities allowed" (standalone and packs without the field).
 	CapabilitiesRequired map[string]bool
+
+	// RuntimeGuardrails are Forge-compiled safety invariants from a
+	// RuntimePolicyPack. The PolicyResolver checks them before any PEP action.
+	RuntimeGuardrails []contracts.RuntimeGuardrail
 
 	// Per-level Forge capability IDs read from PolicyPack rules (then.capability).
 	// Used for logging and future capability-based adapter dispatch.

@@ -21,6 +21,17 @@ spec:
   default_effect: deny
   capabilities_required:
     - enforce.traffic.rate_limit
+  guardrails:
+    - id: never-auto-block-admins
+      type: never
+      subject:
+        type: group
+        ref: kernloom-admins
+      forbidden_actions:
+        - enforce.access.deny
+      enforcement:
+        violation_behavior: reject_action
+        unknown_behavior: reject_hard_action
   rules:
     - id: high-risk
       when: "risk.level == 'high'"
@@ -54,6 +65,9 @@ func TestLoadPolicyBytesRecognizesRuntimePolicyPack(t *testing.T) {
 	}
 	if c.PolicyMaxAction != "rate_limit_hard" {
 		t.Fatalf("max action: %q", c.PolicyMaxAction)
+	}
+	if len(c.RuntimeGuardrails) != 1 || c.RuntimeGuardrails[0].ID != "never-auto-block-admins" {
+		t.Fatalf("guardrails not applied: %#v", c.RuntimeGuardrails)
 	}
 }
 

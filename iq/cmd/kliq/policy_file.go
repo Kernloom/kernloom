@@ -159,6 +159,7 @@ func applyLoadedPolicyToCfg(p loadedPolicyFile, c *cfg) {
 }
 
 func applyRuntimePolicyPackToCfg(pack contracts.RuntimePolicyPack, c *cfg) {
+	c.RuntimeGuardrails = append([]contracts.RuntimeGuardrail(nil), pack.Spec.Guardrails...)
 	caps := runtimePolicyCapabilities(pack)
 	if len(caps) > 0 {
 		c.CapabilitiesRequired = make(map[string]bool, len(caps))

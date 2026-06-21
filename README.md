@@ -239,7 +239,7 @@ Standalone nodes can also load a contracts-based RuntimePolicyPack directly:
 
 ## Forge compatibility contract
 
-Shared Runtime PDP wire schemas are imported from `github.com/kernloom/kernloom-contracts` (v0.2.0). During the migration, some managed bundle paths still use local core models.
+Shared Runtime PDP wire schemas are imported from `github.com/kernloom/kernloom-contracts` (v0.3.0). During the migration, some managed bundle paths still use local core models.
 
 ```
 RuntimeBundle          kernloom.io/runtime/v1alpha1

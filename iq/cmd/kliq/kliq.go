@@ -693,7 +693,7 @@ func main() {
 	// Apply last-known-good bundle on startup (fail_static).
 	if lkg := loadLastKnownGoodBundle(c.StatePath); lkg != nil {
 		kliqLog.Printf("MANAGED: applying last-known-good bundle from disk")
-		applyBundleUpdate(lkg, &c, &bsCtl, &graphCtl, &ms, stFile, runtimePolicyUpdateCh)
+		applyBundleUpdate(lkg, &c, &bsCtl, &graphCtl, &ms, stFile, runtimePolicyUpdateCh, resolver)
 	}
 
 	// Pre-set HasPolicyPack from persisted state so the startup INVENTORY log
@@ -814,6 +814,7 @@ func main() {
 				if err != nil {
 					return err
 				}
+				syncPolicyResolverFromCfg(c, resolver)
 				if loaded.Runtime != nil {
 					select {
 					case runtimePolicyUpdateCh <- *loaded.Runtime:
@@ -1224,7 +1225,7 @@ func main() {
 		// Process pending bundle update (non-blocking; delivered by heartbeat goroutine).
 		select {
 		case rawBundle := <-bundleUpdateCh:
-			applyBundleUpdate(rawBundle, &c, &bsCtl, &graphCtl, &ms, stFile, runtimePolicyUpdateCh)
+			applyBundleUpdate(rawBundle, &c, &bsCtl, &graphCtl, &ms, stFile, runtimePolicyUpdateCh, resolver)
 			// Persist updated managed state immediately.
 			if stFile != nil {
 				stFile.Active.ForgeBundleGeneration = ms.BundleGeneration

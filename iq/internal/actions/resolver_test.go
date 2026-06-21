@@ -6,6 +6,7 @@ package actions_test
 import (
 	"testing"
 
+	contracts "github.com/kernloom/kernloom-contracts"
 	"github.com/kernloom/kernloom/iq/internal/actions"
 	"github.com/kernloom/kernloom/pkg/core/fsm"
 )
@@ -32,6 +33,27 @@ func managed(maxAction string, caps ...string) actions.PolicyResolver {
 		}
 	}
 	return r
+}
+
+func neverAutoBlockAdmins() contracts.RuntimeGuardrail {
+	return contracts.RuntimeGuardrail{
+		ID:   "never-auto-block-admins",
+		Type: "never",
+		Subject: contracts.RuntimeGuardrailSubject{
+			Type: "group",
+			Ref:  "kernloom-admins",
+		},
+		ForbiddenActions: []string{
+			"enforce.access.deny",
+			"enforce.traffic.drop",
+			"enforce.network.quarantine",
+			"enforce.identity.disable",
+		},
+		Enforcement: contracts.RuntimeGuardrailEnforcement{
+			ViolationBehavior: "reject_action",
+			UnknownBehavior:   "reject_hard_action",
+		},
+	}
 }
 
 // ── Rule 1: standalone pass-through ──────────────────────────────────────────
@@ -212,6 +234,57 @@ func TestResolve_EmptyAction_SkipsCapCheck(t *testing.T) {
 	res := r.Resolve(proposal("observe", ""))
 	if !res.Allowed {
 		t.Error("empty action should pass capability check")
+	}
+}
+
+func TestResolve_GuardrailRejectsProtectedSubjectBlock(t *testing.T) {
+	r := managed("", "enforce.access.deny")
+	r.RuntimeGuardrails = []contracts.RuntimeGuardrail{neverAutoBlockAdmins()}
+	p := proposal("block", "enforce.access.deny")
+	p.Target = actions.ActionTarget{
+		Granularity: "subject",
+		Value:       "group:kernloom-admins",
+	}
+	res := r.Resolve(p)
+	if res.Allowed {
+		t.Fatal("protected subject block should be denied")
+	}
+	if res.DenyReason != "guardrail_violation(never-auto-block-admins)" {
+		t.Fatalf("deny reason = %q", res.DenyReason)
+	}
+	if res.ExecutableLevel != "observe" || res.ExecutableAction != "" {
+		t.Fatalf("executable action should be observe/noop: %#v", res)
+	}
+}
+
+func TestResolve_GuardrailRejectsUnknownBlastRadiusHardAction(t *testing.T) {
+	r := managed("", "enforce.access.deny")
+	r.RuntimeGuardrails = []contracts.RuntimeGuardrail{neverAutoBlockAdmins()}
+	p := proposal("block", "enforce.access.deny")
+	p.Target = actions.ActionTarget{
+		Granularity: actions.TargetGranularitySource,
+		Value:       "203.0.113.10",
+	}
+	res := r.Resolve(p)
+	if res.Allowed {
+		t.Fatal("source block with unknown protected-subject blast radius should be denied")
+	}
+	if res.DenyReason != "guardrail_unknown_match_for_hard_action(never-auto-block-admins)" {
+		t.Fatalf("deny reason = %q", res.DenyReason)
+	}
+}
+
+func TestResolve_GuardrailAllowsRateLimitUnknownBlastRadius(t *testing.T) {
+	r := managed("", "enforce.traffic.rate_limit")
+	r.RuntimeGuardrails = []contracts.RuntimeGuardrail{neverAutoBlockAdmins()}
+	p := proposal("soft", "enforce.traffic.rate_limit")
+	p.Target = actions.ActionTarget{
+		Granularity: actions.TargetGranularitySource,
+		Value:       "203.0.113.10",
+	}
+	res := r.Resolve(p)
+	if !res.Allowed {
+		t.Fatalf("rate limit should remain allowed, reason=%s", res.DenyReason)
 	}
 }
 
