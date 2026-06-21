@@ -34,11 +34,12 @@ forge_simulate_enroll "$NODE_ID" > "$ENROLL_RESP"
 cat "$ENROLL_RESP"
 assert_contains "$ENROLL_RESP" "\"node_id\""
 assert_contains "$ENROLL_RESP" "\"session_token\""
-assert_contains "$ENROLL_RESP" "mvp-token-$NODE_ID"
-pass "09.2: node enrollment returns MVP session token"
+SESSION_TOKEN=$(sed -n 's/.*"session_token":"\([^"]*\)".*/\1/p' "$ENROLL_RESP")
+[[ -n "$SESSION_TOKEN" ]] || fail "session_token was empty"
+pass "09.2: node enrollment returns approved session token"
 
 BUNDLE_OUT="$RESULTS_DIR/runtime-bundle.yaml"
-forge_pull_bundle "$NODE_ID" > "$BUNDLE_OUT"
+forge_pull_bundle "$NODE_ID" "$SESSION_TOKEN" > "$BUNDLE_OUT"
 cat "$BUNDLE_OUT"
 assert_contains "$BUNDLE_OUT" "RuntimeBundle"
 assert_contains "$BUNDLE_OUT" "$NODE_ID"
@@ -47,26 +48,28 @@ pass "09.3: runtime bundle is pullable"
 
 ACK_HTTP=$(curl -s -o "$RESULTS_DIR/bundle-ack.txt" -w "%{http_code}" \
   -X POST "$KLT_FORGE_URL/api/v1/nodes/$NODE_ID/bundle-acks" \
+  -H "Authorization: Bearer $SESSION_TOKEN" \
   -H "Content-Type: application/json" \
   -d '{"status":"activated","generation":1}')
 [[ "$ACK_HTTP" == "200" ]] || fail "bundle ack returned HTTP $ACK_HTTP"
 pass "09.4: bundle ack accepted"
 
 RECEIPTS_OUT="$RESULTS_DIR/receipts.json"
-forge_post_receipts "$NODE_ID" > "$RECEIPTS_OUT"
+forge_post_receipts "$NODE_ID" "$SESSION_TOKEN" > "$RECEIPTS_OUT"
 cat "$RECEIPTS_OUT"
 assert_contains "$RECEIPTS_OUT" "receipt-it-1"
 pass "09.5: receipt upload accepted and IDs returned"
 
 FINDINGS_HTTP=$(curl -s -o "$RESULTS_DIR/findings.txt" -w "%{http_code}" \
   -X POST "$KLT_FORGE_URL/api/v1/nodes/$NODE_ID/findings" \
+  -H "Authorization: Bearer $SESSION_TOKEN" \
   -H "Content-Type: application/json" \
   -d '[{"id":"finding-it-1","severity":"info"}]')
 [[ "$FINDINGS_HTTP" == "200" ]] || fail "findings upload returned HTTP $FINDINGS_HTTP"
 pass "09.6: findings upload accepted"
 
 PROPOSAL_OUT="$RESULTS_DIR/baseline-proposal.json"
-forge_post_baseline_proposal "$NODE_ID" > "$PROPOSAL_OUT"
+forge_post_baseline_proposal "$NODE_ID" "$SESSION_TOKEN" > "$PROPOSAL_OUT"
 cat "$PROPOSAL_OUT"
 assert_contains "$PROPOSAL_OUT" "proposal-$NODE_ID"
 pass "09.7: baseline proposal accepted"

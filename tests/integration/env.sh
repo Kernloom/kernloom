@@ -52,6 +52,9 @@ if [[ -z "${KLT_FORGE_PROFILES:-}" ]]; then
   fi
 fi
 export KLT_FORGE_SIGNING_KEY="$KLT_ARTIFACT_DIR/forge-signing.key"
+export KLT_FORGE_SIGNING_PUBKEY="$KLT_ARTIFACT_DIR/forge-signing.pub"
+export KLT_FORGE_POLICY="${KLT_FORGE_POLICY:-$KLT_FORGE_ROOT/examples/policies/investor-apps-access.yaml}"
+export KLT_FORGE_TARGET="${KLT_FORGE_TARGET:-openziti-production}"
 
 # Network namespaces and IPs
 export KLT_BR="${KLT_BR:-br-klt}"

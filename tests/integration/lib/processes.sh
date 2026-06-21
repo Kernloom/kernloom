@@ -264,10 +264,20 @@ start_kliq_frozen() {
 
 start_forge() {
   echo "[proc] starting forge serve on $KLT_FORGE_ADDR"
+  [[ -f "${KLT_FORGE_POLICY:-}" ]] || { echo "[ERROR] forge policy not found: ${KLT_FORGE_POLICY:-<unset>}" >&2; exit 1; }
+  if [[ ! -f "$KLT_FORGE_SIGNING_KEY" ]]; then
+    "$KLT_FORGE" keygen \
+      --private "$KLT_FORGE_SIGNING_KEY" \
+      --public "$KLT_FORGE_SIGNING_PUBKEY" \
+      >/dev/null
+  fi
   "$KLT_FORGE" serve \
     --addr "$KLT_FORGE_ADDR" \
+    --policy "$KLT_FORGE_POLICY" \
     --adapters "${KLT_FORGE_ADAPTERS:-}" \
     --profiles "${KLT_FORGE_PROFILES:-}" \
+    --target "$KLT_FORGE_TARGET" \
+    --signing-key "$KLT_FORGE_SIGNING_KEY" \
     --enroll-token "it-test" \
     > "$KLT_FORGE_LOG" 2>&1 &
   record_pid forge "$!"
@@ -307,39 +317,63 @@ forge_simulate_enroll() {
 
 # Pull the runtime bundle via curl.
 # $1 = node_id
+# $2 = session_token (optional)
 forge_pull_bundle() {
   local node_id="$1"
-  curl -sf "$KLT_FORGE_URL/api/v1/nodes/$node_id/runtime-bundle"
+  local session_token="${2:-}"
+  local auth_args=()
+  [[ -z "$session_token" ]] || auth_args=(-H "Authorization: Bearer $session_token")
+  curl -sf "${auth_args[@]}" "$KLT_FORGE_URL/api/v1/nodes/$node_id/runtime-bundle"
 }
 
 # $1 = node_id
+# $2 = session_token (optional)
 forge_post_bundle_ack() {
   local node_id="$1"
+  local session_token="${2:-}"
+  local auth_args=()
+  [[ -z "$session_token" ]] || auth_args=(-H "Authorization: Bearer $session_token")
   curl -sf -X POST "$KLT_FORGE_URL/api/v1/nodes/$node_id/bundle-acks" \
+    "${auth_args[@]}" \
     -H "Content-Type: application/json" \
     -d '{"status":"activated","generation":1}'
 }
 
 # $1 = node_id
+# $2 = session_token (optional)
 forge_post_receipts() {
   local node_id="$1"
+  local session_token="${2:-}"
+  local auth_args=()
+  [[ -z "$session_token" ]] || auth_args=(-H "Authorization: Bearer $session_token")
   curl -sf -X POST "$KLT_FORGE_URL/api/v1/nodes/$node_id/receipts" \
+    "${auth_args[@]}" \
     -H "Content-Type: application/json" \
     -d '{"receipts":[{"id":"receipt-it-1","status":"applied"}]}'
 }
 
 # $1 = node_id
+# $2 = session_token (optional)
 forge_post_findings() {
   local node_id="$1"
+  local session_token="${2:-}"
+  local auth_args=()
+  [[ -z "$session_token" ]] || auth_args=(-H "Authorization: Bearer $session_token")
   curl -sf -X POST "$KLT_FORGE_URL/api/v1/nodes/$node_id/findings" \
+    "${auth_args[@]}" \
     -H "Content-Type: application/json" \
     -d '[{"id":"finding-it-1","severity":"info"}]'
 }
 
 # $1 = node_id
+# $2 = session_token (optional)
 forge_post_baseline_proposal() {
   local node_id="$1"
+  local session_token="${2:-}"
+  local auth_args=()
+  [[ -z "$session_token" ]] || auth_args=(-H "Authorization: Bearer $session_token")
   curl -sf -X POST "$KLT_FORGE_URL/api/v1/nodes/$node_id/baseline-proposals" \
+    "${auth_args[@]}" \
     -H "Content-Type: application/json" \
     -d '{"proposal":"it"}'
 }

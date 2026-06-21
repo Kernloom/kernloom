@@ -128,6 +128,8 @@ KLShield/XDP is attached to the host-side client veth interfaces. This lets KLIQ
 | `KLT_FORGE_ROOT` | Forge repository | `../kernloom-forge` |
 | `KLT_FORGE` | Forge binary | `bin/forge` |
 | `KLT_FORGE_SKIP_BUILD` | Do not rebuild Forge | `0` |
+| `KLT_FORGE_POLICY` | Policy used by managed enrollment bundle tests | `../kernloom-forge/examples/policies/investor-apps-access.yaml` |
+| `KLT_FORGE_TARGET` | Target profile used by managed enrollment bundle tests | `openziti-production` |
 | `KLT_GO` | Go binary | `go` or `/usr/local/go/bin/go` |
 
 ## Scenario Overview
@@ -354,11 +356,12 @@ Flow:
 2. `/healthz` must return `ok`.
 3. A node named `it-node-09` enrolls itself.
 4. The enrollment response must contain `node_id` and `session_token`.
-5. The runtime bundle for the node can be fetched.
-6. Bundle ACK is accepted.
-7. Receipt upload is accepted.
-8. Findings upload is accepted.
-9. Baseline proposal upload is accepted.
+5. The session token is used as a bearer token.
+6. The runtime bundle for the node can be fetched.
+7. Bundle ACK is accepted.
+8. Receipt upload is accepted.
+9. Findings upload is accepted.
+10. Baseline proposal upload is accepted.
 
 This scenario validates the HTTP endpoints that KLIQ needs in managed mode.
 
