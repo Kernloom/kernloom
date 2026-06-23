@@ -8,6 +8,7 @@ package shieldpep
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"net"
@@ -106,12 +107,12 @@ func (a *Adapter) TransitionSource(
 	if v4 := ip.To4(); v4 != nil {
 		var key [4]byte
 		copy(key[:], v4)
-		return a.transitionV4(key, st, level, now, p), nil
+		return a.transitionV4(key, st, level, now, p)
 	}
 	if v6 := ip.To16(); v6 != nil {
 		var key [16]byte
 		copy(key[:], v6)
-		return a.transitionV6(key, st, level, now, p), nil
+		return a.transitionV6(key, st, level, now, p)
 	}
 	return st, fmt.Errorf("klshield source target %q has unsupported IP representation", id)
 }
@@ -122,53 +123,79 @@ func (a *Adapter) TransitionSource(
 func (a *Adapter) transitionV4(
 	ip [4]byte, st fsm.State, target fsm.Level,
 	now time.Time, p EnforcementParams,
-) fsm.State {
-	logger.Printf("ACTION ip=%s %s->%s dry_run=%v", net.IPv4(ip[0], ip[1], ip[2], ip[3]).String(), st.Level, target, a.dryRun)
+) (fsm.State, error) {
+	ipString := net.IPv4(ip[0], ip[1], ip[2], ip[3]).String()
+	logger.Printf("ACTION ip=%s %s->%s dry_run=%v %s", ipString, st.Level, target, a.dryRun, actionParamSummary(target, p))
 	if !a.dryRun && a.maps != nil {
 		switch target {
 		case fsm.LevelObserve:
 			if a.maps.RL4 != nil {
-				_ = a.maps.RL4.Delete(&ip)
+				if err := ignoreMissing(a.maps.RL4.Delete(&ip)); err != nil {
+					return st, fmt.Errorf("delete v4 rate-limit %s: %w", ipString, err)
+				}
 			}
 			if a.maps.Deny4 != nil {
-				_ = a.maps.Deny4.Delete(&ip)
+				if err := ignoreMissing(a.maps.Deny4.Delete(&ip)); err != nil {
+					return st, fmt.Errorf("delete v4 deny %s: %w", ipString, err)
+				}
 			}
 		case fsm.LevelSoft:
 			if a.maps.Deny4 != nil {
-				_ = a.maps.Deny4.Delete(&ip)
+				if err := ignoreMissing(a.maps.Deny4.Delete(&ip)); err != nil {
+					return st, fmt.Errorf("delete v4 deny %s: %w", ipString, err)
+				}
 			}
 			if a.maps.RL4 != nil {
 				val := shieldclient.RLConfig{RatePPS: p.SoftRate, Burst: p.SoftBurst}
-				_ = a.maps.RL4.Update(&ip, &val, ebpf.UpdateAny)
+				if err := a.maps.RL4.Update(&ip, &val, ebpf.UpdateAny); err != nil {
+					return st, fmt.Errorf("update v4 rate-limit %s rate=%d burst=%d: %w", ipString, val.RatePPS, val.Burst, err)
+				}
+			} else {
+				return st, fmt.Errorf("v4 rate-limit map unavailable")
 			}
 		case fsm.LevelHard:
 			if a.maps.Deny4 != nil {
-				_ = a.maps.Deny4.Delete(&ip)
+				if err := ignoreMissing(a.maps.Deny4.Delete(&ip)); err != nil {
+					return st, fmt.Errorf("delete v4 deny %s: %w", ipString, err)
+				}
 			}
 			if a.maps.RL4 != nil {
 				val := shieldclient.RLConfig{RatePPS: p.HardRate, Burst: p.HardBurst}
-				_ = a.maps.RL4.Update(&ip, &val, ebpf.UpdateAny)
+				if err := a.maps.RL4.Update(&ip, &val, ebpf.UpdateAny); err != nil {
+					return st, fmt.Errorf("update v4 rate-limit %s rate=%d burst=%d: %w", ipString, val.RatePPS, val.Burst, err)
+				}
+			} else {
+				return st, fmt.Errorf("v4 rate-limit map unavailable")
 			}
 		case fsm.LevelBlock:
 			if a.maps.RL4 != nil {
-				_ = a.maps.RL4.Delete(&ip)
+				if err := ignoreMissing(a.maps.RL4.Delete(&ip)); err != nil {
+					return st, fmt.Errorf("delete v4 rate-limit %s: %w", ipString, err)
+				}
 			}
 			if a.maps.Deny4 != nil {
 				v := uint8(1)
-				_ = a.maps.Deny4.Update(&ip, &v, ebpf.UpdateAny)
+				if err := a.maps.Deny4.Update(&ip, &v, ebpf.UpdateAny); err != nil {
+					return st, fmt.Errorf("update v4 deny %s: %w", ipString, err)
+				}
+			} else {
+				return st, fmt.Errorf("v4 deny map unavailable")
 			}
 		}
+	} else if !a.dryRun && a.maps == nil {
+		return st, fmt.Errorf("klshield maps unavailable")
 	}
 
-	return applyStateFields(st, target, now, p)
+	return applyStateFields(st, target, now, p), nil
 }
 
 // transitionV6 applies the enforcement action for an IPv6 source.
 func (a *Adapter) transitionV6(
 	ip [16]byte, st fsm.State, target fsm.Level,
 	now time.Time, p EnforcementParams,
-) fsm.State {
-	logger.Printf("ACTION ip=%s %s->%s dry_run=%v", net.IP(ip[:]).String(), st.Level, target, a.dryRun)
+) (fsm.State, error) {
+	ipString := net.IP(ip[:]).String()
+	logger.Printf("ACTION ip=%s %s->%s dry_run=%v %s", ipString, st.Level, target, a.dryRun, actionParamSummary(target, p))
 	if !a.dryRun && a.maps != nil {
 		krl := shieldclient.Src6Key{IP: ip}
 		kd := shieldclient.Key6Bytes{IP: ip}
@@ -176,39 +203,63 @@ func (a *Adapter) transitionV6(
 		switch target {
 		case fsm.LevelObserve:
 			if a.maps.RL6 != nil {
-				_ = a.maps.RL6.Delete(&krl)
+				if err := ignoreMissing(a.maps.RL6.Delete(&krl)); err != nil {
+					return st, fmt.Errorf("delete v6 rate-limit %s: %w", ipString, err)
+				}
 			}
 			if a.maps.Deny6 != nil {
-				_ = a.maps.Deny6.Delete(&kd)
+				if err := ignoreMissing(a.maps.Deny6.Delete(&kd)); err != nil {
+					return st, fmt.Errorf("delete v6 deny %s: %w", ipString, err)
+				}
 			}
 		case fsm.LevelSoft:
 			if a.maps.Deny6 != nil {
-				_ = a.maps.Deny6.Delete(&kd)
+				if err := ignoreMissing(a.maps.Deny6.Delete(&kd)); err != nil {
+					return st, fmt.Errorf("delete v6 deny %s: %w", ipString, err)
+				}
 			}
 			if a.maps.RL6 != nil {
 				val := shieldclient.RLConfig{RatePPS: p.SoftRate, Burst: p.SoftBurst}
-				_ = a.maps.RL6.Update(&krl, &val, ebpf.UpdateAny)
+				if err := a.maps.RL6.Update(&krl, &val, ebpf.UpdateAny); err != nil {
+					return st, fmt.Errorf("update v6 rate-limit %s rate=%d burst=%d: %w", ipString, val.RatePPS, val.Burst, err)
+				}
+			} else {
+				return st, fmt.Errorf("v6 rate-limit map unavailable")
 			}
 		case fsm.LevelHard:
 			if a.maps.Deny6 != nil {
-				_ = a.maps.Deny6.Delete(&kd)
+				if err := ignoreMissing(a.maps.Deny6.Delete(&kd)); err != nil {
+					return st, fmt.Errorf("delete v6 deny %s: %w", ipString, err)
+				}
 			}
 			if a.maps.RL6 != nil {
 				val := shieldclient.RLConfig{RatePPS: p.HardRate, Burst: p.HardBurst}
-				_ = a.maps.RL6.Update(&krl, &val, ebpf.UpdateAny)
+				if err := a.maps.RL6.Update(&krl, &val, ebpf.UpdateAny); err != nil {
+					return st, fmt.Errorf("update v6 rate-limit %s rate=%d burst=%d: %w", ipString, val.RatePPS, val.Burst, err)
+				}
+			} else {
+				return st, fmt.Errorf("v6 rate-limit map unavailable")
 			}
 		case fsm.LevelBlock:
 			if a.maps.RL6 != nil {
-				_ = a.maps.RL6.Delete(&krl)
+				if err := ignoreMissing(a.maps.RL6.Delete(&krl)); err != nil {
+					return st, fmt.Errorf("delete v6 rate-limit %s: %w", ipString, err)
+				}
 			}
 			if a.maps.Deny6 != nil {
 				v := uint8(1)
-				_ = a.maps.Deny6.Update(&kd, &v, ebpf.UpdateAny)
+				if err := a.maps.Deny6.Update(&kd, &v, ebpf.UpdateAny); err != nil {
+					return st, fmt.Errorf("update v6 deny %s: %w", ipString, err)
+				}
+			} else {
+				return st, fmt.Errorf("v6 deny map unavailable")
 			}
 		}
+	} else if !a.dryRun && a.maps == nil {
+		return st, fmt.Errorf("klshield maps unavailable")
 	}
 
-	return applyStateFields(st, target, now, p)
+	return applyStateFields(st, target, now, p), nil
 }
 
 /* ---------------- Tuple (edge) enforcement -------------------------------- */
@@ -364,6 +415,26 @@ func klshieldRelationshipDimension(target adapterruntime.RelationshipTarget) (ui
 // Solution: reload klshield with the new .bpf.o that includes edge maps.
 var ErrTupleUnavailable = fmt.Errorf(
 	"XDP tuple maps not available — reload klshield: klshield attach-xdp --force")
+
+func ignoreMissing(err error) error {
+	if err == nil || errors.Is(err, ebpf.ErrKeyNotExist) {
+		return nil
+	}
+	return err
+}
+
+func actionParamSummary(level fsm.Level, p EnforcementParams) string {
+	switch level {
+	case fsm.LevelSoft:
+		return fmt.Sprintf("rate_pps=%d burst=%d ttl=%s", p.SoftRate, p.SoftBurst, p.SoftTTL)
+	case fsm.LevelHard:
+		return fmt.Sprintf("rate_pps=%d burst=%d ttl=%s", p.HardRate, p.HardBurst, p.HardTTL)
+	case fsm.LevelBlock:
+		return fmt.Sprintf("ttl=%s", p.BlockTTL)
+	default:
+		return ""
+	}
+}
 
 // applyStateFields sets Level, CooldownUntil and ExpiresAt on the state after a transition.
 func applyStateFields(st fsm.State, target fsm.Level, now time.Time, p EnforcementParams) fsm.State {

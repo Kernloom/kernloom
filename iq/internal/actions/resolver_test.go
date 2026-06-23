@@ -5,6 +5,7 @@ package actions_test
 
 import (
 	"testing"
+	"time"
 
 	contracts "github.com/kernloom/kernloom-contracts"
 	"github.com/kernloom/kernloom/iq/internal/actions"
@@ -285,6 +286,120 @@ func TestResolve_GuardrailAllowsRateLimitUnknownBlastRadius(t *testing.T) {
 	res := r.Resolve(p)
 	if !res.Allowed {
 		t.Fatalf("rate limit should remain allowed, reason=%s", res.DenyReason)
+	}
+}
+
+func TestResolve_ResponseBlastRadiusRejectsUnknownHardAction(t *testing.T) {
+	r := managed("", "enforce.traffic.drop")
+	p := proposal("block", "enforce.traffic.drop")
+	p.Target = actions.ActionTarget{
+		Granularity: actions.TargetGranularitySource,
+		Value:       "203.0.113.10",
+	}
+	p.Parameters = map[string]any{
+		"blast_radius": map[string]any{
+			"unknown_behavior": "reject_hard_action",
+			"excludes": []map[string]any{{
+				"type": "group",
+				"ref":  "kernloom-admins",
+			}},
+		},
+	}
+	res := r.Resolve(p)
+	if res.Allowed {
+		t.Fatal("unknown response blast radius should deny hard action")
+	}
+	if res.DenyReason != "blast_radius_unknown_target" {
+		t.Fatalf("deny reason = %q", res.DenyReason)
+	}
+}
+
+func TestResolve_AutonomyApprovalRequiredDeniesWithoutApproval(t *testing.T) {
+	r := managed("block", "enforce.identity.disable")
+	r.RuntimeAutonomyLifecycle = &contracts.RuntimeAutonomyLifecycleSpec{
+		ApprovalRequired: []contracts.RuntimeAutonomyApprovalRequirement{{
+			Action: "enforce.identity.disable",
+		}},
+	}
+	res := r.Resolve(proposal("block", "enforce.identity.disable"))
+	if res.Allowed {
+		t.Fatal("identity disable without approval should be denied")
+	}
+	if res.DenyReason != "autonomy_approval_required(enforce.identity.disable)" {
+		t.Fatalf("deny reason = %q", res.DenyReason)
+	}
+}
+
+func TestResolve_AutonomyApprovalEvidenceAllowsAction(t *testing.T) {
+	r := managed("block", "enforce.identity.disable")
+	r.RuntimeAutonomyLifecycle = &contracts.RuntimeAutonomyLifecycleSpec{
+		ApprovalRequired: []contracts.RuntimeAutonomyApprovalRequirement{{
+			Action: "enforce.identity.disable",
+		}},
+	}
+	p := proposal("block", "enforce.identity.disable")
+	p.Parameters = map[string]any{"approval_granted": true}
+	res := r.Resolve(p)
+	if !res.Allowed {
+		t.Fatalf("approved action denied: %s", res.DenyReason)
+	}
+}
+
+func TestResolve_AutonomyMaxActionDurationClampsTTL(t *testing.T) {
+	r := managed("block", "enforce.traffic.drop")
+	r.RuntimeAutonomyLifecycle = &contracts.RuntimeAutonomyLifecycleSpec{
+		MaxActionDuration: []contracts.RuntimeAutonomyActionDurationLimit{{
+			Action:   "enforce.traffic.drop",
+			Duration: contracts.NewDuration(15 * time.Minute),
+		}},
+	}
+	p := proposal("block", "enforce.traffic.drop")
+	p.TTL = 30 * time.Minute
+	res := r.Resolve(p)
+	if !res.Allowed {
+		t.Fatalf("action denied: %s", res.DenyReason)
+	}
+	if res.TTL != 15*time.Minute {
+		t.Fatalf("ttl = %s, want 15m", res.TTL)
+	}
+	if res.DenyReason != "autonomy_max_action_duration_clamped" {
+		t.Fatalf("reason = %q", res.DenyReason)
+	}
+}
+
+func TestResolve_AutonomyRequiresAuditAnnotatesResolution(t *testing.T) {
+	r := managed("block", "enforce.traffic.drop")
+	r.RuntimeAutonomyLifecycle = &contracts.RuntimeAutonomyLifecycleSpec{RequiresAudit: true}
+	res := r.Resolve(proposal("block", "enforce.traffic.drop"))
+	if !res.Allowed {
+		t.Fatalf("action denied: %s", res.DenyReason)
+	}
+	if got := res.Parameters["requires_audit_receipt"]; got != true {
+		t.Fatalf("requires_audit_receipt = %#v", got)
+	}
+}
+
+func TestResolve_AutonomySubjectAllowanceRequiresUnknownSource(t *testing.T) {
+	r := managed("block", "enforce.traffic.rate_limit")
+	r.RuntimeAutonomyLifecycle = &contracts.RuntimeAutonomyLifecycleSpec{
+		Allow: []contracts.RuntimeAutonomyAllowance{{
+			Action:  "enforce.traffic.rate_limit",
+			Subject: contracts.RuntimeAutonomySubject{Type: "source", Ref: "unknown"},
+		}},
+	}
+	res := r.Resolve(proposal("hard", "enforce.traffic.rate_limit"))
+	if res.Allowed {
+		t.Fatal("missing source classification should be denied")
+	}
+	if res.DenyReason != "autonomy_subject_not_allowed(source:unknown)" {
+		t.Fatalf("deny reason = %q", res.DenyReason)
+	}
+
+	p := proposal("hard", "enforce.traffic.rate_limit")
+	p.Parameters = map[string]any{"source_class": "unknown"}
+	res = r.Resolve(p)
+	if !res.Allowed {
+		t.Fatalf("unknown source should be allowed: %s", res.DenyReason)
 	}
 }
 

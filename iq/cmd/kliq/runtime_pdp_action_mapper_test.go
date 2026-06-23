@@ -9,6 +9,7 @@ import (
 
 	contracts "github.com/kernloom/kernloom-contracts"
 	"github.com/kernloom/kernloom/iq/internal/actions"
+	"github.com/kernloom/kernloom/iq/internal/runtimepdp"
 )
 
 func TestRuntimeDecisionToActionProposalSource(t *testing.T) {
@@ -112,5 +113,25 @@ func TestRuntimeDecisionToActionProposalSkipsNonApplyEffect(t *testing.T) {
 	}, "source-1", 0.5, time.Now())
 	if ok || reason == "" {
 		t.Fatalf("expected non-apply effect to be skipped, ok=%v reason=%q", ok, reason)
+	}
+}
+
+func TestRuntimePDPActionProposalWithEvidenceAddsDropRate(t *testing.T) {
+	prop := actions.ActionProposal{
+		DesiredAction: "enforce.traffic.drop",
+		DesiredLevel:  "block",
+	}
+	prop = runtimePDPActionProposalWithEvidence(prop, runtimepdp.Input{
+		Context: runtimepdp.ContextSnapshot{
+			Signals: map[string]any{
+				"enforcement": map[string]any{
+					"drop_rate": 37.5,
+				},
+			},
+		},
+	})
+
+	if got := prop.Parameters["evidence_drop_rl_rate"]; got != 37.5 {
+		t.Fatalf("evidence_drop_rl_rate = %#v", got)
 	}
 }

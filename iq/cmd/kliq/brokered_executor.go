@@ -6,6 +6,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -23,6 +24,10 @@ import (
 // durable receipt persistence. Satisfied by *sqlite.Store.
 type receiptStore interface {
 	PersistReceipt(ctx context.Context, r decision.EnforcementReceipt) error
+}
+
+type actionLeaseLookupStore interface {
+	FindActiveActionLease(ctx context.Context, adapterID, target, action, level string) (decision.ActionLease, bool, error)
 }
 
 type brokeredActionExecutor struct {
@@ -60,6 +65,7 @@ func (e *brokeredActionExecutor) AddSidecar(s actions.PEPSidecar) {
 }
 
 func (e *brokeredActionExecutor) ApplySource(target adapterruntime.SourceTarget, st fsm.State, r actions.ActionResolution, params adapterruntime.EnforcementParams, now time.Time) (fsm.State, actions.ActionResult) {
+	params = enforcementParamsForResolution(params, r)
 	if !shouldBrokerLease(r) {
 		return e.sourceExecutor.ApplySource(target, st, r, params, now)
 	}
@@ -105,6 +111,69 @@ func (e *brokeredActionExecutor) ApplySourceObserveOverride(target adapterruntim
 	return next, result
 }
 
+func (e *brokeredActionExecutor) activeSourceState(sourceID string, now time.Time) fsm.State {
+	if e == nil || e.sourcePEP == nil || sourceID == "" {
+		return fsm.State{}
+	}
+	store, ok := e.store.(actionLeaseLookupStore)
+	if !ok {
+		return fsm.State{}
+	}
+	target := actions.TargetGranularitySource + ":" + sourceID
+	adapterID := e.sourcePEP.AdapterID()
+	var best decision.ActionLease
+	bestWeight := 0
+	for _, action := range brokeredSourceActionOrder {
+		for _, level := range []string{"block", "hard", "soft"} {
+			lease, ok, err := store.FindActiveActionLease(context.Background(), adapterID, target, action, level)
+			if err != nil {
+				kliqLog.Printf("WARN: lookup active lease for %s: %v", sourceID, err)
+				continue
+			}
+			if !ok || (!lease.ExpiresAt.IsZero() && !lease.ExpiresAt.After(now.UTC())) {
+				continue
+			}
+			weight := brokeredSourceLeaseStrength(lease.Action, lease.Level)
+			if weight > bestWeight {
+				best = lease
+				bestWeight = weight
+			}
+		}
+	}
+	if bestWeight == 0 {
+		return fsm.State{}
+	}
+	return fsm.State{
+		Level:     actions.ParseFSMLevel(best.Level),
+		ExpiresAt: best.ExpiresAt,
+	}
+}
+
+var brokeredSourceActionOrder = []string{
+	"enforce.traffic.drop",
+	"enforce.access.deny",
+	"enforce.network.quarantine",
+	"enforce.identity.disable",
+	"enforce.traffic.rate_limit",
+}
+
+func brokeredSourceLeaseStrength(action, level string) int {
+	switch strings.TrimSpace(action) {
+	case "enforce.traffic.drop", "enforce.access.deny", "enforce.network.quarantine", "enforce.identity.disable":
+		return 300
+	}
+	switch strings.TrimSpace(level) {
+	case "block":
+		return 300
+	case "hard":
+		return 200
+	case "soft":
+		return 100
+	default:
+		return 0
+	}
+}
+
 func (e *brokeredActionExecutor) ApplyRelationship(target adapterruntime.RelationshipTarget, r actions.ActionResolution, now time.Time) actions.ActionResult {
 	if !r.Allowed {
 		return actions.ActionResult{
@@ -125,6 +194,8 @@ func (e *brokeredActionExecutor) ApplyRelationship(target adapterruntime.Relatio
 	if e.relationshipBroker == nil || e.relationshipPEP == nil {
 		return relationshipSkippedResult(r, now, "relationship broker unavailable")
 	}
+	e.relationshipPEP.applyMu.Lock()
+	defer e.relationshipPEP.applyMu.Unlock()
 	e.relationshipPEP.begin(target)
 	lease, receipt, err := e.relationshipBroker.Apply(context.Background(), r)
 	applied := e.relationshipPEP.finish()
@@ -162,6 +233,9 @@ func (e *brokeredActionExecutor) ApplyRelationship(target adapterruntime.Relatio
 }
 
 func (e *brokeredActionExecutor) applyBrokered(ctx applyContext) (fsm.State, actions.ActionResult) {
+	ctx.resolution = resolutionWithExecutionMetadata(ctx.resolution, ctx.params)
+	e.sourcePEP.applyMu.Lock()
+	defer e.sourcePEP.applyMu.Unlock()
 	e.sourcePEP.begin(ctx)
 	lease, receipt, err := e.sourceBroker.Apply(context.Background(), ctx.resolution)
 	applied := e.sourcePEP.finish()
@@ -237,6 +311,80 @@ func shouldBrokerLease(r actions.ActionResolution) bool {
 	return r.Allowed && r.TTL > 0 && r.ExecutableLevel != "" && r.ExecutableLevel != "observe"
 }
 
+func resolutionWithExecutionMetadata(r actions.ActionResolution, params adapterruntime.EnforcementParams) actions.ActionResolution {
+	metadata := copyAnyMap(r.Parameters)
+	if metadata == nil {
+		metadata = map[string]any{}
+	}
+	metadata["execution_dry_run"] = params.DryRun
+	metadata["execution_soft_rate"] = params.SoftRate
+	metadata["execution_soft_burst"] = params.SoftBurst
+	metadata["execution_hard_rate"] = params.HardRate
+	metadata["execution_hard_burst"] = params.HardBurst
+	r.Parameters = metadata
+	return r
+}
+
+func enforcementParamsForResolution(params adapterruntime.EnforcementParams, r actions.ActionResolution) adapterruntime.EnforcementParams {
+	if r.TTL > 0 {
+		switch actions.ParseFSMLevel(r.ExecutableLevel) {
+		case fsm.LevelSoft:
+			params.SoftTTL = r.TTL
+		case fsm.LevelHard:
+			params.HardTTL = r.TTL
+		case fsm.LevelBlock:
+			params.BlockTTL = r.TTL
+		}
+	}
+	rate := uint64Param(r.Parameters, "rate_pps")
+	if rate <= 0 {
+		return params
+	}
+	burst := uint64Param(r.Parameters, "burst")
+	if burst <= 0 {
+		burst = rate * 2
+	}
+	switch actions.ParseFSMLevel(r.ExecutableLevel) {
+	case fsm.LevelSoft:
+		params.SoftRate = rate
+		params.SoftBurst = burst
+	case fsm.LevelHard:
+		params.HardRate = rate
+		params.HardBurst = burst
+	}
+	return params
+}
+
+func uint64Param(params map[string]any, key string) uint64 {
+	if len(params) == 0 {
+		return 0
+	}
+	switch value := params[key].(type) {
+	case uint64:
+		return value
+	case uint:
+		return uint64(value)
+	case int:
+		if value > 0 {
+			return uint64(value)
+		}
+	case int64:
+		if value > 0 {
+			return uint64(value)
+		}
+	case float64:
+		if value > 0 {
+			return uint64(value)
+		}
+	case string:
+		parsed, err := strconv.ParseUint(strings.TrimSpace(value), 10, 64)
+		if err == nil {
+			return parsed
+		}
+	}
+	return 0
+}
+
 func relationshipSkippedResult(r actions.ActionResolution, now time.Time, reason string) actions.ActionResult {
 	if reason == "" {
 		reason = r.DenyReason
@@ -278,6 +426,7 @@ type applyOutcome struct {
 type brokeredSourcePEP struct {
 	sourceExecutor *actions.SourceActionExecutor
 	params         func() adapterruntime.EnforcementParams
+	applyMu        sync.Mutex
 	mu             sync.Mutex
 	currentTokens  map[string]string
 	active         *applyContext
@@ -362,11 +511,12 @@ func (p *brokeredSourcePEP) clearCurrentFencingToken(lease decision.ActionLease)
 }
 
 type brokeredRelationshipPEP struct {
-	pep    adapterruntime.RelationshipPEP
-	mu     sync.Mutex
-	tokens map[string]string
-	active *adapterruntime.RelationshipTarget
-	last   actions.ActionResult
+	pep     adapterruntime.RelationshipPEP
+	applyMu sync.Mutex
+	mu      sync.Mutex
+	tokens  map[string]string
+	active  *adapterruntime.RelationshipTarget
+	last    actions.ActionResult
 }
 
 func newBrokeredRelationshipPEP(pep adapterruntime.RelationshipPEP) *brokeredRelationshipPEP {

@@ -85,6 +85,31 @@ type graphStrikeMsg struct {
 	addToCands bool
 }
 
+func runtimeStateSummary(ctx context.Context, store *sstore.Store, now time.Time, c cfg, sources *sourceStates) string {
+	if c.RuntimePDPMode != string(PDPModeActive) {
+		softN, hardN, blockN := sources.levelCounts()
+		return fmt.Sprintf("fsm{soft=%d hard=%d block=%d}", softN, hardN, blockN)
+	}
+	leases, err := store.ListActionLeasesByStatus(ctx, decision.ActionLeaseActive)
+	if err != nil {
+		return fmt.Sprintf("runtime{lease_lookup_error=%q}", err.Error())
+	}
+	active, rateLimit, block := 0, 0, 0
+	for _, lease := range leases {
+		if !lease.ExpiresAt.IsZero() && !now.Before(lease.ExpiresAt) {
+			continue
+		}
+		active++
+		switch lease.Action {
+		case "enforce.traffic.rate_limit":
+			rateLimit++
+		case "enforce.traffic.drop", "enforce.access.deny", "enforce.network.quarantine", "enforce.identity.disable":
+			block++
+		}
+	}
+	return fmt.Sprintf("runtime{active_leases=%d rate_limit=%d block=%d}", active, rateLimit, block)
+}
+
 // main is organised into the following phases:
 //
 //	§1 Subcommand dispatch  (before flag parse; early return on match)
@@ -228,7 +253,7 @@ func main() {
 		// In managed mode: LKG bundle may override pdp_profile and adapters.
 		if c.Mode == string(corepolicy.ModeManaged) {
 			if lkgBytes := loadLastKnownGoodBundle(c.StatePath); lkgBytes != nil {
-				if b, _, err := parseTrustedRuntimeBundle(lkgBytes, &c); err == nil {
+				if b, _, err := parseTrustedRuntimeBundle(lkgBytes, &c, c.GraphNodeID); err == nil {
 					if profileName := runtimeBundlePDPProfileName(b); profileName != "" {
 						kliqLog.Printf("PDP profile from bundle: %s (was: %s)", profileName, c.ProfileName)
 						c.ProfileName = profileName
@@ -302,7 +327,7 @@ func main() {
 	// activate graph learning before adapters are initialized.
 	if c.FeatureProfile == "" {
 		if lkgBytes := loadLastKnownGoodBundle(c.StatePath); lkgBytes != nil {
-			if b, _, err := parseTrustedRuntimeBundle(lkgBytes, &c); err == nil {
+			if b, _, err := parseTrustedRuntimeBundle(lkgBytes, &c, c.GraphNodeID); err == nil {
 				if graphLifecycleEnabled(b.Spec.GraphLifecycle) {
 					c.GraphEnabled = true
 					kliqLog.Printf("Graph feature profile requested by bundle graph lifecycle")
@@ -557,10 +582,13 @@ func main() {
 		return c.toPEPParams()
 	})
 	actionBroker, abErr := actionbroker.New(actionbroker.Config{
-		NodeID: nodeID,
-		Store:  stateStore,
-		PEP:    brokerPEP,
-		Now:    func() time.Time { return time.Now().UTC() },
+		NodeID:              nodeID,
+		Store:               stateStore,
+		PEP:                 brokerPEP,
+		Now:                 func() time.Time { return time.Now().UTC() },
+		AutonomyAllowances:  runtimeAutonomyAllowances(c.RuntimeAutonomyLifecycle),
+		MaxRenewals:         runtimeAutonomyMaxRenewals(c.RuntimeAutonomyLifecycle),
+		RequireAuditReceipt: runtimeAutonomyRequiresAudit(c.RuntimeAutonomyLifecycle),
 	})
 	if abErr != nil {
 		log.Fatalf("action broker init: %v", abErr)
@@ -571,18 +599,29 @@ func main() {
 		relationshipBrokerPEP = newBrokeredRelationshipPEP(relationshipPEP)
 		var rbErr error
 		relationshipBroker, rbErr = actionbroker.New(actionbroker.Config{
-			NodeID: nodeID,
-			Store:  stateStore,
-			PEP:    relationshipBrokerPEP,
-			Now:    func() time.Time { return time.Now().UTC() },
+			NodeID:              nodeID,
+			Store:               stateStore,
+			PEP:                 relationshipBrokerPEP,
+			Now:                 func() time.Time { return time.Now().UTC() },
+			AutonomyAllowances:  runtimeAutonomyAllowances(c.RuntimeAutonomyLifecycle),
+			MaxRenewals:         runtimeAutonomyMaxRenewals(c.RuntimeAutonomyLifecycle),
+			RequireAuditReceipt: runtimeAutonomyRequiresAudit(c.RuntimeAutonomyLifecycle),
 		})
 		if rbErr != nil {
 			log.Fatalf("relationship action broker init: %v", rbErr)
 		}
 	}
 	executor := newBrokeredActionExecutor(sourceExecutor, actionBroker, brokerPEP, relationshipBroker, relationshipBrokerPEP, stateStore, nodeID)
-	runtimeFacts := newRuntimePDPFactStore(stateStore)
+	if n, err := supersedeStaleDryRunExecutionLeases(context.Background(), stateStore, c.DryRun, time.Now().UTC()); err != nil {
+		kliqLog.Printf("WARNING: stale dry-run lease reconciliation failed: %v", err)
+	} else if n > 0 {
+		kliqLog.Printf("Action broker superseded %d stale dry-run leases before real enforcement startup", n)
+	}
 	reactionEngine := newRuntimeReactionEngine()
+	if err := reactionEngine.Load(context.Background(), stateStore, nodeID); err != nil {
+		kliqLog.Printf("WARNING: runtime reaction state load failed: %v", err)
+	}
+	runtimeFacts := newRuntimePDPCompositeFactProvider(newRuntimePDPFactStore(stateStore), reactionEngine)
 	for _, sidecar := range sourcePEPSidecars {
 		sidecar := sidecar
 		executor.AddSidecar(sourcePEPSidecar{
@@ -694,7 +733,7 @@ func main() {
 	// Apply last-known-good bundle on startup (fail_static).
 	if lkg := loadLastKnownGoodBundle(c.StatePath); lkg != nil {
 		kliqLog.Printf("MANAGED: applying last-known-good bundle from disk")
-		applyBundleUpdate(lkg, &c, &bsCtl, &graphCtl, &ms, stFile, runtimePolicyUpdateCh, resolver)
+		applyBundleUpdate(lkg, nodeID, &c, &bsCtl, &graphCtl, &ms, stFile, runtimePolicyUpdateCh, resolver, actionBroker, relationshipBroker)
 	}
 
 	// Pre-set HasPolicyPack from persisted state so the startup INVENTORY log
@@ -734,6 +773,7 @@ func main() {
 			break
 		}
 	}
+	applyNodeLabels(&inv, parseNodeLabels(c.NodeLabels))
 	logInventoryAndReport(inv, report, c.StatePath)
 
 	// tupleActive is set after edge-map probe and read by the heartbeat goroutine.
@@ -964,6 +1004,8 @@ func main() {
 		RuntimeFacts:     runtimeFacts,
 		Resolver:         resolver,
 		Executor:         executor,
+		ReactionEngine:   reactionEngine,
+		Config:           &c,
 	})
 
 	// Graph pipeline (optional) — uses generic relationship learner + state store.
@@ -1226,7 +1268,7 @@ func main() {
 		// Process pending bundle update (non-blocking; delivered by heartbeat goroutine).
 		select {
 		case rawBundle := <-bundleUpdateCh:
-			applyBundleUpdate(rawBundle, &c, &bsCtl, &graphCtl, &ms, stFile, runtimePolicyUpdateCh, resolver)
+			applyBundleUpdate(rawBundle, nodeID, &c, &bsCtl, &graphCtl, &ms, stFile, runtimePolicyUpdateCh, resolver, actionBroker, relationshipBroker)
 			// Persist updated managed state immediately.
 			if stFile != nil {
 				stFile.Active.ForgeBundleGeneration = ms.BundleGeneration
@@ -1366,14 +1408,14 @@ func main() {
 
 		tickN++
 		if tickN%30 == 1 {
-			softN, hardN, blockN := sources.levelCounts()
 			topSummary := "none"
 			if len(cands) > 0 {
 				top := cands[0]
 				topSummary = fmt.Sprintf("%s score=%.2f", top.sourceID(), top.score())
 			}
-			kliqLog.Printf("TICK#%d sources=%d cands=%d samples=%d clean=%v fsm{soft=%d hard=%d block=%d} %s top: %s",
-				tickN, seenForLearn, len(cands), tuner.SampleCount(), clean, softN, hardN, blockN,
+			stateSummary := runtimeStateSummary(context.Background(), stateStore, nowWall, c, sources)
+			kliqLog.Printf("TICK#%d sources=%d cands=%d samples=%d clean=%v %s %s top: %s",
+				tickN, seenForLearn, len(cands), tuner.SampleCount(), clean, stateSummary,
 				tuner.CurrentThresholds().Summary(), topSummary)
 		}
 

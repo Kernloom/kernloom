@@ -5,7 +5,9 @@ package actions
 
 import (
 	"fmt"
+	"strconv"
 	"strings"
+	"time"
 
 	contracts "github.com/kernloom/kernloom-contracts"
 	"github.com/kernloom/kernloom/pkg/core/fsm"
@@ -41,6 +43,11 @@ type PolicyResolver struct {
 	// evaluated after action ceilings and capability checks, before any PEP
 	// mutation is authorized.
 	RuntimeGuardrails []contracts.RuntimeGuardrail
+
+	// RuntimeAutonomyLifecycle carries customer autonomy boundaries compiled by
+	// Forge. Stateless gates are enforced here; stateful lease checks live in
+	// the action broker.
+	RuntimeAutonomyLifecycle *contracts.RuntimeAutonomyLifecycleSpec
 }
 
 // Resolve evaluates a proposal and returns an authorized (or denied/downgraded) resolution.
@@ -123,12 +130,230 @@ func (r *PolicyResolver) Resolve(p ActionProposal) ActionResolution {
 		base.ExecutableLevel = "observe"
 		return base
 	}
+	if reason := actionBlastRadiusDenyReason(p.Parameters, execAction, execLevel, p.Target); reason != "" {
+		base.Allowed = false
+		base.DenyReason = reason
+		base.ExecutableAction = ""
+		base.ExecutableLevel = "observe"
+		return base
+	}
+	if reason := r.autonomySubjectAllowanceDenyReason(execAction, p); reason != "" {
+		base.Allowed = false
+		base.DenyReason = reason
+		base.ExecutableAction = ""
+		base.ExecutableLevel = "observe"
+		return base
+	}
+	if reason := r.autonomyApprovalDenyReason(execAction, p.Parameters); reason != "" {
+		base.Allowed = false
+		base.DenyReason = reason
+		base.ExecutableAction = ""
+		base.ExecutableLevel = "observe"
+		return base
+	}
+
+	if maxDuration := r.autonomyMaxActionDuration(execAction); maxDuration > 0 && base.TTL > maxDuration {
+		base.TTL = maxDuration
+		downgradeReason = appendResolutionReason(downgradeReason, "autonomy_max_action_duration_clamped")
+	}
+	if r.autonomyRequiresAudit() {
+		base.Parameters = ensureAnyMap(base.Parameters)
+		base.Parameters["requires_audit_receipt"] = true
+	}
 
 	base.Allowed = true
 	base.ExecutableAction = execAction
 	base.ExecutableLevel = execLevel
 	base.DenyReason = downgradeReason
 	return base
+}
+
+func (r *PolicyResolver) autonomySubjectAllowanceDenyReason(action string, p ActionProposal) string {
+	lifecycle := r.RuntimeAutonomyLifecycle
+	if lifecycle == nil || action == "" {
+		return ""
+	}
+	for _, allowance := range lifecycle.Allow {
+		if strings.TrimSpace(allowance.Action) != action {
+			continue
+		}
+		if allowance.Subject.Type == "" && allowance.Subject.Ref == "" {
+			continue
+		}
+		if allowance.Subject.Type != "source" || allowance.Subject.Ref != "unknown" {
+			continue
+		}
+		if sourceClassifiesAsUnknown(p) {
+			return ""
+		}
+		return "autonomy_subject_not_allowed(source:unknown)"
+	}
+	return ""
+}
+
+func (r *PolicyResolver) autonomyApprovalDenyReason(action string, params map[string]any) string {
+	lifecycle := r.RuntimeAutonomyLifecycle
+	if lifecycle == nil || action == "" {
+		return ""
+	}
+	for _, req := range lifecycle.ApprovalRequired {
+		if strings.TrimSpace(req.Action) != action {
+			continue
+		}
+		if approvalGranted(params) {
+			return ""
+		}
+		return "autonomy_approval_required(" + action + ")"
+	}
+	return ""
+}
+
+func sourceClassifiesAsUnknown(p ActionProposal) bool {
+	for _, raw := range []any{
+		p.Parameters["source_class"],
+		p.Parameters["source_selector"],
+		p.Parameters["selector"],
+		p.Target.Attributes["source_class"],
+		p.Target.Attributes["source_selector"],
+		p.Target.Attributes["selector"],
+	} {
+		value := strings.TrimSpace(fmt.Sprint(raw))
+		switch value {
+		case "unknown", "unknown_source":
+			return true
+		}
+	}
+	return false
+}
+
+func (r *PolicyResolver) autonomyMaxActionDuration(action string) time.Duration {
+	lifecycle := r.RuntimeAutonomyLifecycle
+	if lifecycle == nil || action == "" {
+		return 0
+	}
+	for _, limit := range lifecycle.MaxActionDuration {
+		if strings.TrimSpace(limit.Action) == action && limit.Duration.Duration > 0 {
+			return limit.Duration.Duration
+		}
+	}
+	return 0
+}
+
+func (r *PolicyResolver) autonomyRequiresAudit() bool {
+	return r.RuntimeAutonomyLifecycle != nil && r.RuntimeAutonomyLifecycle.RequiresAudit
+}
+
+func approvalGranted(params map[string]any) bool {
+	for _, key := range []string{"approval_granted", "operator_approved", "approved"} {
+		if boolAny(params[key]) {
+			return true
+		}
+	}
+	return false
+}
+
+func ensureAnyMap(values map[string]any) map[string]any {
+	if values != nil {
+		return values
+	}
+	return map[string]any{}
+}
+
+func appendResolutionReason(existing, reason string) string {
+	if existing == "" {
+		return reason
+	}
+	return existing + "," + reason
+}
+
+func boolAny(raw any) bool {
+	switch v := raw.(type) {
+	case bool:
+		return v
+	case string:
+		parsed, err := strconv.ParseBool(strings.TrimSpace(v))
+		return err == nil && parsed
+	default:
+		return false
+	}
+}
+
+func actionBlastRadiusDenyReason(params map[string]any, action, level string, target ActionTarget) string {
+	subjects, unknownBehavior := actionBlastRadiusSubjects(params)
+	if len(subjects) == 0 {
+		return ""
+	}
+	for _, subject := range subjects {
+		matched, unknown := guardrailSubjectMatch(subject, target)
+		if matched {
+			return "blast_radius_protected_subject"
+		}
+		if unknown && blastRadiusUnknownRejects(unknownBehavior, action, level) {
+			return "blast_radius_unknown_target"
+		}
+	}
+	return ""
+}
+
+func actionBlastRadiusSubjects(params map[string]any) ([]contracts.RuntimeGuardrailSubject, string) {
+	if len(params) == 0 {
+		return nil, ""
+	}
+	var subjects []contracts.RuntimeGuardrailSubject
+	unknownBehavior := ""
+	if raw, ok := params["blast_radius"]; ok {
+		if m, ok := raw.(map[string]any); ok {
+			unknownBehavior = strings.TrimSpace(fmt.Sprint(m["unknown_behavior"]))
+			subjects = append(subjects, actionBlastRadiusSubjectList(m["excludes"])...)
+		}
+	}
+	if group := strings.TrimSpace(fmt.Sprint(params["requires_target_excludes_group"])); group != "" && group != "<nil>" {
+		subjects = append(subjects, contracts.RuntimeGuardrailSubject{Type: "group", Ref: group})
+		if unknownBehavior == "" {
+			unknownBehavior = "reject_hard_action"
+		}
+	}
+	return subjects, unknownBehavior
+}
+
+func actionBlastRadiusSubjectList(raw any) []contracts.RuntimeGuardrailSubject {
+	var out []contracts.RuntimeGuardrailSubject
+	switch values := raw.(type) {
+	case []map[string]string:
+		for _, item := range values {
+			out = append(out, contracts.RuntimeGuardrailSubject{Type: item["type"], Ref: item["ref"]})
+		}
+	case []map[string]any:
+		for _, item := range values {
+			out = append(out, contracts.RuntimeGuardrailSubject{Type: fmt.Sprint(item["type"]), Ref: fmt.Sprint(item["ref"])})
+		}
+	case []any:
+		for _, item := range values {
+			if typed, ok := item.(map[string]any); ok {
+				out = append(out, contracts.RuntimeGuardrailSubject{Type: fmt.Sprint(typed["type"]), Ref: fmt.Sprint(typed["ref"])})
+			}
+		}
+	}
+	cleaned := out[:0]
+	for _, subject := range out {
+		subject.Type = strings.TrimSpace(subject.Type)
+		subject.Ref = strings.TrimSpace(subject.Ref)
+		if subject.Type != "" && subject.Ref != "" {
+			cleaned = append(cleaned, subject)
+		}
+	}
+	return cleaned
+}
+
+func blastRadiusUnknownRejects(behavior, action, level string) bool {
+	if behavior == "" {
+		behavior = "reject_hard_action"
+	}
+	behavior = strings.ReplaceAll(strings.ToLower(strings.TrimSpace(behavior)), "-", "_")
+	if behavior == "reject_action" {
+		return true
+	}
+	return behavior == "reject_hard_action" && isHardRuntimeAction(action, level)
 }
 
 func (r *PolicyResolver) guardrailDenyReason(action, level string, target ActionTarget) string {

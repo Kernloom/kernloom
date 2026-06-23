@@ -83,12 +83,21 @@ DEFAULT_SCENARIOS=(
 )
 
 resolve_scenarios() {
-  if [[ -z "${KLT_SCENARIOS:-}" ]]; then
+  local items=()
+  if [[ "$#" -gt 0 ]]; then
+    items=("$@")
+  elif [[ -n "${KLT_SCENARIOS:-}" ]]; then
+    local item
+    for item in $KLT_SCENARIOS; do
+      items+=("$item")
+    done
+  else
     printf '%s\n' "${DEFAULT_SCENARIOS[@]}"
     return
   fi
+
   local item
-  for item in $KLT_SCENARIOS; do
+  for item in "${items[@]}"; do
     if [[ -f "$item" ]]; then
       printf '%s\n' "$item"
     elif [[ -f "tests/integration/scenarios/$item" ]]; then
@@ -99,7 +108,7 @@ resolve_scenarios() {
   done
 }
 
-mapfile -t SCENARIOS < <(resolve_scenarios)
+mapfile -t SCENARIOS < <(resolve_scenarios "$@")
 for scenario in "${SCENARIOS[@]}"; do
   [[ -f "$scenario" ]] || {
     echo "[runner] ERROR: scenario not found: $scenario" >&2
@@ -110,11 +119,11 @@ done
 needs_forge=false
 for scenario in "${SCENARIOS[@]}"; do
   case "$(basename "$scenario")" in
-    09_*|10_*) needs_forge=true ;;
+    09_*|10_*|12_*) needs_forge=true ;;
   esac
 done
 
-# Build forge binary for scenarios 09+10 (no XDP required).
+# Build forge binary for scenarios 09, 10 and 12 (no XDP required).
 # Skips silently if the kernloom-forge repo is not found — scenarios will
 # then fail with a clear "forge not found" message rather than silently skip.
 if [[ "$needs_forge" == "true" && "${KLT_FORGE_SKIP_BUILD:-0}" != "1" ]]; then

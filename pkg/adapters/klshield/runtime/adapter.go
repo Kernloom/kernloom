@@ -31,7 +31,11 @@ const (
 	AttributeBPS                  = "klshield.bps"
 	AttributeSynRate              = "klshield.syn_rate"
 	AttributeScanRate             = "klshield.scan_rate"
+	AttributePassRate             = "klshield.pass_rate"
+	AttributeDropAllowRate        = "klshield.drop_allow_rate"
+	AttributeDropDenyRate         = "klshield.drop_deny_rate"
 	AttributeDropRL               = "klshield.drop_rl_rate"
+	AttributeDropTotalRate        = "klshield.drop_total_rate"
 	AttributeSeverity             = "klshield.severity"
 	AttributeTrigPPS              = "klshield.trig_pps"
 	AttributeTrigBPS              = "klshield.trig_bps"
@@ -274,7 +278,9 @@ func (a *Adapter) observe4(ctx context.Context, tick adapterruntime.RuntimeTick)
 	for it.Next(&key, &val) {
 		curr := counterSnapshot{
 			Pkts: val.Pkts, Bytes: val.Bytes, Syn: val.Syn,
-			DportChanges: val.DportChanges, DropRL: val.DropRL,
+			DportChanges: val.DportChanges,
+			Pass:         val.Pass, DropAllow: val.DropAllow, DropDeny: val.DropDeny,
+			DropRL:   val.DropRL,
 			LastWall: tick.Now,
 		}
 		prev, ok := a.prev4[key]
@@ -313,7 +319,9 @@ func (a *Adapter) observe6(ctx context.Context, tick adapterruntime.RuntimeTick)
 		ip := key.IP
 		curr := counterSnapshot{
 			Pkts: val.Pkts, Bytes: val.Bytes, Syn: val.Syn,
-			DportChanges: val.DportChanges, DropRL: val.DropRL,
+			DportChanges: val.DportChanges,
+			Pass:         val.Pass, DropAllow: val.DropAllow, DropDeny: val.DropDeny,
+			DropRL:   val.DropRL,
 			LastWall: tick.Now,
 		}
 		prev, ok := a.prev6[ip]
@@ -383,7 +391,11 @@ func (a *Adapter) observationFor(ctx context.Context, now time.Time, subject obs
 			AttributeBPS:                  formatFloat(sample.BPS),
 			AttributeSynRate:              formatFloat(sample.SynRate),
 			AttributeScanRate:             formatFloat(sample.ScanRate),
+			AttributePassRate:             formatFloat(sample.PassRate),
+			AttributeDropAllowRate:        formatFloat(sample.DropAllowRate),
+			AttributeDropDenyRate:         formatFloat(sample.DropDenyRate),
 			AttributeDropRL:               formatFloat(sample.DropRLRate),
+			AttributeDropTotalRate:        formatFloat(sample.DropTotalRate),
 			AttributeSeverity:             formatFloat(severity),
 			AttributeTrigPPS:              formatFloat(cfg.TrigPPS),
 			AttributeTrigBPS:              formatFloat(cfg.TrigBPS),

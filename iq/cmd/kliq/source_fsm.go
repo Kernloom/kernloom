@@ -214,10 +214,10 @@ func (s *sourceStates) sweepInactive(processed processedSources, now time.Time, 
 			m.Target = sourceTargetFromID(sourceID)
 		}
 		intent := evaluateFSMIntent(m, entry.state, now, c)
-		entry.state = processRuntimePDPDecisionForCandidate(m, entry.state, intent, now, c, resolver, executor, runner, nodeID, facts)
 		if reactions != nil {
 			entry.state = reactions.EvaluateCandidate(m, entry.state, now, c, resolver, executor, nodeID)
 		}
+		entry.state = processRuntimePDPDecisionForCandidate(m, entry.state, intent, now, c, resolver, executor, runner, nodeID, facts)
 		s.entries[sourceID] = entry
 	}
 }
@@ -241,6 +241,9 @@ func processCandidateRuntimePDP(
 	st.LastSeenWallTime = now
 
 	sourceID := m.sourceID()
+	if c.RuntimePDPMode == string(PDPModeActive) {
+		st = projectRuntimePDPLeaseState(st, m, nodeID, facts, now)
+	}
 
 	wlHit := wl.MatchSource(sourceID)
 	fbHit := fb.MatchSource(sourceID)
@@ -264,10 +267,11 @@ func processCandidateRuntimePDP(
 	}
 
 	intent := evaluateFSMIntent(m, st, now, c)
-	next := processRuntimePDPDecisionForCandidate(m, st, intent, now, c, resolver, executor, runner, nodeID, facts)
+	reactionState := st
 	if reactions != nil {
-		next = reactions.EvaluateCandidate(m, next, now, c, resolver, executor, nodeID)
+		reactionState = reactions.EvaluateCandidate(m, reactionState, now, c, resolver, executor, nodeID)
 	}
+	next := processRuntimePDPDecisionForCandidate(m, reactionState, intent, now, c, resolver, executor, runner, nodeID, facts)
 
 	if next.Level != st.Level {
 		kliqLog.Printf("STATE %s %s->%s authority=runtime-pdp strikes=%d up=%d down=%d noncomp=%d score=%.2f %s",
@@ -307,7 +311,7 @@ func processRuntimePDPDecisionForCandidate(
 	mode, _ := runner.getMode()
 	prefix := runtimePDPDecisionLogPrefix(mode)
 	input := runtimePDPInputForCandidate(nodeID, m, current, intent, c, facts, now)
-	dec, matched, loaded, err := runner.decide(input)
+	dec, matched, loaded, traces, err := runner.decideWithTrace(input)
 	if err != nil {
 		kliqLog.Printf("%s candidate decide error %s: %v", prefix, describeRuntimeCandidate(m, intent), err)
 		return mergeFSMRuntimeState(current, intent.SignalState)
@@ -319,6 +323,9 @@ func processRuntimePDPDecisionForCandidate(
 		return mergeFSMRuntimeState(current, intent.SignalState)
 	}
 	if !matched {
+		if trace := summarizeRuntimePDPTrace(traces); shouldLogRuntimePDPNoMatch(input, intent) && trace != "" {
+			kliqLog.Printf("%s no rule matched %s trace=%s", prefix, describeRuntimeCandidate(m, intent), trace)
+		}
 		return mergeFSMRuntimeState(current, intent.SignalState)
 	}
 	if mode == PDPModeShadow {
@@ -332,6 +339,7 @@ func processRuntimePDPDecisionForCandidate(
 		kliqLog.Printf("%s decision skipped %s reason=%s", prefix, describeRuntimeCandidate(m, intent), reason)
 		return mergeFSMRuntimeState(current, intent.SignalState)
 	}
+	prop = runtimePDPActionProposalWithEvidence(prop, input)
 	res := resolver.Resolve(prop)
 	if res.DenyReason != "" {
 		kliqLog.Printf("ACTION-RESOLVER runtime-pdp %s %s->%s reason=%q",
@@ -379,7 +387,11 @@ func applyResolvedSourceAction(res actions.ActionResolution, executor fsmActionE
 		Subject:    observation.EntityRef{ID: res.Target.Value},
 		Attributes: copyStringMap(res.Target.Attributes),
 	}
-	executor.ApplySource(target, fsm.State{}, res, params, now)
+	current := fsm.State{}
+	if brokered, ok := executor.(*brokeredActionExecutor); ok {
+		current = brokered.activeSourceState(res.Target.Value, now)
+	}
+	executor.ApplySource(target, current, res, params, now)
 	return true
 }
 

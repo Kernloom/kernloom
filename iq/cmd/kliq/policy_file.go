@@ -8,9 +8,11 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"strings"
 	"time"
 
 	contracts "github.com/kernloom/kernloom-contracts"
+	"github.com/kernloom/kernloom/iq/internal/runtimepdp"
 	corepolicy "github.com/kernloom/kernloom/pkg/core/policy"
 	"gopkg.in/yaml.v3"
 )
@@ -163,6 +165,7 @@ func applyRuntimePolicyPackToCfg(pack contracts.RuntimePolicyPack, c *cfg) {
 	c.RuntimeDetectionRules = append([]contracts.RuntimeDetectionRule(nil), pack.Spec.DetectionRules...)
 	c.RuntimeResponseRules = append([]contracts.RuntimeResponseRule(nil), pack.Spec.ResponseRules...)
 	c.RuntimeAlertRoutes = append([]contracts.RuntimeAlertRoute(nil), pack.Spec.AlertRoutes...)
+	c.RuntimeAutonomyLifecycle = pack.Spec.AutonomyLifecycle
 	caps := runtimePolicyCapabilities(pack)
 	if len(caps) > 0 {
 		c.CapabilitiesRequired = make(map[string]bool, len(caps))
@@ -180,7 +183,7 @@ func runtimePolicyAllowsBlock(pack contracts.RuntimePolicyPack, caps []string) b
 	if isBlockAllowed(caps) {
 		return true
 	}
-	for _, rule := range pack.Spec.Rules {
+	for _, rule := range runtimepdp.EffectiveRules(pack) {
 		if runtimeActionLevel(rule.Then) == "block" {
 			return true
 		}
@@ -202,8 +205,15 @@ func runtimePolicyCapabilities(pack contracts.RuntimePolicyPack) []string {
 	for _, cap := range pack.Spec.CapabilitiesRequired {
 		add(cap)
 	}
-	for _, rule := range pack.Spec.Rules {
+	for _, rule := range runtimepdp.EffectiveRules(pack) {
 		add(rule.Then.Capability)
+	}
+	for _, response := range pack.Spec.ResponseRules {
+		for _, action := range response.Then {
+			if strings.HasPrefix(action.ID, "enforce.") {
+				add(action.ID)
+			}
+		}
 	}
 	return out
 }
@@ -215,7 +225,7 @@ func deriveRuntimePolicyMaxAction(pack contracts.RuntimePolicyPack, caps []strin
 			maxSev = sev
 		}
 	}
-	for _, rule := range pack.Spec.Rules {
+	for _, rule := range runtimepdp.EffectiveRules(pack) {
 		sev := capabilitySeverityKLIQ[normalizeCapabilityID(rule.Then.Capability)]
 		switch runtimeActionLevel(rule.Then) {
 		case "block":

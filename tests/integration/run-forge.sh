@@ -4,8 +4,9 @@
 # Can run on any standard Linux host without BPF/XDP/netns capabilities.
 #
 # Requirements:
-#   - scenarios 09/10: forge binary at $KLT_FORGE, curl, jq
-#   - scenario 12: Go toolchain; bin/kliq is built by this runner
+#   - scenario 09: Forge repo/binary, curl, jq
+#   - scenario 10: Forge repo/binary
+#   - scenario 12: Forge repo, Go toolchain; bin/forge and bin/kliq are built by this runner
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
@@ -38,12 +39,21 @@ DEFAULT_SCENARIOS=(
 )
 
 resolve_scenarios() {
-  if [[ -z "${KLT_SCENARIOS:-}" ]]; then
+  local items=()
+  if [[ "$#" -gt 0 ]]; then
+    items=("$@")
+  elif [[ -n "${KLT_SCENARIOS:-}" ]]; then
+    local item
+    for item in $KLT_SCENARIOS; do
+      items+=("$item")
+    done
+  else
     printf '%s\n' "${DEFAULT_SCENARIOS[@]}"
     return
   fi
+
   local item
-  for item in $KLT_SCENARIOS; do
+  for item in "${items[@]}"; do
     if [[ -f "$item" ]]; then
       printf '%s\n' "$item"
     elif [[ -f "tests/integration/scenarios/$item" ]]; then
@@ -55,15 +65,16 @@ resolve_scenarios() {
 }
 
 check_deps() {
-  local needs_forge="$1"
-  local needs_kliq="$2"
+  local needs_forge_api_deps="$1"
+  local needs_forge_binary="$2"
+  local needs_kliq="$3"
   local missing=()
-  if [[ "$needs_forge" == "true" ]]; then
+  if [[ "$needs_forge_api_deps" == "true" ]]; then
     for cmd in curl jq; do
       command -v "$cmd" >/dev/null 2>&1 || missing+=("$cmd")
     done
   fi
-  if [[ "$needs_kliq" == "true" ]]; then
+  if [[ "$needs_forge_binary" == "true" || "$needs_kliq" == "true" ]]; then
     command -v "$KLT_GO" >/dev/null 2>&1 || missing+=("$KLT_GO")
   fi
   if [[ ${#missing[@]} -gt 0 ]]; then
@@ -136,7 +147,7 @@ on_exit() {
 }
 trap on_exit EXIT
 
-mapfile -t SCENARIOS < <(resolve_scenarios)
+mapfile -t SCENARIOS < <(resolve_scenarios "$@")
 for scenario in "${SCENARIOS[@]}"; do
   [[ -f "$scenario" ]] || {
     echo "[runner] ERROR: scenario not found: $scenario" >&2
@@ -144,20 +155,22 @@ for scenario in "${SCENARIOS[@]}"; do
   }
 done
 
-NEEDS_FORGE=false
+NEEDS_FORGE_BINARY=false
+NEEDS_FORGE_API_DEPS=false
 NEEDS_KLIQ=false
 for scenario in "${SCENARIOS[@]}"; do
   case "$(basename "$scenario")" in
-    09_*|10_*) NEEDS_FORGE=true ;;
-    12_*) NEEDS_KLIQ=true ;;
+    09_*) NEEDS_FORGE_BINARY=true; NEEDS_FORGE_API_DEPS=true ;;
+    10_*) NEEDS_FORGE_BINARY=true ;;
+    12_*) NEEDS_FORGE_BINARY=true; NEEDS_KLIQ=true ;;
   esac
 done
 
-check_deps "$NEEDS_FORGE" "$NEEDS_KLIQ"
+check_deps "$NEEDS_FORGE_API_DEPS" "$NEEDS_FORGE_BINARY" "$NEEDS_KLIQ"
 if [[ "$NEEDS_KLIQ" == "true" ]]; then
   build_kliq
 fi
-if [[ "$NEEDS_FORGE" == "true" ]]; then
+if [[ "$NEEDS_FORGE_BINARY" == "true" ]]; then
   build_forge
 fi
 

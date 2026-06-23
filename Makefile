@@ -22,9 +22,9 @@ test:
 	$(GO) test ./...
 
 integration: build build-forge
-	sudo -E tests/integration/run.sh
+	sudo -E tests/integration/run.sh $(SCENARIOS)
 
-# Build forge binary from sibling repo (for scenarios 09+10).
+# Build forge binary from sibling repo (for scenarios 09, 10 and 12).
 build-forge:
 	@if [ -d "$(dir $(abspath .))/kernloom-forge" ]; then \
 	  echo "Building forge from $(dir $(abspath .))/kernloom-forge..."; \
@@ -39,7 +39,7 @@ build-forge:
 # No-XDP integration tests — Forge control plane plus RuntimePolicyPack checks.
 # Builds Forge and KLIQ binaries only when the selected scenarios need them.
 integration-forge:
-	bash tests/integration/run-forge.sh
+	bash tests/integration/run-forge.sh $(SCENARIOS)
 
 integration-clean:
 	sudo -E tests/integration/scenarios/99_cleanup.sh

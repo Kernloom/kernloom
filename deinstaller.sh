@@ -14,6 +14,7 @@ KEEP_STATE=0
 # ── Same path defaults as install.sh ─────────────────────────────────────────
 OPT_DIR="${OPT_DIR:-/opt/kernloom}"
 ATTESTED_DIR="${ATTESTED_DIR:-$OPT_DIR/attested}"
+PREFIX="${PREFIX:-$ATTESTED_DIR}"
 SHARE_DIR="${SHARE_DIR:-$ATTESTED_DIR/bpf}"
 IQ_ATTESTED_DIR="${IQ_ATTESTED_DIR:-$ATTESTED_DIR/etc}"
 IQ_POLICY_DIR="${IQ_POLICY_DIR:-$IQ_ATTESTED_DIR/policies}"
@@ -60,10 +61,18 @@ Options:
 Environment:
   OPT_DIR        Override base directory       (default: /opt/kernloom)
   ATTESTED_DIR   Override attested root        (default: /opt/kernloom/attested)
+  PREFIX         Binaries dir used by install  (default: ATTESTED_DIR)
   BPF_FS         Override BPF filesystem       (default: /sys/fs/bpf)
   IQ_POLICY_DIR  Local/RuntimePolicyPack YAML  (default: attested/etc/policies)
   IQ_PDP_DIR     PDPConfig YAML                (default: attested/etc/pdp)
   IQ_VAR_DIR     Override runtime state dir    (default: /var/lib/kernloom/iq)
+
+For an install that used a user-layout prefix, pass the same paths explicitly,
+for example:
+  sudo env PREFIX=\$HOME/.local/bin \\
+    OPT_DIR=\$HOME/.local/share/kernloom \\
+    IQ_VAR_DIR=\$HOME/.local/state/kernloom/iq \\
+    sh deinstaller.sh
 EOF
 }
 
@@ -128,7 +137,10 @@ done
 
 # ── Step 2: Detach XDP program ────────────────────────────────────────────────
 log "Detaching XDP program"
-KLSHIELD="$ATTESTED_DIR/klshield"
+KLSHIELD="$PREFIX/klshield"
+if [ ! -x "$KLSHIELD" ] && [ "$PREFIX" != "$ATTESTED_DIR" ]; then
+  KLSHIELD="$ATTESTED_DIR/klshield"
+fi
 if [ -x "$KLSHIELD" ]; then
   if [ "$DRY_RUN" -eq 1 ]; then
     info "[dry-run] $KLSHIELD detach-xdp"
@@ -177,7 +189,13 @@ else
 fi
 
 # ── Step 4: Remove binaries ───────────────────────────────────────────────────
-log "Removing binaries from $ATTESTED_DIR"
+log "Removing binaries from $PREFIX"
+remove_file "$PREFIX/klshield"
+remove_file "$PREFIX/kliq"
+
+if [ "$PREFIX" != "$ATTESTED_DIR" ]; then
+  log "Removing default attested binaries from $ATTESTED_DIR"
+fi
 remove_file "$ATTESTED_DIR/klshield"
 remove_file "$ATTESTED_DIR/kliq"
 
@@ -202,6 +220,7 @@ else
   remove_file "$IQ_VAR_DIR/state.json"
   remove_file "$IQ_VAR_DIR/state.json.bak"
   remove_file "$IQ_VAR_DIR/state.json.tmp"
+  remove_file "$IQ_VAR_DIR/kliq-report.json"
   remove_file "$IQ_VAR_DIR/feedback.json"
   remove_file "$IQ_VAR_DIR/kliq-state.db"
   remove_file "$IQ_VAR_DIR/kliq-state.db-shm"
@@ -209,6 +228,7 @@ else
   remove_file "$IQ_VAR_DIR/graph.db"
   remove_file "$IQ_VAR_DIR/graph.db-shm"
   remove_file "$IQ_VAR_DIR/graph.db-wal"
+  remove_dir  "$IQ_VAR_DIR/managed"
   remove_dir  "$IQ_VAR_DIR"
   # Remove /var/lib/kernloom only if now empty
   VAR_BASE="/var/lib/kernloom"

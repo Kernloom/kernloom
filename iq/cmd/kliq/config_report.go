@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/kernloom/kernloom/pkg/adapters/catalog"
@@ -147,8 +148,45 @@ func updateSidecarPack(statePath, packName, maxAction string) {
 // that start without a catalog adapter inventory (netfilter-only or observation-only deployments).
 func buildEmptyInventory(nodeID string) componentinventory.ComponentRuntimeInventory {
 	var inv componentinventory.ComponentRuntimeInventory
+	inv.APIVersion = "kernloom.io/v1alpha1"
+	inv.Kind = "ComponentInventory"
 	inv.Metadata.ID = nodeID
 	return inv
+}
+
+func parseNodeLabels(raw string) map[string]string {
+	labels := map[string]string{}
+	for _, entry := range strings.Split(raw, ",") {
+		entry = strings.TrimSpace(entry)
+		if entry == "" {
+			continue
+		}
+		key, value, ok := strings.Cut(entry, "=")
+		if !ok {
+			continue
+		}
+		key = strings.TrimSpace(key)
+		if key == "" {
+			continue
+		}
+		labels[key] = strings.TrimSpace(value)
+	}
+	if len(labels) == 0 {
+		return nil
+	}
+	return labels
+}
+
+func applyNodeLabels(inv *componentinventory.ComponentRuntimeInventory, labels map[string]string) {
+	if inv == nil || len(labels) == 0 {
+		return
+	}
+	if inv.Labels == nil {
+		inv.Labels = map[string]string{}
+	}
+	for key, value := range labels {
+		inv.Labels[key] = value
+	}
 }
 
 // logInventoryAndReport logs a summary of the inventory and policy config, and

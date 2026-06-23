@@ -17,6 +17,7 @@ import (
 	"os"
 	"time"
 
+	contracts "github.com/kernloom/kernloom-contracts"
 	"github.com/kernloom/kernloom/pkg/componentinventory"
 	corepolicy "github.com/kernloom/kernloom/pkg/core/policy"
 )
@@ -88,11 +89,11 @@ func (c *forgeClient) do(ctx context.Context, method, path string, body any) (*h
 // ── Enroll ────────────────────────────────────────────────────────────────────
 
 type enrollRequest struct {
-	NodeID       string `json:"node_id"`
-	Mode         string `json:"mode"`
-	KLIQVersion  string `json:"kliq_version,omitempty"`
-	Inventory    any    `json:"inventory,omitempty"`
-	ConfigReport any    `json:"config_report,omitempty"`
+	NodeID       string                          `json:"node_id"`
+	Mode         string                          `json:"mode"`
+	KLIQVersion  string                          `json:"kliq_version,omitempty"`
+	Inventory    contracts.ComponentInventory    `json:"inventory,omitempty"`
+	ConfigReport contracts.KLIQConfigAssetReport `json:"config_report,omitempty"`
 }
 
 type enrollResponse struct {
@@ -324,6 +325,68 @@ func (c *forgeClient) UploadReceipts(ctx context.Context, receipts []any) ([]str
 		return ids, nil
 	}
 	return result.Accepted, nil
+}
+
+func (c *forgeClient) UploadInventory(ctx context.Context, inventory contracts.ComponentInventory) error {
+	return c.postArtifact(ctx, "/api/v1/nodes/"+c.nodeID+"/inventory", inventory, http.StatusOK)
+}
+
+func (c *forgeClient) UploadRiskAssessments(ctx context.Context, assessments []contracts.LocalRiskAssessment) error {
+	return c.postArtifact(ctx, "/api/v1/nodes/"+c.nodeID+"/risk-assessments",
+		map[string]any{"risk_assessments": assessments}, http.StatusOK)
+}
+
+func (c *forgeClient) UploadFindings(ctx context.Context, findings []contracts.RuntimeFinding) error {
+	return c.postArtifact(ctx, "/api/v1/nodes/"+c.nodeID+"/findings", findings, http.StatusOK)
+}
+
+func (c *forgeClient) UploadHealthReports(ctx context.Context, reports []contracts.HealthReport) error {
+	return c.postArtifact(ctx, "/api/v1/nodes/"+c.nodeID+"/health-reports",
+		map[string]any{"health_reports": reports}, http.StatusOK)
+}
+
+func (c *forgeClient) UploadDecisionSummaries(ctx context.Context, summaries []contracts.RuntimeDecisionSummary) error {
+	return c.postArtifact(ctx, "/api/v1/nodes/"+c.nodeID+"/decision-summaries",
+		map[string]any{"decision_summaries": summaries}, http.StatusOK)
+}
+
+func (c *forgeClient) UploadAdapterStatus(ctx context.Context, statuses []contracts.AdapterStatus) error {
+	return c.postArtifact(ctx, "/api/v1/nodes/"+c.nodeID+"/adapter-status",
+		map[string]any{"adapter_status": statuses}, http.StatusOK)
+}
+
+func (c *forgeClient) UploadFailoverStatus(ctx context.Context, statuses []contracts.FailoverStatus) error {
+	return c.postArtifact(ctx, "/api/v1/nodes/"+c.nodeID+"/failover-status",
+		map[string]any{"failover_status": statuses}, http.StatusOK)
+}
+
+func (c *forgeClient) UploadGraphProposal(ctx context.Context, proposal contracts.GraphProposal) (string, error) {
+	resp, err := c.do(ctx, http.MethodPost, "/api/v1/nodes/"+c.nodeID+"/graph-proposals", proposal)
+	if err != nil {
+		return "", fmt.Errorf("upload-graph-proposal: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusCreated {
+		return "", fmt.Errorf("upload-graph-proposal: server returned %d", resp.StatusCode)
+	}
+	var result struct {
+		ID string `json:"id"`
+	}
+	_ = json.NewDecoder(resp.Body).Decode(&result)
+	return result.ID, nil
+}
+
+func (c *forgeClient) postArtifact(ctx context.Context, path string, payload any, want int) error {
+	resp, err := c.do(ctx, http.MethodPost, path, payload)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != want {
+		body, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("%s: server returned %d: %s", path, resp.StatusCode, string(body))
+	}
+	return nil
 }
 
 // UploadBaselineProposal sends POST /api/v1/nodes/{id}/baseline-proposals

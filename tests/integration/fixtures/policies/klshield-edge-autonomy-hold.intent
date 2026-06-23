@@ -1,0 +1,77 @@
+# Productive Natural policy intent for KLShield runtime enforcement.
+# It exercises risk-driven autonomy, hold-before-block, evidence gates,
+# blast-radius guardrails, and broker-enforced autonomy bounds through Forge -> KLIQ.
+
+intent "klshield-edge-autonomy-hold"
+
+protect service "public-edge" in "production" as "internet-facing edge service"
+
+compose:
+  access "public-edge-access"
+  requirements "public-edge-runtime-context"
+  detection "public-edge-runtime-detections"
+  response "public-edge-runtime-responses"
+  alert_route "security-ops"
+  guardrail "protect-kernloom-admins"
+  capabilities "public-edge-runtime-capabilities"
+  autonomy "public-edge-runtime-autonomy"
+
+access "public-edge-access":
+  allow all
+
+requirements "public-edge-runtime-context":
+  require "subject.risk.level" eq "low"
+  require "device.posture.status" eq "healthy"
+
+detection "public-edge-runtime-detections":
+  detect "risk-elevated":
+    when risk at least medium
+
+  detect "risk-high":
+    when risk at least high
+
+  detect "unknown-source-deny":
+    when denied access to service "public-edge" by unknown source exceeds 5 within 15m
+
+  detect "sustained-pressure":
+    when rate_limit drops to service "public-edge" by unknown source sustained for 1m
+
+response "public-edge-runtime-responses":
+  on "risk-elevated" then rate_limit source at 100 pps for 1m
+  on "risk-high" then alert route "security-ops" severity "high" dedupe 1m
+  on "unknown-source-deny" then alert route "security-ops" severity "medium" dedupe 5m
+  on "sustained-pressure" then temporary_block source for 1m
+    require previous action "enforce.traffic.rate_limit" active
+    require risk confidence at least high
+    require risk signal fresher than 2m
+    require at least 2 independent signals before block
+    allow local enforcement state evidence
+    require enforcement target excludes group "kernloom-admins"
+
+autonomy "public-edge-runtime-autonomy":
+  hold rate_limit source at 100 pps for 30s while enforcement feedback active
+  allow autonomous temporary_block only after rate_limit was active
+  max autonomous block duration 15m
+  require audit receipt for every enforcement
+
+alert_route "security-ops":
+  notify group "kernloom-security-ops"
+  via ["log", "email"]
+  dedupe by ["tenant.id", "resource.id", "detection.id", "source.identity_or_ip"]
+  create case false
+
+guardrail "protect-kernloom-admins":
+  never auto_block group "kernloom-admins"
+  never quarantine group "kernloom-admins"
+  never disable identity group "kernloom-admins"
+
+capabilities "public-edge-runtime-capabilities":
+  require context "subject.risk.level"
+  require context "device.posture.status"
+  require windowed_detection
+  require traffic_rate_limit
+  require temporary_traffic_block
+
+gap_handling:
+  fail on missing_context
+  require_approval on identity_to_ip downgrade

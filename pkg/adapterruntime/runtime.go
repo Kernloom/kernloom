@@ -27,6 +27,10 @@ const (
 	MetricNetworkSynRate                = "network.syn_rate"
 	MetricNetworkDestinationPortChanges = "network.destination_port_change_rate"
 	MetricNetworkRateLimitDropRate      = "network.rate_limit_drop_rate"
+	MetricNetworkPassRate               = "network.pass_rate"
+	MetricNetworkDropAllowRate          = "network.drop_allow_rate"
+	MetricNetworkDropDenyRate           = "network.drop_deny_rate"
+	MetricNetworkDropTotalRate          = "network.drop_total_rate"
 	MetricNetworkFlowPackets            = "network.flow.packets"
 	MetricNetworkFlowBytes              = "network.flow.bytes"
 )
@@ -175,6 +179,8 @@ type EnforcementDecision struct {
 // EnforcementParams carries generic per-level enforcement tuning. Adapter
 // packages decide how these rates and TTLs map to their concrete PEP backend.
 type EnforcementParams struct {
+	DryRun bool
+
 	SoftRate  uint64
 	SoftBurst uint64
 	SoftTTL   time.Duration

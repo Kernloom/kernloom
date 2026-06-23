@@ -6,7 +6,7 @@ set -eu
 # Examples:
 #   curl -fsSL https://raw.githubusercontent.com/Kernloom/kernloom/master/install.sh | sudo sh
 #   curl -fsSL https://raw.githubusercontent.com/Kernloom/kernloom/master/install.sh | sudo sh -s -- klshield
-#   curl -fsSL https://raw.githubusercontent.com/Kernloom/kernloom/master/install.sh | sudo KERNLOOM_VERSION=v0.0.1 sh
+#   curl -fsSL https://raw.githubusercontent.com/Kernloom/kernloom/master/install.sh | sudo KERNLOOM_VERSION=v0.4.0 sh
 #   curl -fsSL https://raw.githubusercontent.com/Kernloom/kernloom/master/install.sh | sh -s -- --prefix "$HOME/.local/bin"
 
 REPO="Kernloom/kernloom"
@@ -14,14 +14,16 @@ COMPONENT="all"            # all | kliq | klshield
 KERNLOOM_VERSION="${KERNLOOM_VERSION:-latest}"
 PREFIX="${PREFIX:-}"
 
-# /opt/kernloom/ holds files that may be IMA-attested by Keylime:
-#   bin/       — executables
-#   bpf/       — BPF object (architecture-independent bytecode)
-#   attested/  — config files measured by IMA (whitelist, frozen graph, policy/pdp YAML)
-# /var/lib/kernloom/iq/ holds runtime state that changes frequently (not attested):
-#   state.json, feedback.json, kliq-state.db
+OPT_DIR_ENV="${OPT_DIR+x}"
+ATTESTED_DIR_ENV="${ATTESTED_DIR+x}"
+SHARE_DIR_ENV="${SHARE_DIR+x}"
+IQ_ATTESTED_DIR_ENV="${IQ_ATTESTED_DIR+x}"
+IQ_POLICY_DIR_ENV="${IQ_POLICY_DIR+x}"
+IQ_PDP_DIR_ENV="${IQ_PDP_DIR+x}"
+IQ_VAR_DIR_ENV="${IQ_VAR_DIR+x}"
+
 # Everything under /opt/kernloom/attested/ is IMA-measured by Keylime:
-#   kliq, klshield        — executables (Keylime attests the binaries)
+#   kliq, klshield        — executables by default
 #   bpf/                  — BPF object
 #   etc/                  — config files (whitelist, frozen graph, policy/pdp YAML)
 # /var/lib/kernloom/iq/   — runtime state (changes frequently, not attested)
@@ -53,15 +55,17 @@ Options:
 
 Environment:
   KERNLOOM_VERSION   Same as --version
-  OPT_DIR            Base directory    (default: /opt/kernloom)
-  ATTESTED_DIR       IMA-attested root (default: /opt/kernloom/attested)
+  OPT_DIR            Base directory    (default: /opt/kernloom as root,
+                     ~/.local/share/kernloom otherwise)
+  ATTESTED_DIR       IMA-attested root (default: OPT_DIR/attested)
   PREFIX             Binaries dir      (default: /opt/kernloom/attested when root)
-  SHARE_DIR          BPF object        (default: /opt/kernloom/attested/bpf)
-  IQ_ATTESTED_DIR    Attested config   (default: /opt/kernloom/attested/etc)
+  SHARE_DIR          BPF object        (default: ATTESTED_DIR/bpf)
+  IQ_ATTESTED_DIR    Attested config   (default: ATTESTED_DIR/etc)
   IQ_POLICY_DIR      LocalPolicyPack or RuntimePolicyPack YAML
-                     (default: /opt/kernloom/attested/etc/policies)
-  IQ_PDP_DIR         PDPConfig files   (default: /opt/kernloom/attested/etc/pdp)
-  IQ_VAR_DIR         Runtime state     (default: /var/lib/kernloom/iq)
+                     (default: IQ_ATTESTED_DIR/policies)
+  IQ_PDP_DIR         PDPConfig files   (default: IQ_ATTESTED_DIR/pdp)
+  IQ_VAR_DIR         Runtime state     (default: /var/lib/kernloom/iq as root,
+                     ~/.local/state/kernloom/iq otherwise)
 USAGE
 }
 
@@ -102,6 +106,35 @@ pick_prefix() {
   else
     PREFIX="$HOME/.local/bin"
   fi
+}
+
+configure_non_root_layout() {
+  if [ "$(id -u)" -eq 0 ]; then
+    return 0
+  fi
+
+  if [ -z "$OPT_DIR_ENV" ]; then
+    OPT_DIR="$HOME/.local/share/kernloom"
+  fi
+  if [ -z "$ATTESTED_DIR_ENV" ]; then
+    ATTESTED_DIR="$OPT_DIR/attested"
+  fi
+  if [ -z "$SHARE_DIR_ENV" ]; then
+    SHARE_DIR="$ATTESTED_DIR/bpf"
+  fi
+  if [ -z "$IQ_ATTESTED_DIR_ENV" ]; then
+    IQ_ATTESTED_DIR="$ATTESTED_DIR/etc"
+  fi
+  if [ -z "$IQ_POLICY_DIR_ENV" ]; then
+    IQ_POLICY_DIR="$IQ_ATTESTED_DIR/policies"
+  fi
+  if [ -z "$IQ_PDP_DIR_ENV" ]; then
+    IQ_PDP_DIR="$IQ_ATTESTED_DIR/pdp"
+  fi
+  if [ -z "$IQ_VAR_DIR_ENV" ]; then
+    IQ_VAR_DIR="$HOME/.local/state/kernloom/iq"
+  fi
+  IQ_ETC_DIR="$IQ_ATTESTED_DIR"
 }
 
 install_executable() {
@@ -318,6 +351,7 @@ if [ "$KERNLOOM_VERSION" = "latest" ]; then
 fi
 
 pick_prefix
+configure_non_root_layout
 mkdir -p "$PREFIX"
 TMPDIR="$(mktemp -d)"
 
@@ -377,11 +411,27 @@ echo "  4. Start kliq observe-only (14-day bootstrap, dry-run):"
 echo "     sudo $PREFIX/kliq run \\"
 echo "          --pdp-config=$IQ_PDP_DIR/node.yaml \\"
 echo "          --runtime-pdp-mode=shadow \\"
-echo "          --dry-run=true --whitelist-learn=true"
+echo "          --dry-run=true --whitelist-learn=true \\"
+echo "          --whitelist=$IQ_ATTESTED_DIR/whitelist.txt \\"
+echo "          --feedback-file=$IQ_VAR_DIR/feedback.json \\"
+echo "          --state-file=$IQ_VAR_DIR/state.json \\"
+echo "          --db=$IQ_VAR_DIR/kliq-state.db"
 echo "     Shadow mode logs RuntimePDP decisions but emits no PEP actions."
 echo "     For real enforcement, create a RuntimePolicyPack and use:"
 echo "          --policy-file=$IQ_POLICY_DIR/runtime-policy.yaml \\"
-echo "          --runtime-pdp-mode=active --dry-run=false"
+echo "          --runtime-pdp-mode=active --dry-run=false \\"
+echo "          --whitelist=$IQ_ATTESTED_DIR/whitelist.txt \\"
+echo "          --feedback-file=$IQ_VAR_DIR/feedback.json \\"
+echo "          --state-file=$IQ_VAR_DIR/state.json \\"
+echo "          --db=$IQ_VAR_DIR/kliq-state.db"
 echo ""
 echo "  5. Full help:  $PREFIX/kliq run --help"
 echo "                 $PREFIX/klshield"
+echo ""
+echo "Managed mode example with Forge placement labels:"
+echo "     sudo $PREFIX/kliq run \\"
+echo "          --mode=managed \\"
+echo "          --forge-url=https://forge.example.com:8443 \\"
+echo "          --forge-enroll-token=<printed-enroll-token> \\"
+echo "          --policy-verify-key=$IQ_ATTESTED_DIR/forge-runtime.pub \\"
+echo "          --node-labels=role=edge-gateway,env=production,service=payment-api"

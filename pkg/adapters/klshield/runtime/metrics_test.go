@@ -10,14 +10,16 @@ import (
 
 func TestCalculateRates(t *testing.T) {
 	now := time.Unix(100, 0)
-	prev := counterSnapshot{Pkts: 100, Bytes: 1000, Syn: 10, DportChanges: 2, DropRL: 1, LastWall: now}
-	curr := counterSnapshot{Pkts: 160, Bytes: 2200, Syn: 16, DportChanges: 5, DropRL: 3, LastWall: now.Add(2 * time.Second)}
+	prev := counterSnapshot{Pkts: 100, Bytes: 1000, Syn: 10, DportChanges: 2, Pass: 90, DropAllow: 1, DropDeny: 2, DropRL: 1, LastWall: now}
+	curr := counterSnapshot{Pkts: 160, Bytes: 2200, Syn: 16, DportChanges: 5, Pass: 140, DropAllow: 3, DropDeny: 8, DropRL: 3, LastWall: now.Add(2 * time.Second)}
 
 	got, ok := calculateRates(prev, curr, time.Second)
 	if !ok {
 		t.Fatal("expected valid sample")
 	}
-	if got.PPS != 30 || got.BPS != 600 || got.SynRate != 3 || got.ScanRate != 1.5 || got.DropRLRate != 1 {
+	if got.PPS != 30 || got.BPS != 600 || got.SynRate != 3 || got.ScanRate != 1.5 ||
+		got.PassRate != 25 || got.DropAllowRate != 1 || got.DropDenyRate != 3 ||
+		got.DropRLRate != 1 || got.DropTotalRate != 5 {
 		t.Fatalf("unexpected rates: %+v", got)
 	}
 }

@@ -264,22 +264,32 @@ start_kliq_frozen() {
 
 start_forge() {
   echo "[proc] starting forge serve on $KLT_FORGE_ADDR"
-  [[ -f "${KLT_FORGE_POLICY:-}" ]] || { echo "[ERROR] forge policy not found: ${KLT_FORGE_POLICY:-<unset>}" >&2; exit 1; }
+  if [[ -n "${KLT_FORGE_ASSIGNMENTS:-}" ]]; then
+    [[ -f "$KLT_FORGE_ASSIGNMENTS" ]] || { echo "[ERROR] forge assignments not found: $KLT_FORGE_ASSIGNMENTS" >&2; exit 1; }
+  else
+    [[ -f "${KLT_FORGE_POLICY:-}" ]] || { echo "[ERROR] forge policy not found: ${KLT_FORGE_POLICY:-<unset>}" >&2; exit 1; }
+  fi
   if [[ ! -f "$KLT_FORGE_SIGNING_KEY" ]]; then
     "$KLT_FORGE" keygen \
       --private "$KLT_FORGE_SIGNING_KEY" \
       --public "$KLT_FORGE_SIGNING_PUBKEY" \
       >/dev/null
   fi
-  "$KLT_FORGE" serve \
-    --addr "$KLT_FORGE_ADDR" \
-    --policy "$KLT_FORGE_POLICY" \
-    --adapters "${KLT_FORGE_ADAPTERS:-}" \
-    --profiles "${KLT_FORGE_PROFILES:-}" \
-    --target "$KLT_FORGE_TARGET" \
-    --signing-key "$KLT_FORGE_SIGNING_KEY" \
-    --enroll-token "it-test" \
-    > "$KLT_FORGE_LOG" 2>&1 &
+  local forge_args=(
+    serve
+    --addr "$KLT_FORGE_ADDR"
+    --adapters "${KLT_FORGE_ADAPTERS:-}"
+    --profiles "${KLT_FORGE_PROFILES:-}"
+    --signing-key "$KLT_FORGE_SIGNING_KEY"
+    --enroll-token "it-test"
+  )
+  if [[ -n "${KLT_FORGE_ASSIGNMENTS:-}" ]]; then
+    forge_args+=(--assignments "$KLT_FORGE_ASSIGNMENTS")
+  else
+    forge_args+=(--policy "$KLT_FORGE_POLICY")
+    [[ -z "${KLT_FORGE_TARGET:-}" ]] || forge_args+=(--target "$KLT_FORGE_TARGET")
+  fi
+  "$KLT_FORGE" "${forge_args[@]}" > "$KLT_FORGE_LOG" 2>&1 &
   record_pid forge "$!"
   # Wait for forge to be ready.
   local i=0
@@ -311,7 +321,27 @@ forge_simulate_enroll() {
     -d "{
       \"node_id\": \"$node_id\",
       \"mode\": \"managed\",
-      \"enroll_key\": \"it-test\"
+      \"kliq_version\": \"integration-test\",
+      \"enroll_key\": \"it-test\",
+      \"inventory\": {
+        \"apiVersion\": \"kernloom.io/runtime/v1alpha1\",
+        \"kind\": \"ComponentInventory\",
+        \"metadata\": {\"id\": \"$node_id\"},
+        \"controlled_by\": {\"node_id\": \"$node_id\", \"plugin_adapter\": \"builtin-klshield\"},
+        \"labels\": {\"role\": \"edge-gateway\", \"env\": \"production\", \"service\": \"ziti-controller\"},
+        \"effective_capabilities\": [
+          {\"id\": \"enforce.traffic.rate_limit\", \"status\": \"available\"},
+          {\"id\": \"enforce.traffic.drop\", \"status\": \"available\"}
+        ]
+      },
+      \"config_report\": {
+        \"apiVersion\": \"kernloom.io/runtime/v1alpha1\",
+        \"kind\": \"KliqConfigAssetReport\",
+        \"metadata\": {\"node_id\": \"$node_id\"},
+        \"adapters\": [
+          {\"id\": \"klshield\", \"plugin\": \"builtin-klshield\", \"enabled\": true}
+        ]
+      }
     }"
 }
 
@@ -362,7 +392,7 @@ forge_post_findings() {
   curl -sf -X POST "$KLT_FORGE_URL/api/v1/nodes/$node_id/findings" \
     "${auth_args[@]}" \
     -H "Content-Type: application/json" \
-    -d '[{"id":"finding-it-1","severity":"info"}]'
+    -d '[{"apiVersion":"kernloom.io/runtime/v1alpha1","kind":"RuntimeFinding","metadata":{"id":"finding-it-1"},"severity":"info","title":"integration finding","subject":{"kind":"source","id":"10.42.0.66"}}]'
 }
 
 # $1 = node_id
@@ -375,5 +405,110 @@ forge_post_baseline_proposal() {
   curl -sf -X POST "$KLT_FORGE_URL/api/v1/nodes/$node_id/baseline-proposals" \
     "${auth_args[@]}" \
     -H "Content-Type: application/json" \
-    -d '{"proposal":"it"}'
+    -d "{
+      \"apiVersion\": \"kernloom.io/runtime/v1alpha1\",
+      \"kind\": \"BaselineProposal\",
+      \"metadata\": {\"node_id\": \"$node_id\"},
+      \"spec\": {
+        \"bootstrap_autotune\": {
+          \"phase\": \"steady\",
+          \"observed_seconds\": 3600,
+          \"clean_ratio\": 0.99,
+          \"triggers\": {\"pps\": 100, \"syn\": 20, \"scan\": 5, \"bps\": 1000}
+        },
+        \"source_baseline_summary\": {
+          \"tracked_sources\": 2,
+          \"high_confidence_sources\": 1,
+          \"average_confidence\": 0.8
+        }
+      }
+    }"
+}
+
+# $1 = node_id
+# $2 = session_token (optional)
+forge_post_risk_assessment() {
+  local node_id="$1"
+  local session_token="${2:-}"
+  local auth_args=()
+  [[ -z "$session_token" ]] || auth_args=(-H "Authorization: Bearer $session_token")
+  curl -sf -X POST "$KLT_FORGE_URL/api/v1/nodes/$node_id/risk-assessments" \
+    "${auth_args[@]}" \
+    -H "Content-Type: application/json" \
+    -d '{"risk_assessments":[{"apiVersion":"kernloom.io/runtime/v1alpha1","kind":"LocalRiskAssessment","metadata":{"id":"risk-it-1"},"subject":{"kind":"source","id":"10.42.0.66"},"score":72,"level":"high","confidence":0.9,"model":"integration"}]}'
+}
+
+# $1 = node_id
+# $2 = session_token (optional)
+forge_post_health_report() {
+  local node_id="$1"
+  local session_token="${2:-}"
+  local auth_args=()
+  [[ -z "$session_token" ]] || auth_args=(-H "Authorization: Bearer $session_token")
+  curl -sf -X POST "$KLT_FORGE_URL/api/v1/nodes/$node_id/health-reports" \
+    "${auth_args[@]}" \
+    -H "Content-Type: application/json" \
+    -d '{"health_reports":[{"apiVersion":"kernloom.io/runtime/v1alpha1","kind":"HealthReport","status":"healthy","healthy":true,"last_bundle_generation":1}]}'
+}
+
+# $1 = node_id
+# $2 = session_token (optional)
+forge_post_decision_summary() {
+  local node_id="$1"
+  local session_token="${2:-}"
+  local auth_args=()
+  [[ -z "$session_token" ]] || auth_args=(-H "Authorization: Bearer $session_token")
+  curl -sf -X POST "$KLT_FORGE_URL/api/v1/nodes/$node_id/decision-summaries" \
+    "${auth_args[@]}" \
+    -H "Content-Type: application/json" \
+    -d '{"decision_summaries":[{"apiVersion":"kernloom.io/runtime/v1alpha1","kind":"RuntimeDecisionSummary","decision_count":3,"by_level":{"soft":2,"block":1},"active_lease_count":1}]}'
+}
+
+# $1 = node_id
+# $2 = session_token (optional)
+forge_post_adapter_status() {
+  local node_id="$1"
+  local session_token="${2:-}"
+  local auth_args=()
+  [[ -z "$session_token" ]] || auth_args=(-H "Authorization: Bearer $session_token")
+  curl -sf -X POST "$KLT_FORGE_URL/api/v1/nodes/$node_id/adapter-status" \
+    "${auth_args[@]}" \
+    -H "Content-Type: application/json" \
+    -d '{"adapter_status":[{"apiVersion":"kernloom.io/runtime/v1alpha1","adapter_id":"klshield","kind":"pep","healthy":true,"active_capabilities":["enforce.traffic.rate_limit","enforce.traffic.drop"]}]}'
+}
+
+# $1 = node_id
+# $2 = session_token (optional)
+forge_post_failover_status() {
+  local node_id="$1"
+  local session_token="${2:-}"
+  local auth_args=()
+  [[ -z "$session_token" ]] || auth_args=(-H "Authorization: Bearer $session_token")
+  curl -sf -X POST "$KLT_FORGE_URL/api/v1/nodes/$node_id/failover-status" \
+    "${auth_args[@]}" \
+    -H "Content-Type: application/json" \
+    -d '{"failover_status":[{"apiVersion":"kernloom.io/runtime/v1alpha1","kind":"FailoverStatus","forge_reachable":true,"active_mode":"normal"}]}'
+}
+
+# $1 = node_id
+# $2 = session_token (optional)
+forge_post_graph_proposal() {
+  local node_id="$1"
+  local session_token="${2:-}"
+  local auth_args=()
+  [[ -z "$session_token" ]] || auth_args=(-H "Authorization: Bearer $session_token")
+  curl -sf -X POST "$KLT_FORGE_URL/api/v1/nodes/$node_id/graph-proposals" \
+    "${auth_args[@]}" \
+    -H "Content-Type: application/json" \
+    -d "{
+      \"apiVersion\": \"kernloom.io/runtime/v1alpha1\",
+      \"kind\": \"GraphProposal\",
+      \"metadata\": {\"node_id\": \"$node_id\"},
+      \"spec\": {
+        \"summary\": {\"candidate_edges\": 1, \"learned_edges\": 1},
+        \"edges\": [
+          {\"source\": {\"kind\": \"source\", \"id\": \"10.42.0.66\"}, \"destination\": {\"kind\": \"service\", \"id\": \"public-edge\"}, \"predicate\": \"http.calls\"}
+        ]
+      }
+    }"
 }

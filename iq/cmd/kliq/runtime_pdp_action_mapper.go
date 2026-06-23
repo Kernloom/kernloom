@@ -10,6 +10,7 @@ import (
 
 	contracts "github.com/kernloom/kernloom-contracts"
 	"github.com/kernloom/kernloom/iq/internal/actions"
+	"github.com/kernloom/kernloom/iq/internal/runtimepdp"
 )
 
 func runtimeDecisionToActionProposal(
@@ -67,6 +68,30 @@ func runtimeDecisionToActionProposalWithFallbackTarget(
 		Confidence:    confidence,
 		CreatedAt:     now,
 	}, true, ""
+}
+
+func runtimePDPActionProposalWithEvidence(prop actions.ActionProposal, input runtimepdp.Input) actions.ActionProposal {
+	if dropRate := runtimePDPDropRateEvidence(input); dropRate > 0 {
+		if prop.Parameters == nil {
+			prop.Parameters = map[string]any{}
+		}
+		prop.Parameters["evidence_drop_rl_rate"] = dropRate
+	}
+	return prop
+}
+
+func runtimePDPDropRateEvidence(input runtimepdp.Input) float64 {
+	if enforcement, ok := input.Context.Signals["enforcement"].(map[string]any); ok {
+		if value := floatAnyParam(enforcement, "drop_rate"); value > 0 {
+			return value
+		}
+	}
+	return floatAnyParam(input.Context.Signals,
+		"network.rate_limit_drop_rate",
+		"rate_limit_drop_rate",
+		"drop_rate",
+		"drop_rl_rate",
+	)
 }
 
 func shouldUseRuntimeFallbackTarget(dec contracts.RuntimeDecision, target actions.ActionTarget, targetOK bool) bool {

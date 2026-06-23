@@ -12,15 +12,33 @@ import (
 	contracts "github.com/kernloom/kernloom-contracts"
 	"github.com/kernloom/kernloom/iq/internal/actionbroker"
 	"github.com/kernloom/kernloom/iq/internal/actions"
+	"github.com/kernloom/kernloom/iq/internal/runtimepdp"
 	"github.com/kernloom/kernloom/iq/internal/sourcefilters"
 	"github.com/kernloom/kernloom/pkg/adapterruntime"
 	"github.com/kernloom/kernloom/pkg/core/baseline"
+	"github.com/kernloom/kernloom/pkg/core/decision"
 	"github.com/kernloom/kernloom/pkg/core/fsm"
 	"github.com/kernloom/kernloom/pkg/core/observation"
 	"github.com/kernloom/kernloom/pkg/core/relationship"
 	"github.com/kernloom/kernloom/pkg/core/signal"
 	sstore "github.com/kernloom/kernloom/pkg/statestore/sqlite"
 )
+
+func TestShouldLogRuntimePDPNoMatchRequiresRiskScore(t *testing.T) {
+	lowRisk := runtimepdp.Input{
+		Risk: contracts.LocalRiskAssessment{Score: 0},
+	}
+	if shouldLogRuntimePDPNoMatch(lowRisk, fsmIntent{Transitioned: true}) {
+		t.Fatal("low-risk FSM transition should not emit no-match trace spam")
+	}
+
+	highRisk := runtimepdp.Input{
+		Risk: contracts.LocalRiskAssessment{Score: 30},
+	}
+	if !shouldLogRuntimePDPNoMatch(highRisk, fsmIntent{}) {
+		t.Fatal("high-risk no-match should remain visible")
+	}
+}
 
 func TestRuntimePDPActiveOwnsNetworkCandidateAction(t *testing.T) {
 	now := time.Date(2026, 6, 19, 13, 0, 0, 0, time.UTC)
@@ -77,6 +95,48 @@ func TestRuntimePDPActiveOwnsNetworkCandidateAction(t *testing.T) {
 	}
 	if len(pep.levels) != 1 || pep.levels[0] != fsm.LevelHard {
 		t.Fatalf("PEP transitions = %#v, want one hard transition", pep.levels)
+	}
+}
+
+func TestRuntimePDPActiveSignalWindowQueuesProposal(t *testing.T) {
+	runner := newShadowPDPRunner("node-test", log.New(testWriter{t}, "", 0))
+	proposals := make(chan actions.ActionProposal, 1)
+	runner.SetMode(PDPModeActive, proposals)
+	if err := runner.UpdatePack(runtimeCandidateTestPack(
+		"risk.level in ['high', 'critical']",
+		"enforce.traffic.rate_limit",
+		"hard",
+	)); err != nil {
+		t.Fatalf("update runtime pack: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	bus := adapterruntime.NewBus(8)
+	startShadowPDP(ctx, bus, runner, nil)
+
+	subject := observation.EntityRef{Kind: observation.KindIP, ID: "10.0.0.1"}
+	sig := signal.NewSignal(signal.ProducerKLIQ, signal.ScopeLocal, signal.SignalSYNRateHigh, subject).
+		SetScore(100).
+		SetConfidence(85).
+		SetTTL(time.Minute).
+		AddReasonCode("syn_rate_high").
+		SetAttribute("syn_rate", "5000")
+	if err := bus.PublishSignal(context.Background(), *sig); err != nil {
+		t.Fatalf("publish signal: %v", err)
+	}
+	time.Sleep(20 * time.Millisecond)
+	cancel()
+
+	select {
+	case prop := <-proposals:
+		if prop.DesiredAction != "enforce.traffic.rate_limit" || prop.DesiredLevel != "hard" {
+			t.Fatalf("proposal action = %s/%s, want rate_limit/hard", prop.DesiredAction, prop.DesiredLevel)
+		}
+		if prop.Target.Granularity != actions.TargetGranularitySource || prop.Target.Value != "10.0.0.1" {
+			t.Fatalf("proposal target = %#v, want source 10.0.0.1", prop.Target)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("active signal-window RuntimePDP did not queue proposal")
 	}
 }
 
@@ -149,6 +209,50 @@ func TestRuntimePDPActiveRenewalKeepsEffectiveLeaseState(t *testing.T) {
 	}
 	if len(pep.levels) != 1 {
 		t.Fatalf("renewed lease should not call PEP transition again, transitions=%#v", pep.levels)
+	}
+}
+
+func TestRuntimePDPActiveProjectsBrokerLeaseIntoVisibleState(t *testing.T) {
+	now := time.Date(2026, 6, 23, 0, 10, 0, 0, time.UTC)
+	store, err := sstore.Open(sstore.DefaultConfig(":memory:"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer store.Close()
+	if err := store.UpsertActionLease(context.Background(), decision.ActionLease{
+		LeaseID:      "lease-rate-limit",
+		DecisionID:   "decision-rate-limit",
+		NodeID:       "node-test",
+		AdapterID:    "kliq-source-pep",
+		Target:       "source:10.0.0.1",
+		Action:       "enforce.traffic.rate_limit",
+		Level:        "hard",
+		Status:       decision.ActionLeaseActive,
+		FencingToken: "token-rate-limit",
+		AppliedAt:    now.Add(-10 * time.Second),
+		ExpiresAt:    now.Add(time.Minute),
+		Metadata:     map[string]string{"param.execution_dry_run": "false"},
+	}); err != nil {
+		t.Fatalf("insert lease: %v", err)
+	}
+
+	projected := projectRuntimePDPLeaseState(
+		fsm.State{},
+		metrics{
+			Target: adapterruntime.SourceTarget{
+				SourceID: "10.0.0.1",
+				Subject:  observation.EntityRef{Kind: observation.KindIP, ID: "10.0.0.1"},
+			},
+		},
+		"node-test",
+		newRuntimePDPFactStore(store),
+		now,
+	)
+	if projected.Level != fsm.LevelHard {
+		t.Fatalf("projected runtime lease state = %s, want hard", projected.Level)
+	}
+	if !projected.ExpiresAt.Equal(now.Add(time.Minute)) {
+		t.Fatalf("projected expiry = %s, want %s", projected.ExpiresAt, now.Add(time.Minute))
 	}
 }
 
@@ -282,6 +386,62 @@ func TestRuntimePDPInputIncludesLearnedBaselineGraphAndLocalRisk(t *testing.T) {
 	}
 	if input.Risk.Model != "kliq.candidate.v1" || len(input.Risk.Contributions) == 0 {
 		t.Fatalf("risk assessment not produced from localrisk: %#v", input.Risk)
+	}
+}
+
+func TestRuntimePDPInputIncludesActiveActionLeaseFacts(t *testing.T) {
+	now := time.Date(2026, 6, 19, 13, 12, 0, 0, time.UTC)
+	store, err := sstore.Open(sstore.DefaultConfig(":memory:"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer store.Close()
+
+	if err := store.UpsertActionLease(context.Background(), decision.ActionLease{
+		LeaseID:    "lease-rate-limit",
+		DecisionID: "decision-rate-limit",
+		NodeID:     "node-test",
+		AdapterID:  "klshield",
+		Target:     "source:10.0.0.1",
+		Action:     "enforce.traffic.rate_limit",
+		Level:      "hard",
+		Status:     decision.ActionLeaseActive,
+		AppliedAt:  now.Add(-time.Minute),
+		ExpiresAt:  now.Add(5 * time.Minute),
+		Metadata:   map[string]string{"param.execution_dry_run": "true"},
+	}); err != nil {
+		t.Fatalf("upsert action lease: %v", err)
+	}
+
+	input := runtimePDPInputForCandidate(
+		"node-test",
+		metrics{
+			Target: adapterruntime.SourceTarget{
+				SourceID: "10.0.0.1",
+				Subject:  observation.EntityRef{Kind: "ip", ID: "10.0.0.1"},
+			},
+			Score:   70,
+			Signals: map[string]float64{},
+		},
+		fsm.State{},
+		fsmIntent{ProposedLevel: fsm.LevelHard},
+		newTestCfg(""),
+		newRuntimePDPFactStore(store),
+		now,
+	)
+
+	action, ok := input.Context.Actions["enforce_traffic_rate_limit"].(map[string]any)
+	if !ok || action["active"] != true {
+		t.Fatalf("active action fact missing: %#v", input.Context.Actions)
+	}
+	if got := action["level"]; got != "hard" {
+		t.Fatalf("action level = %#v, want hard", got)
+	}
+	if got := action["dry_run"]; got != true {
+		t.Fatalf("action dry_run = %#v, want true", got)
+	}
+	if got, ok := action["elapsed_seconds"].(float64); !ok || got < 60 {
+		t.Fatalf("action elapsed_seconds = %#v, want >= 60", action["elapsed_seconds"])
 	}
 }
 
@@ -475,11 +635,15 @@ func newRuntimePDPTestExecutor(t *testing.T, pep *recordingSourcePEP, c cfg) (*b
 }
 
 type recordingSourcePEP struct {
+	prev   []fsm.Level
 	levels []fsm.Level
+	params []adapterruntime.EnforcementParams
 }
 
 func (p *recordingSourcePEP) TransitionSource(_ adapterruntime.SourceTarget, st fsm.State, target fsm.Level, now time.Time, params adapterruntime.EnforcementParams) (fsm.State, error) {
+	p.prev = append(p.prev, st.Level)
 	p.levels = append(p.levels, target)
+	p.params = append(p.params, params)
 	st.Level = target
 	switch target {
 	case fsm.LevelSoft:

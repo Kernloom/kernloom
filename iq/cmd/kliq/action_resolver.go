@@ -7,6 +7,7 @@ import (
 	"time"
 
 	contracts "github.com/kernloom/kernloom-contracts"
+	"github.com/kernloom/kernloom/iq/internal/actionbroker"
 	"github.com/kernloom/kernloom/iq/internal/actions"
 	"github.com/kernloom/kernloom/pkg/adapterruntime"
 	"github.com/kernloom/kernloom/pkg/core/decision"
@@ -18,11 +19,12 @@ import (
 // Called once after the PolicyPack is loaded, then reused throughout the session.
 func (c cfg) buildPolicyResolver() *actions.PolicyResolver {
 	return &actions.PolicyResolver{
-		Mode:                c.Mode,
-		HasPolicyPack:       c.HasPolicyPack,
-		PolicyMaxAction:     c.PolicyMaxAction,
-		CapabilitiesAllowed: c.CapabilitiesRequired,
-		RuntimeGuardrails:   append([]contracts.RuntimeGuardrail(nil), c.RuntimeGuardrails...),
+		Mode:                     c.Mode,
+		HasPolicyPack:            c.HasPolicyPack,
+		PolicyMaxAction:          c.PolicyMaxAction,
+		CapabilitiesAllowed:      c.CapabilitiesRequired,
+		RuntimeGuardrails:        append([]contracts.RuntimeGuardrail(nil), c.RuntimeGuardrails...),
+		RuntimeAutonomyLifecycle: c.RuntimeAutonomyLifecycle,
 	}
 }
 
@@ -32,6 +34,35 @@ func syncPolicyResolverFromCfg(c cfg, resolver *actions.PolicyResolver) {
 	}
 	next := c.buildPolicyResolver()
 	*resolver = *next
+}
+
+func runtimeAutonomyAllowances(lifecycle *contracts.RuntimeAutonomyLifecycleSpec) []contracts.RuntimeAutonomyAllowance {
+	if lifecycle == nil || len(lifecycle.Allow) == 0 {
+		return nil
+	}
+	return append([]contracts.RuntimeAutonomyAllowance(nil), lifecycle.Allow...)
+}
+
+func runtimeAutonomyMaxRenewals(lifecycle *contracts.RuntimeAutonomyLifecycleSpec) int {
+	if lifecycle == nil || lifecycle.MaxRenewals <= 0 {
+		return 0
+	}
+	return lifecycle.MaxRenewals
+}
+
+func runtimeAutonomyRequiresAudit(lifecycle *contracts.RuntimeAutonomyLifecycleSpec) bool {
+	return lifecycle != nil && lifecycle.RequiresAudit
+}
+
+func syncActionBrokerAutonomyFromCfg(c cfg, brokers ...*actionbroker.Broker) {
+	allowances := runtimeAutonomyAllowances(c.RuntimeAutonomyLifecycle)
+	maxRenewals := runtimeAutonomyMaxRenewals(c.RuntimeAutonomyLifecycle)
+	requiresAudit := runtimeAutonomyRequiresAudit(c.RuntimeAutonomyLifecycle)
+	for _, broker := range brokers {
+		if broker != nil {
+			broker.UpdateAutonomyConstraints(allowances, maxRenewals, requiresAudit)
+		}
+	}
 }
 
 // buildExecutor creates the source action executor. Pass nil for adapter to run

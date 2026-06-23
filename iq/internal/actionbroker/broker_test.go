@@ -5,9 +5,11 @@ package actionbroker_test
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 
+	contracts "github.com/kernloom/kernloom-contracts"
 	"github.com/kernloom/kernloom/iq/internal/actionbroker"
 	"github.com/kernloom/kernloom/iq/internal/actions"
 	"github.com/kernloom/kernloom/pkg/core/decision"
@@ -44,15 +46,27 @@ func (p *fakePEP) Revert(_ context.Context, _ decision.ActionLease) error {
 
 func newBroker(t *testing.T, pep *fakePEP, now func() time.Time) (*actionbroker.Broker, *sstore.Store) {
 	t.Helper()
+	return newBrokerWithConfig(t, pep, now, actionbroker.Config{})
+}
+
+func newBrokerWithConfig(t *testing.T, pep *fakePEP, now func() time.Time, cfg actionbroker.Config) (*actionbroker.Broker, *sstore.Store) {
+	t.Helper()
 	store, err := sstore.Open(sstore.DefaultConfig(":memory:"))
 	if err != nil {
 		t.Fatalf("open store: %v", err)
 	}
+	cfg.NodeID = "node-1"
+	cfg.Store = store
+	cfg.PEP = pep
+	cfg.Now = now
 	b, err := actionbroker.New(actionbroker.Config{
-		NodeID: "node-1",
-		Store:  store,
-		PEP:    pep,
-		Now:    now,
+		NodeID:              cfg.NodeID,
+		Store:               cfg.Store,
+		PEP:                 cfg.PEP,
+		Now:                 cfg.Now,
+		AutonomyAllowances:  cfg.AutonomyAllowances,
+		MaxRenewals:         cfg.MaxRenewals,
+		RequireAuditReceipt: cfg.RequireAuditReceipt,
 	})
 	if err != nil {
 		t.Fatalf("new broker: %v", err)
@@ -207,6 +221,257 @@ func TestApplyRenewsMatchingActiveLease(t *testing.T) {
 	}
 	if len(receipts) != 1 || receipts[0].Status != decision.StatusReverted {
 		t.Fatalf("expected renewed lease to revert later, got %#v", receipts)
+	}
+}
+
+func TestApplyAutonomyPrerequisiteRequiresPreviousLease(t *testing.T) {
+	now := time.Date(2026, 6, 23, 10, 0, 0, 0, time.UTC)
+	pep := &fakePEP{}
+	b, store := newBrokerWithConfig(t, pep, func() time.Time { return now }, actionbroker.Config{
+		AutonomyAllowances: []contracts.RuntimeAutonomyAllowance{{
+			Action:                 "enforce.traffic.drop",
+			RequiresPreviousAction: "enforce.traffic.rate_limit",
+		}},
+	})
+	defer store.Close()
+
+	block := testResolution(time.Minute)
+	block.RequestedAction = "enforce.traffic.drop"
+	block.RequestedLevel = "block"
+	block.ExecutableAction = "enforce.traffic.drop"
+	block.ExecutableLevel = "block"
+
+	lease, receipt, err := b.Apply(context.Background(), block)
+	if err != nil {
+		t.Fatalf("block without previous: %v", err)
+	}
+	if lease.LeaseID != "" || receipt.Status != decision.StatusSkipped {
+		t.Fatalf("expected skipped without lease, lease=%#v receipt=%#v", lease, receipt)
+	}
+	if receipt.Message != "autonomy_previous_action_not_active(enforce.traffic.rate_limit)" {
+		t.Fatalf("message = %q", receipt.Message)
+	}
+	if pep.applyCalls != 0 {
+		t.Fatalf("PEP must not be called without prerequisite, calls=%d", pep.applyCalls)
+	}
+
+	rateLimit := testResolution(time.Minute)
+	if _, _, err := b.Apply(context.Background(), rateLimit); err != nil {
+		t.Fatalf("rate limit apply: %v", err)
+	}
+	pep.token = ""
+	pep.currentToken = ""
+	lease, receipt, err = b.Apply(context.Background(), block)
+	if err != nil {
+		t.Fatalf("block with previous: %v", err)
+	}
+	if lease.LeaseID == "" || receipt.Status != decision.StatusApplied {
+		t.Fatalf("expected applied block lease, lease=%#v receipt=%#v", lease, receipt)
+	}
+}
+
+func TestApplySkipsWeakerActionWhileStrongerLeaseActive(t *testing.T) {
+	now := time.Date(2026, 6, 23, 12, 0, 0, 0, time.UTC)
+	pep := &fakePEP{}
+	b, store := newBroker(t, pep, func() time.Time { return now })
+	defer store.Close()
+
+	block := testResolution(time.Minute)
+	block.DecisionID = "decision-block"
+	block.RequestedAction = "enforce.traffic.drop"
+	block.RequestedLevel = "block"
+	block.ExecutableAction = "enforce.traffic.drop"
+	block.ExecutableLevel = "block"
+	if _, receipt, err := b.Apply(context.Background(), block); err != nil {
+		t.Fatalf("block apply: %v", err)
+	} else if receipt.Status != decision.StatusApplied {
+		t.Fatalf("block receipt = %#v", receipt)
+	}
+
+	rateLimit := testResolution(time.Minute)
+	rateLimit.DecisionID = "decision-rate-limit"
+	lease, receipt, err := b.Apply(context.Background(), rateLimit)
+	if err != nil {
+		t.Fatalf("weaker apply: %v", err)
+	}
+	if lease.LeaseID != "" {
+		t.Fatalf("expected no weaker lease, got %#v", lease)
+	}
+	if receipt.Status != decision.StatusSkipped {
+		t.Fatalf("expected weaker action skipped, got %#v", receipt)
+	}
+	if receipt.Message != "stronger_action_active(enforce.traffic.drop:block)" {
+		t.Fatalf("message = %q", receipt.Message)
+	}
+	if pep.applyCalls != 1 {
+		t.Fatalf("weaker action must not call PEP, apply calls=%d", pep.applyCalls)
+	}
+}
+
+func TestApplyStrongerActionSupersedesWeakerLease(t *testing.T) {
+	start := time.Date(2026, 6, 23, 12, 15, 0, 0, time.UTC)
+	current := start
+	pep := &fakePEP{}
+	b, store := newBroker(t, pep, func() time.Time { return current })
+	defer store.Close()
+
+	rateLimit := testResolution(time.Minute)
+	rateLease, receipt, err := b.Apply(context.Background(), rateLimit)
+	if err != nil {
+		t.Fatalf("rate limit apply: %v", err)
+	}
+	if receipt.Status != decision.StatusApplied {
+		t.Fatalf("rate limit receipt = %#v", receipt)
+	}
+
+	current = start.Add(time.Second)
+	pep.token = ""
+	pep.currentToken = ""
+	block := testResolution(time.Minute)
+	block.DecisionID = "decision-block"
+	block.RequestedAction = "enforce.traffic.drop"
+	block.RequestedLevel = "block"
+	block.ExecutableAction = "enforce.traffic.drop"
+	block.ExecutableLevel = "block"
+	blockLease, receipt, err := b.Apply(context.Background(), block)
+	if err != nil {
+		t.Fatalf("block apply: %v", err)
+	}
+	if blockLease.LeaseID == "" || receipt.Status != decision.StatusApplied {
+		t.Fatalf("expected block lease, lease=%#v receipt=%#v", blockLease, receipt)
+	}
+
+	loaded, ok, err := store.GetActionLease(context.Background(), rateLease.LeaseID)
+	if err != nil || !ok {
+		t.Fatalf("load rate lease: ok=%v err=%v", ok, err)
+	}
+	if loaded.Status != decision.ActionLeaseSuperseded {
+		t.Fatalf("expected superseded rate-limit lease, got %s", loaded.Status)
+	}
+	if loaded.LastError != "superseded by stronger action enforce.traffic.drop:block" {
+		t.Fatalf("last error = %q", loaded.LastError)
+	}
+	if _, ok, err := store.FindActiveActionLease(context.Background(), pep.AdapterID(), rateLease.Target, rateLease.Action, rateLease.Level); err != nil {
+		t.Fatalf("find active rate lease: %v", err)
+	} else if ok {
+		t.Fatal("rate-limit lease should no longer be active")
+	}
+}
+
+func TestApplyBlockReceiptReportsDropEvidenceWithoutRateConfig(t *testing.T) {
+	now := time.Date(2026, 6, 23, 12, 30, 0, 0, time.UTC)
+	pep := &fakePEP{}
+	b, store := newBroker(t, pep, func() time.Time { return now })
+	defer store.Close()
+
+	block := testResolution(time.Minute)
+	block.RequestedAction = "enforce.traffic.drop"
+	block.RequestedLevel = "block"
+	block.ExecutableAction = "enforce.traffic.drop"
+	block.ExecutableLevel = "block"
+	block.Parameters = map[string]any{
+		"evidence_drop_rl_rate": 37.5,
+		"execution_hard_rate":   5,
+		"execution_hard_burst":  10,
+	}
+
+	_, receipt, err := b.Apply(context.Background(), block)
+	if err != nil {
+		t.Fatalf("block apply: %v", err)
+	}
+	if receipt.Status != decision.StatusApplied {
+		t.Fatalf("receipt = %#v", receipt)
+	}
+	if !strings.Contains(receipt.Message, "drop_rl_rate=37.5") {
+		t.Fatalf("receipt message = %q", receipt.Message)
+	}
+	if strings.Contains(receipt.Message, "hard_rate_pps") {
+		t.Fatalf("block receipt should not report rate-limit config: %q", receipt.Message)
+	}
+}
+
+func TestApplyHonorsAutonomyMaxRenewals(t *testing.T) {
+	start := time.Date(2026, 6, 23, 10, 30, 0, 0, time.UTC)
+	current := start
+	pep := &fakePEP{}
+	b, store := newBrokerWithConfig(t, pep, func() time.Time { return current }, actionbroker.Config{MaxRenewals: 1})
+	defer store.Close()
+
+	if _, _, err := b.Apply(context.Background(), testResolution(time.Second)); err != nil {
+		t.Fatalf("initial apply: %v", err)
+	}
+	current = start.Add(500 * time.Millisecond)
+	if _, receipt, err := b.Apply(context.Background(), testResolution(5*time.Second)); err != nil {
+		t.Fatalf("first renewal: %v", err)
+	} else if receipt.Status != decision.StatusApplied {
+		t.Fatalf("first renewal receipt = %#v", receipt)
+	}
+	current = start.Add(time.Second)
+	lease, receipt, err := b.Apply(context.Background(), testResolution(10*time.Second))
+	if err != nil {
+		t.Fatalf("second renewal: %v", err)
+	}
+	if receipt.Status != decision.StatusSkipped || receipt.Message != "autonomy_max_renewals_exceeded" {
+		t.Fatalf("expected renewal skip, lease=%#v receipt=%#v", lease, receipt)
+	}
+}
+
+func TestApplyRecordsRequiredAuditReceiptPolicy(t *testing.T) {
+	now := time.Date(2026, 6, 23, 11, 0, 0, 0, time.UTC)
+	pep := &fakePEP{}
+	b, store := newBrokerWithConfig(t, pep, func() time.Time { return now }, actionbroker.Config{RequireAuditReceipt: true})
+	defer store.Close()
+
+	lease, receipt, err := b.Apply(context.Background(), testResolution(time.Minute))
+	if err != nil {
+		t.Fatalf("apply: %v", err)
+	}
+	if receipt.Status != decision.StatusApplied {
+		t.Fatalf("receipt = %#v", receipt)
+	}
+	if got := lease.Metadata["policy.requires_audit_receipt"]; got != "true" {
+		t.Fatalf("policy.requires_audit_receipt = %q", got)
+	}
+}
+
+func TestApplySupersedesLeaseWhenExecutionMetadataChanges(t *testing.T) {
+	start := time.Date(2026, 6, 22, 22, 45, 0, 0, time.UTC)
+	current := start
+	pep := &fakePEP{}
+	b, store := newBroker(t, pep, func() time.Time { return current })
+	defer store.Close()
+
+	res := testResolution(time.Minute)
+	res.Parameters["execution_dry_run"] = true
+	lease1, _, err := b.Apply(context.Background(), res)
+	if err != nil {
+		t.Fatalf("first apply: %v", err)
+	}
+
+	current = start.Add(time.Second)
+	pep.token = ""
+	res = testResolution(time.Minute)
+	res.DecisionID = "decision-real"
+	res.Parameters["execution_dry_run"] = false
+	lease2, receipt, err := b.Apply(context.Background(), res)
+	if err != nil {
+		t.Fatalf("second apply: %v", err)
+	}
+	if pep.applyCalls != 2 {
+		t.Fatalf("execution metadata change must reapply PEP, got %d apply calls", pep.applyCalls)
+	}
+	if lease2.LeaseID == lease1.LeaseID {
+		t.Fatalf("expected new lease after supersede, got same lease %s", lease2.LeaseID)
+	}
+	if receipt.Status != decision.StatusApplied || receipt.Message == "lease renewed" {
+		t.Fatalf("expected fresh apply receipt, got %#v", receipt)
+	}
+	loaded, ok, err := store.GetActionLease(context.Background(), lease1.LeaseID)
+	if err != nil || !ok {
+		t.Fatalf("load superseded lease: ok=%v err=%v", ok, err)
+	}
+	if loaded.Status != decision.ActionLeaseSuperseded {
+		t.Fatalf("expected superseded lease, got %s", loaded.Status)
 	}
 }
 

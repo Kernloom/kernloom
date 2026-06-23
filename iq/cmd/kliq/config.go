@@ -41,6 +41,7 @@ type cfg struct {
 	ForgeEnrollToken string // one-time enrollment token (consumed at enrollment, replaced by session token)
 	ForgeCAPath      string // path to CA certificate for TLS verification (PEM); empty = system roots
 	ForgeHeartbeat   time.Duration
+	NodeLabels       string // comma-separated key=value labels reported in ComponentInventory
 	FailMode         string // fail_static | fail_open
 
 	// Mode + policy + pdp config
@@ -200,9 +201,10 @@ type cfg struct {
 	// Forge-compiled response IR from a RuntimePolicyPack. They are loaded and
 	// preserved for the response evaluator/notification path; they are not
 	// access authorization rules.
-	RuntimeDetectionRules []contracts.RuntimeDetectionRule
-	RuntimeResponseRules  []contracts.RuntimeResponseRule
-	RuntimeAlertRoutes    []contracts.RuntimeAlertRoute
+	RuntimeDetectionRules    []contracts.RuntimeDetectionRule
+	RuntimeResponseRules     []contracts.RuntimeResponseRule
+	RuntimeAlertRoutes       []contracts.RuntimeAlertRoute
+	RuntimeAutonomyLifecycle *contracts.RuntimeAutonomyLifecycleSpec
 
 	// Per-level Forge capability IDs read from PolicyPack rules (then.capability).
 	// Used for logging and future capability-based adapter dispatch.
@@ -425,6 +427,7 @@ func (c cfg) toPEPParams() adapterruntime.EnforcementParams {
 	}
 
 	return adapterruntime.EnforcementParams{
+		DryRun:    c.DryRun,
 		SoftRate:  softRate,
 		SoftBurst: softBurst,
 		SoftTTL:   c.SoftTTL,
@@ -600,6 +603,7 @@ AGENT FLAGS
 	flag.StringVar(&c.ForgeEnrollToken, "forge-enroll-token", "", "one-time enrollment token issued by 'forge token create' (consumed on first enrollment)")
 	flag.StringVar(&c.ForgeCAPath, "forge-ca", "", "path to PEM CA certificate for TLS verification of forge serve; empty = system roots")
 	flag.DurationVar(&c.ForgeHeartbeat, "forge-heartbeat", 5*time.Minute, "heartbeat interval to forge serve")
+	flag.StringVar(&c.NodeLabels, "node-labels", "", "comma-separated node labels reported to Forge, e.g. role=edge-gateway,env=production")
 
 	flag.StringVar(&c.Adapters, "adapter", catalog.DefaultAdapterID,
 		`comma-separated adapters to activate: catalog runtime adapters, netfilter, none, or a combination`)

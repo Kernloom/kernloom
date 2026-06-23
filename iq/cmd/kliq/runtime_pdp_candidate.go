@@ -77,17 +77,118 @@ func mergeFSMRuntimeState(actual, signal fsm.State) fsm.State {
 	return out
 }
 
+func projectRuntimePDPLeaseState(st fsm.State, m metrics, nodeID string, facts runtimePDPFactProvider, now time.Time) fsm.State {
+	if facts == nil || m.sourceID() == "" {
+		return st
+	}
+	snapshot, err := facts.CandidateFacts(context.Background(), nodeID, m, now)
+	if err != nil {
+		return st
+	}
+	if projected, ok := runtimeStateFromActionFacts(st, snapshot.Actions, now); ok {
+		return projected
+	}
+	return st
+}
+
+func runtimeStateFromActionFacts(st fsm.State, actionFacts map[string]any, now time.Time) (fsm.State, bool) {
+	if len(actionFacts) == 0 {
+		return st, false
+	}
+	if fact, ok := activeRuntimeActionFact(actionFacts, "enforce_traffic_drop", "enforce_access_deny", "enforce_network_quarantine", "enforce_identity_disable"); ok {
+		return runtimeStateWithActionFact(st, fsm.LevelBlock, fact, now), true
+	}
+	if fact, ok := activeRuntimeActionFact(actionFacts, "enforce_traffic_rate_limit"); ok {
+		level := actions.ParseFSMLevel(stringFactValue(fact, "level"))
+		if level < fsm.LevelSoft {
+			level = fsm.LevelHard
+		}
+		return runtimeStateWithActionFact(st, level, fact, now), true
+	}
+	return st, false
+}
+
+func activeRuntimeActionFact(actionFacts map[string]any, keys ...string) (map[string]any, bool) {
+	for _, key := range keys {
+		raw, ok := actionFacts[key]
+		if !ok {
+			continue
+		}
+		fact, ok := raw.(map[string]any)
+		if !ok || !boolFactValue(fact, "active") {
+			continue
+		}
+		return fact, true
+	}
+	return nil, false
+}
+
+func runtimeStateWithActionFact(st fsm.State, level fsm.Level, fact map[string]any, now time.Time) fsm.State {
+	st.Level = level
+	if expiresAt, ok := timeFactValue(fact, "expires_at"); ok {
+		st.ExpiresAt = expiresAt
+	} else if st.ExpiresAt.IsZero() {
+		st.ExpiresAt = now
+	}
+	return st
+}
+
+func boolFactValue(fact map[string]any, key string) bool {
+	switch value := fact[key].(type) {
+	case bool:
+		return value
+	case string:
+		parsed, err := strconv.ParseBool(value)
+		return err == nil && parsed
+	default:
+		return false
+	}
+}
+
+func stringFactValue(fact map[string]any, key string) string {
+	switch value := fact[key].(type) {
+	case string:
+		return value
+	case fmt.Stringer:
+		return value.String()
+	default:
+		if value == nil {
+			return ""
+		}
+		return fmt.Sprint(value)
+	}
+}
+
+func timeFactValue(fact map[string]any, key string) (time.Time, bool) {
+	switch value := fact[key].(type) {
+	case time.Time:
+		return value.UTC(), !value.IsZero()
+	case string:
+		parsed, err := time.Parse(time.RFC3339Nano, value)
+		if err != nil {
+			return time.Time{}, false
+		}
+		return parsed.UTC(), true
+	default:
+		return time.Time{}, false
+	}
+}
+
 func runtimePDPInputForCandidate(nodeID string, m metrics, current fsm.State, intent fsmIntent, c cfg, facts runtimePDPFactProvider, now time.Time) runtimepdp.Input {
 	subject := runtimePDPSubjectForCandidate(m)
 	risk := localRiskForCandidate(nodeID, subject, m, current, c, now)
 	adapterFacts := adapterFactMap(m)
 	baselineFacts := thresholdFactsWithSnapshot(c.tuningThresholds())
 	graphFacts := graphFactMap(m.Signals)
+	detectionFacts := map[string]any{}
+	actionFacts := map[string]any{}
 
 	if facts != nil {
 		snapshot, err := facts.CandidateFacts(context.Background(), nodeID, m, now)
 		baselineFacts = mergeFactMaps(baselineFacts, snapshot.Baseline)
 		graphFacts = mergeFactMaps(graphFacts, snapshot.Graph)
+		detectionFacts = mergeFactMaps(detectionFacts, snapshot.Detections)
+		actionFacts = mergeFactMaps(actionFacts, snapshot.Actions)
 		if err != nil {
 			adapterFacts["fact_lookup_error"] = err.Error()
 		}
@@ -98,13 +199,15 @@ func runtimePDPInputForCandidate(nodeID string, m metrics, current fsm.State, in
 		Subject: subject,
 		Risk:    risk,
 		Context: runtimepdp.ContextSnapshot{
-			Metrics:  metricFactMap(m.Signals),
-			Signals:  signalFactMap(m),
-			Baseline: baselineFacts,
-			Graph:    graphFacts,
-			Adapter:  adapterFacts,
-			FSM:      fsmFactMap(current, intent, now),
-			Features: featureFactMap(c),
+			Metrics:    metricFactMap(m.Signals),
+			Signals:    signalFactMap(m),
+			Baseline:   baselineFacts,
+			Graph:      graphFacts,
+			Adapter:    adapterFacts,
+			FSM:        fsmFactMap(current, intent, now),
+			Features:   featureFactMap(c),
+			Detections: detectionFacts,
+			Actions:    actionFacts,
 		},
 		Now: now,
 	}
@@ -135,6 +238,8 @@ func runtimePDPInputForSignal(nodeID string, sig signal.Signal, facts runtimePDP
 	score := clampInt(sig.Score, 0, 100)
 	graphFacts := graphSignalFactMap(sig)
 	baselineFacts := map[string]any{}
+	detectionFacts := map[string]any{}
+	actionFacts := map[string]any{}
 	adapterFacts := map[string]any{
 		"source_id":  sig.Subject.ID,
 		"subject_id": sig.Subject.ID,
@@ -144,6 +249,8 @@ func runtimePDPInputForSignal(nodeID string, sig signal.Signal, facts runtimePDP
 		snapshot, err := facts.CandidateFacts(context.Background(), nodeID, metricsForRuntimeSubject(subject), now)
 		baselineFacts = mergeFactMaps(baselineFacts, snapshot.Baseline)
 		graphFacts = mergeFactMaps(graphFacts, snapshot.Graph)
+		detectionFacts = mergeFactMaps(detectionFacts, snapshot.Detections)
+		actionFacts = mergeFactMaps(actionFacts, snapshot.Actions)
 		if err != nil {
 			adapterFacts["fact_lookup_error"] = err.Error()
 		}
@@ -169,6 +276,8 @@ func runtimePDPInputForSignal(nodeID string, sig signal.Signal, facts runtimePDP
 				fsmIntent{SignalState: fsm.State{}, ProposedLevel: fsm.LevelObserve},
 				now,
 			),
+			Detections: detectionFacts,
+			Actions:    actionFacts,
 		},
 		Now: now,
 	}
@@ -599,12 +708,17 @@ func clampInt(v, min, max int) int {
 }
 
 func (s *shadowPDPRunner) decide(input runtimepdp.Input) (contracts.RuntimeDecision, bool, bool, error) {
+	dec, matched, loaded, _, err := s.decideWithTrace(input)
+	return dec, matched, loaded, err
+}
+
+func (s *shadowPDPRunner) decideWithTrace(input runtimepdp.Input) (contracts.RuntimeDecision, bool, bool, []runtimepdp.RuleTrace, error) {
 	pdp := s.current()
 	if pdp == nil {
-		return contracts.RuntimeDecision{}, false, false, nil
+		return contracts.RuntimeDecision{}, false, false, nil, nil
 	}
-	dec, matched, err := pdp.Decide(input)
-	return dec, matched, true, err
+	dec, matched, trace, err := pdp.DecideWithTrace(input)
+	return dec, matched, true, trace, err
 }
 
 func runtimePDPDecisionLogPrefix(mode runtimePDPMode) string {
@@ -617,4 +731,46 @@ func runtimePDPDecisionLogPrefix(mode runtimePDPMode) string {
 func describeRuntimeCandidate(m metrics, intent fsmIntent) string {
 	return fmt.Sprintf("subject=%s score=%.0f fsm=%s proposed=%s",
 		m.sourceID(), m.score(), actions.FsmLevelName(intent.SignalState.Level), actions.FsmLevelName(intent.ProposedLevel))
+}
+
+func shouldLogRuntimePDPNoMatch(input runtimepdp.Input, intent fsmIntent) bool {
+	return input.Risk.Score >= 30
+}
+
+func summarizeRuntimePDPTrace(traces []runtimepdp.RuleTrace) string {
+	if len(traces) == 0 {
+		return ""
+	}
+	parts := make([]string, 0, len(traces))
+	for _, trace := range traces {
+		status := "false"
+		switch {
+		case trace.Matched:
+			status = "matched"
+		case trace.Skipped:
+			status = "skipped:" + shortRuntimePDPTraceError(trace.Error)
+		case trace.Error != "":
+			status = "error:" + shortRuntimePDPTraceError(trace.Error)
+		}
+		parts = append(parts, trace.ID+"="+status)
+		if len(parts) >= 8 {
+			parts = append(parts, "...")
+			break
+		}
+	}
+	return strings.Join(parts, " ")
+}
+
+func shortRuntimePDPTraceError(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return "unknown"
+	}
+	if idx := strings.Index(value, "\n"); idx >= 0 {
+		value = value[:idx]
+	}
+	if len(value) > 96 {
+		value = value[:96] + "..."
+	}
+	return value
 }

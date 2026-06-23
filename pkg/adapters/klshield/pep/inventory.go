@@ -17,7 +17,7 @@ import (
 func (a *Adapter) BuildInventory(nodeID string) componentinventory.ComponentRuntimeInventory {
 	inv := componentinventory.ComponentRuntimeInventory{
 		APIVersion: "kernloom.io/v1alpha1",
-		Kind:       "ComponentRuntimeInventory",
+		Kind:       "ComponentInventory",
 	}
 	inv.Metadata.ID = "klshield-" + nodeID
 	inv.Metadata.Timestamp = time.Now().UTC()

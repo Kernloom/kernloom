@@ -56,7 +56,7 @@ func TestValidateRuntimeBundleRejectsUnsupportedCapability(t *testing.T) {
 	node.Capabilities["enforce.unknown.magic"] = true
 
 	err := conformance.ValidateRuntimeBundle(bundle, pub, node)
-	if err == nil || !strings.Contains(err.Error(), "not supported") {
+	if err == nil || !strings.Contains(err.Error(), "unknown runtime action capability") {
 		t.Fatalf("expected unsupported capability error, got %v", err)
 	}
 }
@@ -103,6 +103,32 @@ func TestValidateRuntimePolicyPackAcceptsGenericFactVariables(t *testing.T) {
 	}
 }
 
+func TestValidateRuntimePolicyPackAcceptsAutonomyLifecycleAction(t *testing.T) {
+	pack := validBundle("active", "enforce.traffic.rate_limit", "soft", "fail_static").Spec.RuntimePolicyPack
+	pack.Spec.CapabilitiesRequired = nil
+	pack.Spec.Rules = nil
+	pack.Spec.AutonomyLifecycle = &contracts.RuntimeAutonomyLifecycleSpec{
+		Hold: []contracts.RuntimeAutonomyHoldRule{{
+			ID: "hold-enforcement-feedback",
+			While: contracts.RuntimeAutonomyHoldCondition{
+				EnforcementFeedbackActive: true,
+				Levels:                    []string{"soft", "hard", "block"},
+			},
+			Action: contracts.RuntimeActionSpec{
+				Capability: "enforce.traffic.rate_limit",
+				Level:      "hard",
+				TTL:        contracts.NewDuration(30 * time.Second),
+			},
+			ReasonCodes: []string{"enforcement_hold"},
+		}},
+	}
+
+	err := conformance.ValidateRuntimePolicyPack(pack, nodeRuntime("rate_limit_hard"))
+	if err != nil {
+		t.Fatalf("autonomy lifecycle policy rejected: %v", err)
+	}
+}
+
 func TestValidateRuntimePolicyPackRejectsUnknownContextKey(t *testing.T) {
 	pack := validBundle("active", "enforce.traffic.rate_limit", "soft", "fail_static").Spec.RuntimePolicyPack
 	pack.Spec.Rules[0].When = "device.magic.foo == true"
@@ -110,6 +136,55 @@ func TestValidateRuntimePolicyPackRejectsUnknownContextKey(t *testing.T) {
 	err := conformance.ValidateRuntimePolicyPack(pack, nodeRuntime("rate_limit"))
 	if err == nil || !strings.Contains(err.Error(), "unknown context key") {
 		t.Fatalf("expected unknown context key error, got %v", err)
+	}
+}
+
+func TestValidateRuntimePolicyPackRejectsRuntimeActionWithoutTTL(t *testing.T) {
+	pack := validBundle("active", "enforce.traffic.rate_limit", "soft", "fail_static").Spec.RuntimePolicyPack
+	pack.Spec.Rules[0].Then.TTL = contracts.Duration{}
+
+	err := conformance.ValidateRuntimePolicyPack(pack, nodeRuntime("rate_limit"))
+	if err == nil || !strings.Contains(err.Error(), "requires ttl") {
+		t.Fatalf("expected missing ttl error, got %v", err)
+	}
+}
+
+func TestValidateRuntimePolicyPackRejectsGrantingRuntimeAction(t *testing.T) {
+	pack := validBundle("active", "enforce.traffic.rate_limit", "soft", "fail_static").Spec.RuntimePolicyPack
+	pack.Spec.CapabilitiesRequired = []string{"enforce.network.allow"}
+	pack.Spec.Rules[0].Then = contracts.RuntimeActionSpec{
+		Capability: "enforce.network.allow",
+		Level:      "observe",
+		TTL:        contracts.NewDuration(time.Minute),
+	}
+	node := nodeRuntime("")
+	node.Capabilities = nil
+
+	err := conformance.ValidateRuntimePolicyPack(pack, node)
+	if err == nil || !strings.Contains(err.Error(), "not a runtime action") {
+		t.Fatalf("expected grant/runtime-action error, got %v", err)
+	}
+}
+
+func TestValidateRuntimePolicyPackRejectsInvalidResponseAction(t *testing.T) {
+	pack := validBundle("active", "enforce.traffic.rate_limit", "soft", "fail_static").Spec.RuntimePolicyPack
+	pack.Spec.DetectionRules = []contracts.RuntimeDetectionRule{{
+		ID:   "unknown-source-heavy-deny",
+		Type: "access.denied_threshold",
+	}}
+	pack.Spec.ResponseRules = []contracts.RuntimeResponseRule{{
+		ID:   "drop-without-ttl",
+		When: contracts.RuntimeResponseTrigger{Detection: "unknown-source-heavy-deny"},
+		Then: []contracts.RuntimeResponseAction{{
+			ID: "enforce.traffic.drop",
+		}},
+	}}
+	node := nodeRuntime("")
+	node.Capabilities["enforce.traffic.drop"] = true
+
+	err := conformance.ValidateRuntimePolicyPack(pack, node)
+	if err == nil || !strings.Contains(err.Error(), "requires ttl") {
+		t.Fatalf("expected response ttl error, got %v", err)
 	}
 }
 

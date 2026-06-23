@@ -21,6 +21,24 @@ spec:
   default_effect: deny
   capabilities_required:
     - enforce.traffic.rate_limit
+  autonomy_lifecycle:
+    hold:
+      - id: hold-enforcement-feedback
+        while:
+          enforcement_feedback_active: true
+          levels: [soft, hard, block]
+        action:
+          capability: enforce.traffic.rate_limit
+          level: hard
+          ttl: "30s"
+          params:
+            rate_pps: 100
+        reason_codes:
+          - enforcement_hold
+    step_down:
+      clean_after: "30s"
+      observe_after: "2m"
+    max_renewals: 3
   guardrails:
     - id: never-auto-block-admins
       type: never
@@ -102,6 +120,12 @@ func TestLoadPolicyBytesRecognizesRuntimePolicyPack(t *testing.T) {
 	}
 	if len(c.RuntimeAlertRoutes) != 1 || c.RuntimeAlertRoutes[0].ID != "alert-route.security-ops" {
 		t.Fatalf("alert routes not applied: %#v", c.RuntimeAlertRoutes)
+	}
+	if c.RuntimeAutonomyLifecycle == nil || len(c.RuntimeAutonomyLifecycle.Hold) != 1 {
+		t.Fatalf("autonomy lifecycle not applied: %#v", c.RuntimeAutonomyLifecycle)
+	}
+	if got := c.RuntimeAutonomyLifecycle.Hold[0].Action.TTL.Duration.String(); got != "30s" {
+		t.Fatalf("autonomy hold ttl: %s", got)
 	}
 }
 

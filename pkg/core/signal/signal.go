@@ -76,6 +76,11 @@ const (
 	SignalPolicyViolation           SignalType = "policy.violation"             // Action disallowed by policy
 )
 
+// Runtime reaction signals
+const (
+	SignalReactionAlert SignalType = "reaction.alert" // Alert emitted by a runtime response rule
+)
+
 // Service signals
 const (
 	SignalServiceUnusualClient SignalType = "service.unusual_client" // Client not in baseline

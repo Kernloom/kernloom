@@ -248,12 +248,13 @@ const (
 type ActionLeaseStatus string
 
 const (
-	ActionLeasePending  ActionLeaseStatus = "pending"
-	ActionLeaseActive   ActionLeaseStatus = "active"
-	ActionLeaseReverted ActionLeaseStatus = "reverted"
-	ActionLeaseExpired  ActionLeaseStatus = "expired"
-	ActionLeaseFailed   ActionLeaseStatus = "failed"
-	ActionLeaseConflict ActionLeaseStatus = "conflict"
+	ActionLeasePending    ActionLeaseStatus = "pending"
+	ActionLeaseActive     ActionLeaseStatus = "active"
+	ActionLeaseReverted   ActionLeaseStatus = "reverted"
+	ActionLeaseExpired    ActionLeaseStatus = "expired"
+	ActionLeaseSuperseded ActionLeaseStatus = "superseded"
+	ActionLeaseFailed     ActionLeaseStatus = "failed"
+	ActionLeaseConflict   ActionLeaseStatus = "conflict"
 )
 
 // ActionLease is the durable journal record for a bounded enforcement action.

@@ -294,9 +294,10 @@ struct {
     __type(value, struct rl_cfg_t);
 } edge4_rl_policy SEC(".maps");
 
-/* Per-edge token-bucket state. LRU so old entries evict automatically. */
+/* Per-edge token-bucket state. HASH is used because rl_state_t contains a
+ * bpf_spin_lock; this keeps token accounting coherent across XDP CPUs. */
 struct {
-    __uint(type, BPF_MAP_TYPE_LRU_HASH);
+    __uint(type, BPF_MAP_TYPE_HASH);
     __uint(max_entries, 65536);
     __type(key,   struct edge4_key);
     __type(value, struct rl_state_t);
@@ -332,6 +333,7 @@ struct rl_cfg_t {
 };
 
 struct rl_state_t {
+    struct bpf_spin_lock lock;
     __u64 last_ns;
     __u64 tokens;
 };
@@ -360,14 +362,14 @@ struct {
 
 /* states */
 struct {
-    __uint(type, BPF_MAP_TYPE_LRU_HASH);
+    __uint(type, BPF_MAP_TYPE_HASH);
     __uint(max_entries, 262144);
     __type(key, __u32);              // IPv4 saddr (as loaded from packet)
     __type(value, struct rl_state_t);
 } xdp_rl_state4 SEC(".maps");
 
 struct {
-    __uint(type, BPF_MAP_TYPE_LRU_HASH);
+    __uint(type, BPF_MAP_TYPE_HASH);
     __uint(max_entries, 262144);
     __type(key, struct src6_key);
     __type(value, struct rl_state_t);
@@ -545,9 +547,9 @@ static __always_inline const struct rl_cfg_t *select_rl_v6(const __u8 *saddr16)
 }
 
 /* Token bucket update (overflow-safe refill shortcut) */
-static __always_inline bool tb_allow_and_update(struct rl_state_t *st,
-                                                const struct rl_cfg_t *cfg,
-                                                __u64 now)
+static __always_inline bool tb_allow_and_update_unlocked(struct rl_state_t *st,
+                                                         const struct rl_cfg_t *cfg,
+                                                         __u64 now)
 {
     if (!cfg || cfg->rate_pps == 0 || cfg->burst == 0)
         return true;
@@ -555,7 +557,7 @@ static __always_inline bool tb_allow_and_update(struct rl_state_t *st,
     if (!st) return true;
 
     __u64 tokens = st->tokens;
-    __u64 delta  = now - st->last_ns;
+    __u64 delta = now > st->last_ns ? now - st->last_ns : 0;
 
     if (tokens < cfg->burst) {
         __u64 missing = cfg->burst - tokens;
@@ -563,22 +565,37 @@ static __always_inline bool tb_allow_and_update(struct rl_state_t *st,
 
         if (delta >= need_ns) {
             tokens = cfg->burst;
+            st->last_ns = now;
         } else {
             __u64 add = (delta * cfg->rate_pps) / NSEC_PER_SEC;
-            tokens += add;
-            if (tokens > cfg->burst) tokens = cfg->burst;
+            if (add > 0) {
+                tokens += add;
+                if (tokens > cfg->burst) tokens = cfg->burst;
+                st->last_ns += (add * NSEC_PER_SEC) / cfg->rate_pps;
+            }
         }
     }
 
     if (tokens == 0) {
-        st->last_ns = now;
         st->tokens  = 0;
         return false;
     }
 
-    st->last_ns = now;
     st->tokens  = tokens - 1;
     return true;
+}
+
+static __always_inline bool tb_allow_and_update(struct rl_state_t *st,
+                                                const struct rl_cfg_t *cfg,
+                                                __u64 now)
+{
+    if (!st)
+        return true;
+
+    bpf_spin_lock(&st->lock);
+    bool allowed = tb_allow_and_update_unlocked(st, cfg, now);
+    bpf_spin_unlock(&st->lock);
+    return allowed;
 }
 
 /* Optional event emission */
@@ -931,7 +948,9 @@ int xdp_klshield(struct xdp_md *ctx)
                 if (!st) {
                     /* init consumes token for this first packet */
                     __u64 init_tokens = (use->burst > 0) ? (use->burst - 1) : 0;
-                    struct rl_state_t init = { .last_ns = now, .tokens = init_tokens };
+                    struct rl_state_t init = {};
+                    init.last_ns = now;
+                    init.tokens = init_tokens;
                     bpf_map_update_elem(&xdp_rl_state4, &saddr, &init, BPF_ANY);
                 } else {
                     if (!tb_allow_and_update(st, use, now))
@@ -980,7 +999,9 @@ int xdp_klshield(struct xdp_md *ctx)
                         struct rl_state_t *est = bpf_map_lookup_elem(&edge4_rl_state, &ek);
                         if (!est) {
                             __u64 init_toks = (erl->burst > 0) ? (erl->burst - 1) : 0;
-                            struct rl_state_t init = { .last_ns = now, .tokens = init_toks };
+                            struct rl_state_t init = {};
+                            init.last_ns = now;
+                            init.tokens = init_toks;
                             bpf_map_update_elem(&edge4_rl_state, &ek, &init, BPF_ANY);
                         } else {
                             if (!tb_allow_and_update(est, erl, now))
@@ -1118,7 +1139,9 @@ int xdp_klshield(struct xdp_md *ctx)
                 struct rl_state_t *st6 = bpf_map_lookup_elem(&xdp_rl_state6, &k6);
                 if (!st6) {
                     __u64 init_tokens = (use->burst > 0) ? (use->burst - 1) : 0;
-                    struct rl_state_t init = { .last_ns = now, .tokens = init_tokens };
+                    struct rl_state_t init = {};
+                    init.last_ns = now;
+                    init.tokens = init_tokens;
                     bpf_map_update_elem(&xdp_rl_state6, &k6, &init, BPF_ANY);
                 } else {
                     if (!tb_allow_and_update(st6, use, now))

@@ -13,14 +13,24 @@ Official docs: https://kernloom.com/
 
 ## Current Release Line
 
-`v0.3.0` focuses on the local runtime path:
+`v0.4.0` focuses on runtime policy autonomy:
 
-- RuntimePDP supports `shadow` and `active` mode.
-- Active RuntimePDP is the action authority.
-- KLIQ persists source baselines in SQLite.
-- Source baselines can raise effective triggers for known good high-traffic sources.
-- Runtime actions use TTL leases, fencing, receipts and auto-revert.
-- Forge can export standalone `RuntimePolicyPack` files and serve signed `RuntimeBundle` files.
+- Natural Intent is authored in Forge, converted to digest-pinned policy
+  documents, and exported as a KLShield-targeted `RuntimePolicyPack`.
+- RuntimePDP supports `shadow` and `active` mode; in active mode RuntimePDP is
+  the action authority.
+- Runtime actions use TTL leases, fencing, receipts and auto-revert through the
+  action broker.
+- Runtime policies can express enforcement-feedback holds, previous-action
+  gates, risk confidence/freshness gates, independent-signal gates, max-duration
+  bounds and audit requirements.
+- KLShield source rate limiting uses `rate_pps` as an approximate pass budget.
+  Drop counters report packets rejected above that budget, not the configured
+  budget itself.
+- KLIQ persists source baselines in SQLite and can raise effective triggers for
+  known good high-traffic sources.
+- Forge can export standalone `RuntimePolicyPack` files and serve signed
+  `RuntimeBundle` files.
 - Registry snapshots from `kernloom-registries` define the allowed runtime vocabulary.
 
 ---
@@ -230,6 +240,12 @@ Standalone nodes can also load a contracts-based RuntimePolicyPack directly:
   --runtime-pdp-mode=shadow \
   --dry-run=true
 ```
+
+Natural Intent files are authoring input for Forge, not direct KLIQ input. For
+manual tests, run `forge intent convert`, inspect `forge intent support`, export
+a `RuntimePolicyPack` with `forge export-runtime-policy`, then pass that YAML to
+`kliq run --policy-file`. The full copy/paste path is in
+`_docs/testing/manual-test-guide.md`.
 
 `--policy-file` accepts:
 - `kind: LocalPolicyPack` — local KLIQ policy and threshold tuning.

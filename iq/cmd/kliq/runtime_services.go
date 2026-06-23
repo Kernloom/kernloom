@@ -110,6 +110,8 @@ type runtimeSignalConsumerConfig struct {
 	RuntimeFacts      runtimePDPFactProvider
 	Resolver          *actions.PolicyResolver
 	Executor          *brokeredActionExecutor
+	ReactionEngine    *runtimeReactionEngine
+	Config            *cfg
 	SubscriptionDepth int
 }
 
@@ -150,6 +152,10 @@ func handleRuntimeSignal(ctx context.Context, sig signal.Signal, cfg runtimeSign
 
 	if isGraphBaselineSignal(sig.Type) && sig.Subject.ID != "" {
 		sendStrike(cfg.GraphStrikeCh, sig.Subject.ID, 0, false, true, sig.Score)
+	}
+
+	if cfg.ReactionEngine != nil && cfg.Config != nil {
+		cfg.ReactionEngine.EvaluateSignal(sig, time.Now().UTC(), *cfg.Config, cfg.Resolver, cfg.Executor, cfg.NodeID)
 	}
 }
 

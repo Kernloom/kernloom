@@ -23,9 +23,12 @@ import (
 	"time"
 
 	contracts "github.com/kernloom/kernloom-contracts"
+	"github.com/kernloom/kernloom/iq/internal/actionbroker"
 	"github.com/kernloom/kernloom/iq/internal/actions"
+	"github.com/kernloom/kernloom/iq/internal/conformance"
 	"github.com/kernloom/kernloom/iq/internal/lifecycle/bootstrapautotune"
 	lgraph "github.com/kernloom/kernloom/iq/internal/lifecycle/graph"
+	"github.com/kernloom/kernloom/pkg/adapters/catalog"
 	"github.com/kernloom/kernloom/pkg/core/bundle"
 	corepolicy "github.com/kernloom/kernloom/pkg/core/policy"
 	"gopkg.in/yaml.v3"
@@ -47,6 +50,7 @@ type managedState struct {
 // It is intentionally called synchronously in the main goroutine — no locks needed.
 func applyBundleUpdate(
 	rawBundle []byte,
+	nodeID string,
 	c *cfg,
 	bsCtl **bootstrapautotune.Controller,
 	graphCtl **lgraph.Controller,
@@ -54,6 +58,7 @@ func applyBundleUpdate(
 	stFile *stateFile,
 	runtimePolicyUpdates chan<- contracts.RuntimePolicyPack,
 	resolver *actions.PolicyResolver,
+	brokers ...*actionbroker.Broker,
 ) {
 	// Skip if the bundle hasn't changed — prevents repeated log spam every heartbeat.
 	newHash := fmt.Sprintf("%x", hashBundleBytes(rawBundle))[:16]
@@ -61,7 +66,7 @@ func applyBundleUpdate(
 		return
 	}
 
-	b, runtimePack, err := parseTrustedRuntimeBundle(rawBundle, c)
+	b, runtimePack, err := parseTrustedRuntimeBundle(rawBundle, c, nodeID)
 	if err != nil {
 		kliqLog.Printf("BUNDLE apply: trust/parse failed: %v", err)
 		return
@@ -80,6 +85,7 @@ func applyBundleUpdate(
 	if runtimePack != nil {
 		applyRuntimePolicyPackToCfg(*runtimePack, c)
 		syncPolicyResolverFromCfg(*c, resolver)
+		syncActionBrokerAutonomyFromCfg(*c, brokers...)
 	}
 
 	// Apply baseline lifecycle.
@@ -159,7 +165,7 @@ func loadLastKnownGoodBundle(statePath string) []byte {
 	return data
 }
 
-func parseTrustedRuntimeBundle(rawBundle []byte, c *cfg) (*contracts.RuntimeBundle, *contracts.RuntimePolicyPack, error) {
+func parseTrustedRuntimeBundle(rawBundle []byte, c *cfg, nodeID string) (*contracts.RuntimeBundle, *contracts.RuntimePolicyPack, error) {
 	jsonBytes, err := yamlBytesToJSON(rawBundle)
 	if err != nil {
 		return nil, nil, fmt.Errorf("parse contracts runtime bundle: %w", err)
@@ -170,6 +176,7 @@ func parseTrustedRuntimeBundle(rawBundle []byte, c *cfg) (*contracts.RuntimeBund
 	}
 
 	now := time.Now().UTC()
+	nodeRuntime := nodeRuntimeForBundle(rb, c, nodeID, now)
 	if c.Mode == string(corepolicy.ModeManaged) || c.PolicyVerifyKeyPath != "" {
 		if c.PolicyVerifyKeyPath == "" {
 			return nil, nil, fmt.Errorf("managed mode requires --policy-verify-key to verify runtime bundle signature")
@@ -178,19 +185,79 @@ func parseTrustedRuntimeBundle(rawBundle []byte, c *cfg) (*contracts.RuntimeBund
 		if err != nil {
 			return nil, nil, fmt.Errorf("load runtime bundle verify key: %w", err)
 		}
-		if err := contracts.VerifyRuntimeBundle(rb, pubKey, now); err != nil {
+		if err := conformance.ValidateRuntimeBundle(rb, pubKey, nodeRuntime); err != nil {
 			return nil, nil, err
 		}
 	} else if err := contracts.ValidateRuntimeBundle(rb, now); err != nil {
 		return nil, nil, err
-	}
-	if rb.Spec.RegistrySnapshot.Ref.Name == "" {
-		return nil, nil, fmt.Errorf("contracts runtime bundle registry snapshot is required")
+	} else if err := conformance.ValidateRuntimePolicyPack(rb.Spec.RuntimePolicyPack, nodeRuntime); err != nil {
+		return nil, nil, err
 	}
 	capabilitySeverityKLIQ = capabilitySeverityFromSnapshot(rb.Spec.RegistrySnapshot)
 
 	pack := rb.Spec.RuntimePolicyPack
 	return &rb, &pack, nil
+}
+
+func nodeRuntimeForBundle(rb contracts.RuntimeBundle, c *cfg, nodeID string, now time.Time) conformance.NodeRuntime {
+	return conformance.NodeRuntime{
+		NodeID:            nodeID,
+		Capabilities:      runtimeCapabilitiesForBundle(rb, c),
+		MaxAction:         maxActionForBundleConformance(rb, c),
+		SupportedPDPModes: map[string]bool{"shadow": true, "active": true},
+		RegistrySnapshot:  rb.Spec.RegistrySnapshot,
+		Now:               now,
+	}
+}
+
+func runtimeCapabilitiesForBundle(rb contracts.RuntimeBundle, c *cfg) map[string]bool {
+	adapters := append([]string(nil), rb.Spec.AdapterSelector.PreferredAdapters...)
+	if len(adapters) == 0 && c != nil {
+		adapters = c.adapterNames()
+	}
+	if len(adapters) == 0 {
+		return nil
+	}
+	caps := map[string]bool{}
+	add := func(ids ...string) {
+		for _, id := range ids {
+			if id != "" {
+				caps[id] = true
+			}
+		}
+	}
+	for _, adapterID := range adapters {
+		switch catalog.CanonicalAdapterID(strings.TrimSpace(adapterID)) {
+		case catalog.DefaultAdapterID:
+			add(
+				"observe.network.flow",
+				"observe.network.drop",
+				"observe.network.rate_limit",
+				"enforce.traffic.rate_limit",
+				"enforce.traffic.drop",
+				"enforce.access.deny",
+			)
+		case "netfilter":
+			add(
+				"enforce.network.rate_limit",
+				"enforce.network.deny",
+			)
+		}
+	}
+	if len(caps) == 0 {
+		return nil
+	}
+	return caps
+}
+
+func maxActionForBundleConformance(rb contracts.RuntimeBundle, c *cfg) string {
+	if c != nil && c.PolicyMaxAction != "" {
+		return c.PolicyMaxAction
+	}
+	if !rb.Spec.EnforcementBounds.AllowBlock {
+		return "rate_limit_hard"
+	}
+	return ""
 }
 
 func baselineLifecycleConfigured(plan contracts.BaselineLifecycle) bool {
@@ -271,7 +338,68 @@ func buildRuntimeStatus(
 		BootstrapAutotune:      bsCtl.StatusReport(triggers, time.Now()),
 		GraphLifecycle:         graphCtl.StatusReport(graphStats, time.Now()),
 	}
+	status.Health = runtimeHealthReport(nodeID, ms, status.ReportedAt)
+	status.AdapterStatuses = runtimeAdapterStatuses(nodeID, c, status.ReportedAt)
+	status.Failover = runtimeFailoverStatus(nodeID, c, status.ReportedAt)
 	return status
+}
+
+func runtimeHealthReport(nodeID string, ms managedState, now time.Time) *contracts.HealthReport {
+	state := "healthy"
+	healthy := true
+	if ms.BundleGeneration == 0 {
+		state = "degraded"
+		healthy = false
+	}
+	return &contracts.HealthReport{
+		TypeMeta:             contracts.TypeMeta{APIVersion: contracts.RuntimeAPIVersion, Kind: contracts.KindHealthReport},
+		NodeID:               nodeID,
+		Status:               state,
+		Healthy:              healthy,
+		LastBundleGeneration: ms.BundleGeneration,
+		LastBundleHash:       ms.BundleHash,
+		ReportedAt:           now,
+	}
+}
+
+func runtimeAdapterStatuses(nodeID string, c *cfg, now time.Time) []contracts.AdapterStatus {
+	if c == nil {
+		return nil
+	}
+	names := c.adapterNames()
+	out := make([]contracts.AdapterStatus, 0, len(names))
+	for _, name := range names {
+		if name == "" || name == "none" {
+			continue
+		}
+		out = append(out, contracts.AdapterStatus{
+			TypeMeta:   contracts.TypeMeta{APIVersion: contracts.RuntimeAPIVersion, Kind: contracts.KindAdapterStatus},
+			NodeID:     nodeID,
+			AdapterID:  name,
+			Kind:       "pep",
+			Healthy:    true,
+			Status:     "active",
+			ReportedAt: now,
+		})
+	}
+	return out
+}
+
+func runtimeFailoverStatus(nodeID string, c *cfg, now time.Time) *contracts.FailoverStatus {
+	mode := "normal"
+	if c != nil && strings.TrimSpace(c.FailMode) != "" {
+		mode = c.FailMode
+	}
+	return &contracts.FailoverStatus{
+		TypeMeta:                  contracts.TypeMeta{APIVersion: contracts.RuntimeAPIVersion, Kind: contracts.KindFailoverStatus},
+		NodeID:                    nodeID,
+		ForgeReachable:            true,
+		LastSuccessfulHeartbeatAt: now,
+		BundleAgeSeconds:          0,
+		ContextTTLStatus:          "unknown",
+		ActiveMode:                mode,
+		ReportedAt:                now,
+	}
 }
 
 // uploadBaselineProposal marshals and uploads the proposal to Forge.

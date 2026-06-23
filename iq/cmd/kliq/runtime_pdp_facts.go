@@ -9,16 +9,20 @@ import (
 	"fmt"
 	"sort"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/kernloom/kernloom/pkg/adapterruntime"
+	"github.com/kernloom/kernloom/pkg/core/decision"
 	"github.com/kernloom/kernloom/pkg/core/relationship"
 	"github.com/kernloom/kernloom/pkg/statestore/sqlite"
 )
 
 type runtimePDPFactSnapshot struct {
-	Baseline map[string]any
-	Graph    map[string]any
+	Baseline   map[string]any
+	Graph      map[string]any
+	Detections map[string]any
+	Actions    map[string]any
 }
 
 type runtimePDPFactProvider interface {
@@ -29,11 +33,47 @@ type runtimePDPFactStore struct {
 	store *sqlite.Store
 }
 
+type runtimePDPCompositeFactProvider struct {
+	providers []runtimePDPFactProvider
+}
+
 func newRuntimePDPFactStore(store *sqlite.Store) *runtimePDPFactStore {
 	if store == nil {
 		return nil
 	}
 	return &runtimePDPFactStore{store: store}
+}
+
+func newRuntimePDPCompositeFactProvider(providers ...runtimePDPFactProvider) runtimePDPFactProvider {
+	out := runtimePDPCompositeFactProvider{}
+	for _, provider := range providers {
+		if provider != nil {
+			out.providers = append(out.providers, provider)
+		}
+	}
+	if len(out.providers) == 0 {
+		return nil
+	}
+	return out
+}
+
+func (p runtimePDPCompositeFactProvider) CandidateFacts(ctx context.Context, nodeID string, m metrics, now time.Time) (runtimePDPFactSnapshot, error) {
+	var merged runtimePDPFactSnapshot
+	var errs []error
+	for _, provider := range p.providers {
+		snapshot, err := provider.CandidateFacts(ctx, nodeID, m, now)
+		merged.Baseline = mergeFactMaps(merged.Baseline, snapshot.Baseline)
+		merged.Graph = mergeFactMaps(merged.Graph, snapshot.Graph)
+		merged.Detections = mergeFactMaps(merged.Detections, snapshot.Detections)
+		merged.Actions = mergeFactMaps(merged.Actions, snapshot.Actions)
+		if err != nil {
+			errs = append(errs, err)
+		}
+	}
+	if len(errs) > 0 {
+		return merged, fmt.Errorf("runtime pdp composite fact lookup: %v", errs)
+	}
+	return merged, nil
 }
 
 func (p *runtimePDPFactStore) CandidateFacts(ctx context.Context, nodeID string, m metrics, now time.Time) (runtimePDPFactSnapshot, error) {
@@ -88,11 +128,87 @@ func (p *runtimePDPFactStore) CandidateFacts(ctx context.Context, nodeID string,
 	snapshot := runtimePDPFactSnapshot{
 		Baseline: runtimePDPBaselineFacts(baselineRows, now),
 		Graph:    runtimePDPRelationshipFacts(rels, now),
+		Actions:  runtimePDPActionLeaseFacts(p.store, ctx, m, now),
 	}
 	if len(errs) > 0 {
 		return snapshot, fmt.Errorf("runtime pdp fact lookup: %v", errs)
 	}
 	return snapshot, nil
+}
+
+func runtimePDPActionLeaseFacts(store *sqlite.Store, ctx context.Context, m metrics, now time.Time) map[string]any {
+	if store == nil {
+		return nil
+	}
+	leases, err := store.ListActionLeasesByStatus(ctx, decision.ActionLeaseActive)
+	if err != nil {
+		return map[string]any{"lookup_error": err.Error()}
+	}
+	sourceID := m.sourceID()
+	out := map[string]any{}
+	activeCount := 0
+	for _, lease := range leases {
+		if !lease.ExpiresAt.IsZero() && !now.Before(lease.ExpiresAt) {
+			continue
+		}
+		if sourceID != "" && !actionLeaseMatchesSource(lease, sourceID) {
+			continue
+		}
+		key := runtimePDPFactKey(lease.Action)
+		if key == "" {
+			continue
+		}
+		fact := map[string]any{
+			"active":     true,
+			"action":     lease.Action,
+			"level":      lease.Level,
+			"target":     lease.Target,
+			"adapter_id": lease.AdapterID,
+			"lease_id":   lease.LeaseID,
+			"applied_at": lease.AppliedAt.UTC().Format(time.RFC3339Nano),
+			"expires_at": lease.ExpiresAt.UTC().Format(time.RFC3339Nano),
+		}
+		if !lease.AppliedAt.IsZero() {
+			fact["elapsed_seconds"] = now.Sub(lease.AppliedAt).Seconds()
+		}
+		if !lease.ExpiresAt.IsZero() {
+			fact["remaining_seconds"] = lease.ExpiresAt.Sub(now).Seconds()
+		}
+		if dryRun, ok := actionLeaseBoolMetadata(lease, "param.execution_dry_run"); ok {
+			fact["dry_run"] = dryRun
+		}
+		out[key] = fact
+		activeCount++
+	}
+	out["active_count"] = activeCount
+	return out
+}
+
+func actionLeaseBoolMetadata(lease decision.ActionLease, key string) (bool, bool) {
+	raw := strings.TrimSpace(lease.Metadata[key])
+	if raw == "" {
+		return false, false
+	}
+	value, err := strconv.ParseBool(raw)
+	if err != nil {
+		return false, false
+	}
+	return value, true
+}
+
+func actionLeaseMatchesSource(lease decision.ActionLease, sourceID string) bool {
+	if sourceID == "" {
+		return true
+	}
+	if lease.Target == sourceID || strings.HasSuffix(lease.Target, ":"+sourceID) {
+		return true
+	}
+	for _, key := range []string{"target_value", "target_attr.source_id", "target_attr.subject_id", "param.source_id", "param.subject_id"} {
+		if lease.Metadata[key] == sourceID {
+			return true
+		}
+	}
+	return false
 }
 
 func runtimePDPSubjectEntityIDs(m metrics) []string {
@@ -286,6 +402,27 @@ func numericStateValue(state map[string]any, keys ...string) (float64, bool) {
 		}
 	}
 	return 0, false
+}
+
+func runtimePDPFactKey(value string) string {
+	value = strings.ToLower(strings.TrimSpace(value))
+	var out strings.Builder
+	for _, r := range value {
+		ok := (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9')
+		if ok {
+			out.WriteRune(r)
+			continue
+		}
+		out.WriteByte('_')
+	}
+	key := strings.Trim(out.String(), "_")
+	if key == "" {
+		return ""
+	}
+	if key[0] >= '0' && key[0] <= '9' {
+		return "v_" + key
+	}
+	return key
 }
 
 func moreRelevantBaselineProfile(candidate, current map[string]any) bool {

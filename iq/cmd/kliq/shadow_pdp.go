@@ -83,7 +83,7 @@ func (s *shadowPDPRunner) UpdatePack(pack contracts.RuntimePolicyPack) error {
 	s.mu.Lock()
 	s.pdp = pdp
 	s.mu.Unlock()
-	s.logger.Printf("[runtime-pdp] pack loaded: %d rules", len(pack.Spec.Rules))
+	s.logger.Printf("[runtime-pdp] pack loaded: %d rules", runtimepdp.EffectiveRuleCount(pack))
 	return nil
 }
 
@@ -106,6 +106,8 @@ func (s *shadowPDPRunner) getMode() (runtimePDPMode, chan<- actions.ActionPropos
 //
 // In shadow mode: decisions are logged only.
 // In active mode: decisions become ActionProposals fed to the broker path.
+// The brokered PEP serializes apply context, so this signal-window path can
+// coexist with the candidate path without racing the shared PEP state.
 func startShadowPDP(ctx context.Context, bus adapterruntime.EventBus, runner *shadowPDPRunner, facts runtimePDPFactProvider) {
 	sigCh := bus.SubscribeSignals(256)
 	go func() {
@@ -139,6 +141,8 @@ func startShadowPDP(ctx context.Context, bus adapterruntime.EventBus, runner *sh
 						snapshot, err := facts.CandidateFacts(context.Background(), runner.nodeID, metricsForRuntimeSubject(entityRef), now)
 						contextSnapshot.Baseline = snapshot.Baseline
 						contextSnapshot.Graph = snapshot.Graph
+						contextSnapshot.Detections = snapshot.Detections
+						contextSnapshot.Actions = snapshot.Actions
 						if err != nil {
 							contextSnapshot.Adapter = map[string]any{"fact_lookup_error": err.Error()}
 						}
@@ -152,41 +156,48 @@ func startShadowPDP(ctx context.Context, bus adapterruntime.EventBus, runner *sh
 						continue
 					}
 
-					dec, matched, err := pdp.Decide(runtimepdp.Input{
+					input := runtimepdp.Input{
 						NodeID:  runner.nodeID,
 						Subject: entityRef,
 						Risk:    lra,
 						Context: contextSnapshot,
 						Now:     now,
-					})
+					}
+					dec, matched, traces, err := pdp.DecideWithTrace(input)
 					if err != nil {
 						runner.logger.Printf("[runtime-pdp] decide error subject=%s: %v", subjectID, err)
 						continue
 					}
 					if !matched {
+						if trace := summarizeRuntimePDPTrace(traces); trace != "" && a.Score >= 30 {
+							runner.logger.Printf("[runtime-pdp:%s] no rule matched subject=%s risk=%s(%.2f) score=%d trace=%s",
+								mode, subjectID, lra.Level, lra.Confidence, lra.Score, trace)
+						}
 						continue
 					}
 
 					switch mode {
 					case PDPModeShadow:
-						runner.logger.Printf("[runtime-pdp:shadow] DECISION subject=%s effect=%s risk=%s(%.2f) score=%d reasons=%v",
-							subjectID, dec.Effect, lra.Level, lra.Confidence, lra.Score, dec.ReasonCodes)
+						runner.logger.Printf("[runtime-pdp:shadow] DECISION source=signal-window subject=%s effect=%s action=%s level=%s risk=%s(%.2f) score=%d reasons=%v",
+							subjectID, dec.Effect, dec.Action.Capability, dec.Action.Level, lra.Level, lra.Confidence, lra.Score, dec.ReasonCodes)
 
 					case PDPModeActive:
-						runner.logger.Printf("[runtime-pdp:active] DECISION subject=%s effect=%s risk=%s(%.2f) score=%d",
-							subjectID, dec.Effect, lra.Level, lra.Confidence, lra.Score)
-
-						if proposals != nil {
-							prop, ok, reason := runtimeDecisionToActionProposal(dec, subjectID, lra.Confidence, now)
-							if !ok {
-								runner.logger.Printf("[runtime-pdp:active] decision skipped subject=%s reason=%s", subjectID, reason)
-								continue
-							}
-							select {
-							case proposals <- prop:
-							default:
-								runner.logger.Printf("[runtime-pdp:active] proposal channel full, dropping for %s", subjectID)
-							}
+						prop, ok, reason := runtimeDecisionToActionProposal(dec, subjectID, lra.Confidence, now)
+						if !ok {
+							runner.logger.Printf("[runtime-pdp:active] decision skipped source=signal-window subject=%s reason=%s", subjectID, reason)
+							continue
+						}
+						prop = runtimePDPActionProposalWithEvidence(prop, input)
+						runner.logger.Printf("[runtime-pdp:active] DECISION source=signal-window apply=queued subject=%s effect=%s action=%s level=%s risk=%s(%.2f) score=%d reasons=%v",
+							subjectID, dec.Effect, dec.Action.Capability, dec.Action.Level, lra.Level, lra.Confidence, lra.Score, dec.ReasonCodes)
+						if proposals == nil {
+							runner.logger.Printf("[runtime-pdp:active] proposal queue unavailable source=signal-window subject=%s", subjectID)
+							continue
+						}
+						select {
+						case proposals <- prop:
+						default:
+							runner.logger.Printf("[runtime-pdp:active] proposal channel full, dropping source=signal-window subject=%s", subjectID)
 						}
 					}
 				}

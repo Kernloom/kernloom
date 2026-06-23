@@ -15,6 +15,7 @@ import (
 
 	contracts "github.com/kernloom/kernloom-contracts"
 	registries "github.com/kernloom/kernloom-registries"
+	"github.com/kernloom/kernloom/iq/internal/actions"
 	"github.com/kernloom/kernloom/iq/internal/lifecycle/bootstrapautotune"
 	lgraph "github.com/kernloom/kernloom/iq/internal/lifecycle/graph"
 	corepolicy "github.com/kernloom/kernloom/pkg/core/policy"
@@ -29,7 +30,7 @@ func TestApplyBundleUpdate_ManagedRejectsUnsignedBundle(t *testing.T) {
 		t.Fatalf("marshal unsigned bundle: %v", err)
 	}
 
-	applyBundleUpdate(raw, c, &bsCtl, &graphCtl, ms, nil, nil, nil)
+	applyBundleUpdate(raw, "node-test", c, &bsCtl, &graphCtl, ms, nil, nil, nil)
 
 	if ms.BundleGeneration != 0 {
 		t.Fatalf("unsigned bundle applied generation=%d", ms.BundleGeneration)
@@ -43,7 +44,7 @@ func TestApplyBundleUpdate_RejectsSameGenerationDifferentHash(t *testing.T) {
 	c, priv, ms, bsCtl, graphCtl := managedBundleTestHarness(t)
 	first := signContractsRuntimeBundleFixture(t, contractsRuntimeBundleFixture(t, 1), priv)
 
-	applyBundleUpdate(first, c, &bsCtl, &graphCtl, ms, nil, nil, nil)
+	applyBundleUpdate(first, "node-test", c, &bsCtl, &graphCtl, ms, nil, nil, nil)
 
 	if ms.BundleGeneration != 1 {
 		t.Fatalf("first bundle did not apply generation=%d", ms.BundleGeneration)
@@ -53,7 +54,7 @@ func TestApplyBundleUpdate_RejectsSameGenerationDifferentHash(t *testing.T) {
 
 	mutated := contractsRuntimeBundleFixture(t, 1)
 	mutated.Spec.EnforcementBounds.MaxActionDuringBootstrap = "block"
-	applyBundleUpdate(signContractsRuntimeBundleFixture(t, mutated, priv), c, &bsCtl, &graphCtl, ms, nil, nil, nil)
+	applyBundleUpdate(signContractsRuntimeBundleFixture(t, mutated, priv), "node-test", c, &bsCtl, &graphCtl, ms, nil, nil, nil)
 
 	if ms.BundleHash != firstHash {
 		t.Fatalf("same-generation mutation changed hash: got %s want %s", ms.BundleHash, firstHash)
@@ -66,10 +67,10 @@ func TestApplyBundleUpdate_RejectsSameGenerationDifferentHash(t *testing.T) {
 func TestApplyBundleUpdate_AppliesSignedNewGeneration(t *testing.T) {
 	c, priv, ms, bsCtl, graphCtl := managedBundleTestHarness(t)
 
-	applyBundleUpdate(signContractsRuntimeBundleFixture(t, contractsRuntimeBundleFixture(t, 1), priv), c, &bsCtl, &graphCtl, ms, nil, nil, nil)
+	applyBundleUpdate(signContractsRuntimeBundleFixture(t, contractsRuntimeBundleFixture(t, 1), priv), "node-test", c, &bsCtl, &graphCtl, ms, nil, nil, nil)
 	next := contractsRuntimeBundleFixture(t, 2)
 	next.Spec.EnforcementBounds.MaxActionDuringBootstrap = "rate_limit"
-	applyBundleUpdate(signContractsRuntimeBundleFixture(t, next, priv), c, &bsCtl, &graphCtl, ms, nil, nil, nil)
+	applyBundleUpdate(signContractsRuntimeBundleFixture(t, next, priv), "node-test", c, &bsCtl, &graphCtl, ms, nil, nil, nil)
 
 	if ms.BundleGeneration != 2 {
 		t.Fatalf("new generation did not apply: got %d", ms.BundleGeneration)
@@ -84,7 +85,7 @@ func TestApplyBundleUpdate_AppliesSignedContractsRuntimeBundle(t *testing.T) {
 	updates := make(chan contracts.RuntimePolicyPack, 1)
 
 	raw := signContractsRuntimeBundleFixture(t, contractsRuntimeBundleFixture(t, 1), priv)
-	applyBundleUpdate(raw, c, &bsCtl, &graphCtl, ms, nil, updates, nil)
+	applyBundleUpdate(raw, "node-test", c, &bsCtl, &graphCtl, ms, nil, updates, nil)
 
 	if ms.BundleGeneration != 1 {
 		t.Fatalf("contracts bundle did not apply generation=%d", ms.BundleGeneration)
@@ -114,6 +115,152 @@ func TestApplyBundleUpdate_AppliesSignedContractsRuntimeBundle(t *testing.T) {
 		}
 	case <-time.After(time.Second):
 		t.Fatal("runtime policy pack was not queued")
+	}
+}
+
+func TestApplyBundleUpdate_RejectsRuntimeActionWithoutTTL(t *testing.T) {
+	c, priv, ms, bsCtl, graphCtl := managedBundleTestHarness(t)
+	bundle := contractsRuntimeBundleFixture(t, 1)
+	bundle.Spec.RuntimePolicyPack.Spec.Rules[0].Then.TTL = contracts.Duration{}
+
+	applyBundleUpdate(signContractsRuntimeBundleFixture(t, bundle, priv), "node-test", c, &bsCtl, &graphCtl, ms, nil, nil, nil)
+
+	if ms.BundleGeneration != 0 {
+		t.Fatalf("bundle with missing TTL applied generation=%d", ms.BundleGeneration)
+	}
+	if c.HasPolicyPack {
+		t.Fatal("bundle with missing TTL marked policy pack active")
+	}
+}
+
+func TestApplyBundleUpdate_RejectsGrantingRuntimeAction(t *testing.T) {
+	c, priv, ms, bsCtl, graphCtl := managedBundleTestHarness(t)
+	bundle := contractsRuntimeBundleFixture(t, 1)
+	bundle.Spec.AdapterSelector.PreferredAdapters = nil
+	bundle.Spec.RuntimePolicyPack.Spec.CapabilitiesRequired = []string{"enforce.network.allow"}
+	bundle.Spec.RuntimePolicyPack.Spec.Rules[0].Then = contracts.RuntimeActionSpec{
+		Capability: "enforce.network.allow",
+		Level:      "observe",
+		TTL:        contracts.NewDuration(time.Minute),
+	}
+
+	applyBundleUpdate(signContractsRuntimeBundleFixture(t, bundle, priv), "node-test", c, &bsCtl, &graphCtl, ms, nil, nil, nil)
+
+	if ms.BundleGeneration != 0 {
+		t.Fatalf("granting runtime action bundle applied generation=%d", ms.BundleGeneration)
+	}
+	if c.HasPolicyPack {
+		t.Fatal("granting runtime action bundle marked policy pack active")
+	}
+}
+
+func TestApplyBundleUpdate_KLShieldGoldenGuardrailAndResponseIR(t *testing.T) {
+	c, priv, ms, bsCtl, graphCtl := managedBundleTestHarness(t)
+	bundle := contractsRuntimeBundleFixture(t, 1)
+	bundle.Spec.EnforcementBounds.AllowBlock = true
+	bundle.Spec.RuntimePolicyPack.Spec.CapabilitiesRequired = []string{
+		"enforce.traffic.rate_limit",
+		"enforce.access.deny",
+	}
+	bundle.Spec.RuntimePolicyPack.Spec.Rules = append(bundle.Spec.RuntimePolicyPack.Spec.Rules, contracts.RuntimePolicyRule{
+		ID:   "critical-risk-deny",
+		When: "risk.level == 'critical'",
+		Then: contracts.RuntimeActionSpec{
+			Capability: "enforce.access.deny",
+			Level:      "block",
+			TTL:        contracts.NewDuration(5 * time.Minute),
+			Params:     map[string]any{"target_granularity": "source"},
+		},
+		ReasonCodes: []string{"critical_risk_deny"},
+	})
+	bundle.Spec.RuntimePolicyPack.Spec.Guardrails = []contracts.RuntimeGuardrail{{
+		ID:   "never-auto-block-admins",
+		Type: "never",
+		Subject: contracts.RuntimeGuardrailSubject{
+			Type: "group",
+			Ref:  "kernloom-admins",
+		},
+		ForbiddenActions: []string{"enforce.access.deny", "enforce.traffic.drop"},
+		Enforcement: contracts.RuntimeGuardrailEnforcement{
+			ViolationBehavior: "reject_action",
+			UnknownBehavior:   "reject_hard_action",
+		},
+	}}
+	bundle.Spec.RuntimePolicyPack.Spec.DetectionRules = []contracts.RuntimeDetectionRule{{
+		ID:          "unknown-source-heavy-deny",
+		Type:        "access.denied_threshold",
+		ResourceRef: "ziti-controller",
+		Threshold:   20,
+		Window:      contracts.NewDuration(15 * time.Minute),
+		Scope:       "source",
+	}}
+	bundle.Spec.RuntimePolicyPack.Spec.AlertRoutes = []contracts.RuntimeAlertRoute{{
+		ID: "alert-route.security-ops",
+		Channels: []contracts.RuntimeAlertChannel{{
+			Type: "webhook",
+			Ref:  "channel.security-ops",
+		}},
+		DefaultSeverity: "high",
+		Deduplication: contracts.RuntimeAlertDeduplication{
+			Enabled: true,
+			Window:  contracts.NewDuration(15 * time.Minute),
+			Keys:    []string{"resource.id", "detection.id", "source.identity_or_ip"},
+		},
+	}}
+	bundle.Spec.RuntimePolicyPack.Spec.ResponseRules = []contracts.RuntimeResponseRule{{
+		ID:   "rate-limit-unknown-source-heavy-deny",
+		When: contracts.RuntimeResponseTrigger{Detection: "unknown-source-heavy-deny"},
+		Then: []contracts.RuntimeResponseAction{{
+			ID:     "enforce.traffic.rate_limit",
+			TTL:    contracts.NewDuration(10 * time.Minute),
+			Target: contracts.RuntimeResponseTarget{Scope: "source.ip"},
+		}, {
+			ID:       "notify.alert.emit",
+			Route:    "alert-route.security-ops",
+			Severity: "high",
+			Dedupe:   contracts.NewDuration(15 * time.Minute),
+		}},
+		ReasonCodes: []string{"unknown_source_heavy_deny"},
+	}}
+
+	updates := make(chan contracts.RuntimePolicyPack, 1)
+	applyBundleUpdate(signContractsRuntimeBundleFixture(t, bundle, priv), "node-test", c, &bsCtl, &graphCtl, ms, nil, updates, nil)
+
+	if ms.BundleGeneration != 1 {
+		t.Fatalf("klshield golden bundle did not apply generation=%d", ms.BundleGeneration)
+	}
+	if c.Adapters != "klshield" {
+		t.Fatalf("expected klshield adapter selector, got %q", c.Adapters)
+	}
+	if len(c.RuntimeGuardrails) != 1 || len(c.RuntimeResponseRules) != 1 || len(c.RuntimeAlertRoutes) != 1 {
+		t.Fatalf("runtime IR not applied: guardrails=%d responses=%d routes=%d", len(c.RuntimeGuardrails), len(c.RuntimeResponseRules), len(c.RuntimeAlertRoutes))
+	}
+
+	resolver := c.buildPolicyResolver()
+	protectedBlock := resolver.Resolve(actions.ActionProposal{
+		DesiredAction: "enforce.access.deny",
+		DesiredLevel:  "block",
+		Target: actions.ActionTarget{
+			Granularity: "subject",
+			Value:       "group:kernloom-admins",
+		},
+		TTL: time.Minute,
+	})
+	if protectedBlock.Allowed || protectedBlock.DenyReason != "guardrail_violation(never-auto-block-admins)" {
+		t.Fatalf("protected admin block should be rejected by guardrail, got %#v", protectedBlock)
+	}
+
+	rateLimit := resolver.Resolve(actions.ActionProposal{
+		DesiredAction: "enforce.traffic.rate_limit",
+		DesiredLevel:  "soft",
+		Target: actions.ActionTarget{
+			Granularity: actions.TargetGranularitySource,
+			Value:       "203.0.113.10",
+		},
+		TTL: time.Minute,
+	})
+	if !rateLimit.Allowed || rateLimit.ExecutableAction != "enforce.traffic.rate_limit" {
+		t.Fatalf("klshield rate-limit action should be allowed, got %#v", rateLimit)
 	}
 }
 

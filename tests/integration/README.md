@@ -19,13 +19,16 @@ make integration-forge
 Run single scenarios:
 
 ```bash
+tests/integration/run-forge.sh 12
+tests/integration/run-forge.sh 09 10
+sudo -E tests/integration/run.sh 04
+make integration-forge SCENARIOS=12
 KLT_SCENARIOS="00 09 10" make integration
 KLT_SCENARIOS="09" bash tests/integration/run-forge.sh
-KLT_SCENARIOS="12" bash tests/integration/run-forge.sh
 KLT_SCENARIOS="tests/integration/scenarios/04_graph_learn_freeze.sh" sudo -E tests/integration/run.sh
 ```
 
-`KLT_SCENARIOS` accepts full paths, file names, or prefixes such as `04`, `09`, or `11`.
+Runner arguments and `KLT_SCENARIOS` accept full paths, file names, or prefixes such as `04`, `09`, or `12`. Positional runner arguments take precedence over `KLT_SCENARIOS`.
 
 ## Requirements
 
@@ -41,13 +44,17 @@ The full run needs a Linux host with:
 
 Forge scenarios 09 and 10 do not need XDP. They need:
 
+- a built Forge binary or a sibling checkout at `../kernloom-forge`
+
+Scenario 09 also needs:
+
 - `curl`
 - `jq`
-- a built Forge binary or a sibling checkout at `../kernloom-forge`
 
 Scenario 12 also runs without XDP. It needs:
 
 - a Go toolchain (`KLT_GO`, `go`, or `/usr/local/go/bin/go`)
+- a built Forge binary or a sibling checkout at `../kernloom-forge`
 
 ## Artifacts
 
@@ -114,7 +121,7 @@ KLShield/XDP is attached to the host-side client veth interfaces. This lets KLIQ
 
 ### `run-forge.sh`
 
-`tests/integration/run-forge.sh` is the small runner for CI and local control-plane checks without XDP. By default it starts scenarios 09, 10, and 12. It builds Forge only when scenarios 09 or 10 are active, and builds `bin/kliq` when scenario 12 is active. Running only scenario 12 does not need Forge, `curl`, or `jq`.
+`tests/integration/run-forge.sh` is the small runner for CI and local control-plane checks without XDP. By default it starts scenarios 09, 10, and 12. It builds Forge when scenarios 09, 10, or 12 are active, and builds `bin/kliq` when scenario 12 is active. Running only scenario 12 does not need `curl` or `jq`.
 
 ## Important Environment Variables
 
@@ -130,6 +137,7 @@ KLShield/XDP is attached to the host-side client veth interfaces. This lets KLIQ
 | `KLT_FORGE_SKIP_BUILD` | Do not rebuild Forge | `0` |
 | `KLT_FORGE_POLICY` | Policy used by managed enrollment bundle tests | `../kernloom-forge/examples/policies/investor-apps-access.yaml` |
 | `KLT_FORGE_TARGET` | Target profile used by managed enrollment bundle tests | `openziti-production` |
+| `KLT_FORGE_ASSIGNMENTS` | Optional NodePolicyAssignments file; scenario 09 defaults to Forge's `klshield-golden.yaml` when present | empty |
 | `KLT_GO` | Go binary | `go` or `/usr/local/go/bin/go` |
 
 ## Scenario Overview
@@ -145,7 +153,7 @@ KLShield/XDP is attached to the host-side client veth interfaces. This lets KLIQ
 | 06 | `06_autotune_bootstrap.sh` | Autotune | Bootstrap tuning uses max-down without EWMA regression |
 | 07 | `07_good_bad_isolation.sh` | Isolation | Good source stays reachable while bad source is enforced |
 | 08 | `08_runtime_pdp_stepdown.sh` | RuntimePDP Recovery | Enforced source returns to OBSERVE after the attack stops |
-| 09 | `09_managed_enrollment.sh` | Forge API | Managed enrollment, bundle pull, ACKs, receipts, findings, proposals |
+| 09 | `09_managed_enrollment.sh` | Forge API | Managed enrollment, label-based assignment, bundle pull, ACKs, receipts, findings, proposals, status reports |
 | 10 | `10_adapter_definition.sh` | Forge Compiler | Adapter manifests, AccessPolicy validation, profile compilation |
 | 11 | `11_netfilter_adapter.sh` | Netfilter | KLIQ without XDP, deny/restore, idempotent rules, safe cleanup |
 | 12 | `12_runtime_policy_pack.sh` | RuntimePDP | `--policy-file` RuntimePolicyPack loading, signed RuntimeBundle handoff, mapper/broker/conformance fixtures |
@@ -413,11 +421,11 @@ Goal: validate the contracts-based Runtime PDP path without XDP or root network 
 
 Flow:
 
-1. The scenario writes a temporary `kind: RuntimePolicyPack` YAML file into the artifact directory.
-2. `kliq run --adapter=none --policy-file=<runtime-policy.yaml> --runtime-pdp-mode=shadow` starts for a few seconds.
-3. The log must show that the policy file was loaded as `RuntimePolicyPack`.
-4. The Runtime PDP must compile the pack and log `pack loaded: 2 rules`.
-5. The run must not log unsupported-kind, parse, compile, or panic errors.
+1. Forge converts `tests/integration/fixtures/policies/klshield-edge-autonomy-hold.intent` into digest-pinned canonical policy documents plus PolicyIntent runtime autonomy.
+2. Forge exports those documents as a KLShield `RuntimePolicyPack`.
+3. Forge logs explicit support diagnostics and writes a `NaturalIntentSupportReport` for policy writers.
+4. The generated pack is checked for hold-before-block, evidence quality gates, guardrails, required capabilities, `autonomy_lifecycle.hold`, and broker-enforced autonomy bounds.
+5. KLIQ loads the generated pack in shadow mode with `kliq run --adapter=none --policy-file=<generated-runtime-policy.yaml> --runtime-pdp-mode=shadow` and must log `pack loaded: 4 rules`.
 6. Targeted Go contract tests then run for:
    - RuntimePolicyPack loader and signature verification
    - RuntimeDecision to ActionProposal mapping
@@ -427,10 +435,23 @@ Flow:
 
 Expected result:
 
-- Standalone `--policy-file` accepts the contracts `RuntimePolicyPack` schema.
-- RuntimePolicyPack rules can include an enforcement-feedback hold rule using `signals.enforcement.active` or `signals.enforcement.feedback_rate`.
+- Productive Natural Intent compiles through Forge to a KLShield-targeted RuntimePolicyPack and is the only policy source used by the scenario.
+- Standalone `--policy-file` accepts the generated contracts `RuntimePolicyPack` schema.
+- RuntimePolicyPack `autonomy_lifecycle` enforces holds plus simple resolver/broker gates for max action duration, audit marking and previous-action prerequisites.
+- The support report identifies enforced, carried and warning-level Natural Intent features before activation.
+- Response requirements can require risk confidence, risk freshness and true independent signal evidence before hard actions.
 - Runtime PDP shadow mode can load the policy without changing enforcement.
 - The active-mode plumbing remains covered at the mapper/broker/conformance boundary.
+
+Manual replay:
+
+```bash
+tests/integration/run-forge.sh 12
+```
+
+For a raw CLI walkthrough from Natural Intent to standalone `kliq run`, see
+`_docs/testing/manual-test-guide.md`, section `Replay The Scenario-12
+Productive Intent`.
 
 ## Cleanup
 

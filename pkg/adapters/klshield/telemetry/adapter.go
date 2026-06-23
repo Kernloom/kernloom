@@ -45,8 +45,10 @@ type Config struct {
 
 // prevSnapshot stores the counters from the previous polling tick for one source.
 type prevSnapshot struct {
-	Pkts, Bytes, Syn, Scan, DropRL uint64
-	LastWall                       time.Time
+	Pkts, Bytes, Syn, Scan uint64
+	Pass, DropAllow        uint64
+	DropDeny, DropRL       uint64
+	LastWall               time.Time
 }
 
 // Adapter is the Shield telemetry adapter.
@@ -200,12 +202,15 @@ func (a *Adapter) poll(ctx context.Context, bus adapterruntime.EventBus, nowWall
 		pv, ok := a.prev4[k4]
 		if !ok {
 			a.prev4[k4] = prevSnapshot{
-				Pkts:     v4.Pkts,
-				Bytes:    v4.Bytes,
-				Syn:      v4.Syn,
-				Scan:     v4.DportChanges,
-				DropRL:   v4.DropRL,
-				LastWall: nowWall,
+				Pkts:      v4.Pkts,
+				Bytes:     v4.Bytes,
+				Syn:       v4.Syn,
+				Scan:      v4.DportChanges,
+				Pass:      v4.Pass,
+				DropAllow: v4.DropAllow,
+				DropDeny:  v4.DropDeny,
+				DropRL:    v4.DropRL,
+				LastWall:  nowWall,
 			}
 			continue
 		}
@@ -222,15 +227,22 @@ func (a *Adapter) poll(ctx context.Context, bus adapterruntime.EventBus, nowWall
 		bps := float64(v4.Bytes-pv.Bytes) / sec
 		synRate := float64(v4.Syn-pv.Syn) / sec
 		scanRate := float64(v4.DportChanges-pv.Scan) / sec
+		passRate := float64(v4.Pass-pv.Pass) / sec
+		dropAllowRate := float64(v4.DropAllow-pv.DropAllow) / sec
+		dropDenyRate := float64(v4.DropDeny-pv.DropDeny) / sec
 		dropRLRate := float64(v4.DropRL-pv.DropRL) / sec
+		dropTotalRate := dropAllowRate + dropDenyRate + dropRLRate
 
 		a.prev4[k4] = prevSnapshot{
-			Pkts:     v4.Pkts,
-			Bytes:    v4.Bytes,
-			Syn:      v4.Syn,
-			Scan:     v4.DportChanges,
-			DropRL:   v4.DropRL,
-			LastWall: nowWall,
+			Pkts:      v4.Pkts,
+			Bytes:     v4.Bytes,
+			Syn:       v4.Syn,
+			Scan:      v4.DportChanges,
+			Pass:      v4.Pass,
+			DropAllow: v4.DropAllow,
+			DropDeny:  v4.DropDeny,
+			DropRL:    v4.DropRL,
+			LastWall:  nowWall,
 		}
 
 		obs := observation.NewObservation(
@@ -243,7 +255,11 @@ func (a *Adapter) poll(ctx context.Context, bus adapterruntime.EventBus, nowWall
 		obs.SetMetric("bps", bps)
 		obs.SetMetric("syn_rate", synRate)
 		obs.SetMetric("scan_rate", scanRate)
+		obs.SetMetric("pass_rate", passRate)
+		obs.SetMetric("drop_allow_rate", dropAllowRate)
+		obs.SetMetric("drop_deny_rate", dropDenyRate)
 		obs.SetMetric("drop_rl_rate", dropRLRate)
+		obs.SetMetric("drop_total_rate", dropTotalRate)
 		obs.SetAttribute("ip_version", "4")
 
 		if err := bus.PublishObservation(ctx, *obs); err != nil {
@@ -268,12 +284,15 @@ func (a *Adapter) poll(ctx context.Context, bus adapterruntime.EventBus, nowWall
 			pv, ok := a.prev6[ip6]
 			if !ok {
 				a.prev6[ip6] = prevSnapshot{
-					Pkts:     v6.Pkts,
-					Bytes:    v6.Bytes,
-					Syn:      v6.Syn,
-					Scan:     v6.DportChanges,
-					DropRL:   v6.DropRL,
-					LastWall: nowWall,
+					Pkts:      v6.Pkts,
+					Bytes:     v6.Bytes,
+					Syn:       v6.Syn,
+					Scan:      v6.DportChanges,
+					Pass:      v6.Pass,
+					DropAllow: v6.DropAllow,
+					DropDeny:  v6.DropDeny,
+					DropRL:    v6.DropRL,
+					LastWall:  nowWall,
 				}
 				continue
 			}
@@ -290,15 +309,22 @@ func (a *Adapter) poll(ctx context.Context, bus adapterruntime.EventBus, nowWall
 			bps := float64(v6.Bytes-pv.Bytes) / sec
 			synRate := float64(v6.Syn-pv.Syn) / sec
 			scanRate := float64(v6.DportChanges-pv.Scan) / sec
+			passRate := float64(v6.Pass-pv.Pass) / sec
+			dropAllowRate := float64(v6.DropAllow-pv.DropAllow) / sec
+			dropDenyRate := float64(v6.DropDeny-pv.DropDeny) / sec
 			dropRLRate := float64(v6.DropRL-pv.DropRL) / sec
+			dropTotalRate := dropAllowRate + dropDenyRate + dropRLRate
 
 			a.prev6[ip6] = prevSnapshot{
-				Pkts:     v6.Pkts,
-				Bytes:    v6.Bytes,
-				Syn:      v6.Syn,
-				Scan:     v6.DportChanges,
-				DropRL:   v6.DropRL,
-				LastWall: nowWall,
+				Pkts:      v6.Pkts,
+				Bytes:     v6.Bytes,
+				Syn:       v6.Syn,
+				Scan:      v6.DportChanges,
+				Pass:      v6.Pass,
+				DropAllow: v6.DropAllow,
+				DropDeny:  v6.DropDeny,
+				DropRL:    v6.DropRL,
+				LastWall:  nowWall,
 			}
 
 			obs := observation.NewObservation(
@@ -311,7 +337,11 @@ func (a *Adapter) poll(ctx context.Context, bus adapterruntime.EventBus, nowWall
 			obs.SetMetric("bps", bps)
 			obs.SetMetric("syn_rate", synRate)
 			obs.SetMetric("scan_rate", scanRate)
+			obs.SetMetric("pass_rate", passRate)
+			obs.SetMetric("drop_allow_rate", dropAllowRate)
+			obs.SetMetric("drop_deny_rate", dropDenyRate)
 			obs.SetMetric("drop_rl_rate", dropRLRate)
+			obs.SetMetric("drop_total_rate", dropTotalRate)
 			obs.SetAttribute("ip_version", "6")
 
 			if err := bus.PublishObservation(ctx, *obs); err != nil {
