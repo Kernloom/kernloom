@@ -40,7 +40,7 @@ Current `v0.4.0` focus:
 ## 1. Build And Test Baseline
 
 ```bash
-cd /home/adrian/prj/ebpf-security/kernloom
+cd /path/to/kernloom
 mkdir -p bin
 
 go build -o bin/kliq ./iq/cmd/kliq
@@ -65,7 +65,7 @@ This is the main smoke test for the generic orchestrator. It needs no eBPF, no
 netfilter, and no root privileges.
 
 ```bash
-cd /home/adrian/prj/ebpf-security/kernloom
+cd /path/to/kernloom
 mkdir -p /tmp/kernloom-manual
 
 cat > /tmp/kernloom-manual/whitelist.txt <<'EOF'
@@ -122,7 +122,7 @@ This test checks the new local contracts-based policy path. It needs no root
 privileges and no adapter.
 
 ```bash
-cd /home/adrian/prj/ebpf-security/kernloom
+cd /path/to/kernloom
 mkdir -p /tmp/kernloom-manual
 
 cat > /tmp/kernloom-manual/runtime-policy.yaml <<'EOF'
@@ -205,7 +205,7 @@ test only checks load, validation, and compilation of the pack. Use
 ## 3. Check The State Store
 
 ```bash
-cd /home/adrian/prj/ebpf-security/kernloom
+cd /path/to/kernloom
 
 ./bin/kliq storage status --db=/tmp/kernloom-manual/kliq-state.db
 ./bin/kliq relationships stats --db=/tmp/kernloom-manual/kliq-state.db
@@ -229,7 +229,7 @@ Expected:
 Netfilter is an enforcement adapter. It does not provide primary telemetry.
 
 ```bash
-cd /home/adrian/prj/ebpf-security/kernloom
+cd /path/to/kernloom
 
 timeout 15s sudo ./bin/kliq run \
   --adapter=netfilter \
@@ -260,7 +260,7 @@ KLShield/eBPF maps exist, or when you intentionally test the environment in
 dry-run mode.
 
 ```bash
-cd /home/adrian/prj/ebpf-security/kernloom
+cd /path/to/kernloom
 
 timeout 20s sudo ./bin/kliq run \
   --adapter=klshield \
@@ -288,7 +288,7 @@ transitions as sidecars. Relationship PEPs are collected, so tuple or
 relationship enforcement can use all available matching adapters.
 
 ```bash
-cd /home/adrian/prj/ebpf-security/kernloom
+cd /path/to/kernloom
 
 timeout 20s sudo ./bin/kliq run \
   --adapter=klshield,netfilter \
@@ -331,7 +331,7 @@ Important:
 Prepare the target host:
 
 ```bash
-cd /home/adrian/prj/ebpf-security/kernloom
+cd /path/to/kernloom
 mkdir -p /tmp/kernloom-manual
 
 # Choose the interface that receives packets from the k6 machine.
@@ -345,7 +345,7 @@ python3 -m http.server 8000 --bind 0.0.0.0
 In a second terminal on the target host:
 
 ```bash
-cd /home/adrian/prj/ebpf-security/kernloom
+cd /path/to/kernloom
 
 sudo ./bin/klshield attach-xdp \
   --iface "$IFACE" \
@@ -417,7 +417,7 @@ EOF
 Start KLIQ in dry-run first:
 
 ```bash
-cd /home/adrian/prj/ebpf-security/kernloom
+cd /path/to/kernloom
 
 sudo ./bin/kliq run \
   --adapter=klshield \
@@ -618,7 +618,7 @@ Graph learning needs a telemetry source. With `--adapter=none`, stores stay
 empty, but the CLI paths must still work.
 
 ```bash
-cd /home/adrian/prj/ebpf-security/kernloom
+cd /path/to/kernloom
 
 timeout 20s sudo ./bin/kliq run \
   --adapter=klshield \
@@ -688,11 +688,11 @@ The longer Forge-side guide is in
 ```bash
 mkdir -p /tmp/kernloom-manual/forge/policies /tmp/kernloom-manual/forge/out
 
-cd /home/adrian/prj/ebpf-security/kernloom
+cd /path/to/kernloom
 mkdir -p bin
 go build -o bin/kliq ./iq/cmd/kliq
 
-cd /home/adrian/prj/ebpf-security/kernloom-forge
+cd /path/to/kernloom-forge
 mkdir -p bin
 go build -o bin/forge ./cmd/forge
 ```
@@ -702,7 +702,7 @@ go build -o bin/forge ./cmd/forge
 Rich Natural Intent smoke test with detection, response and guardrail output:
 
 ```bash
-cd /home/adrian/prj/ebpf-security/kernloom-forge
+cd /path/to/kernloom-forge
 
 cat > /tmp/kernloom-manual/forge/policies/protect-ziti-controller.intent <<'EOF'
 intent "protect-ziti-controller-admin-access"
@@ -804,7 +804,7 @@ The next small intent says: for a local KLShield node, risk must be `low` and de
 posture must be `healthy`. Both are canonical registry keys.
 
 ```bash
-cd /home/adrian/prj/ebpf-security/kernloom-forge
+cd /path/to/kernloom-forge
 
 cat > /tmp/kernloom-manual/forge/policies/manual-edge-access.intent <<'EOF'
 intent "manual-edge-access"
@@ -986,7 +986,7 @@ This test needs no adapter, no eBPF, and no root privileges. It checks loading,
 validation, and RuntimePDP compilation of the pack created by Forge.
 
 ```bash
-cd /home/adrian/prj/ebpf-security/kernloom
+cd /path/to/kernloom
 
 timeout 12s ./bin/kliq run \
   --adapter=none \
@@ -1015,8 +1015,8 @@ It starts from Natural Intent, writes a support report, exports a KLShield
 `RuntimePolicyPack`, and loads that pack in standalone KLIQ.
 
 ```bash
-export KL_ROOT=/home/adrian/prj/ebpf-security/kernloom
-export FORGE_ROOT=/home/adrian/prj/ebpf-security/kernloom-forge
+export KL_ROOT=/path/to/kernloom
+export FORGE_ROOT=/path/to/kernloom-forge
 export WORK=/tmp/kernloom-manual/edge-autonomy-hold
 
 mkdir -p "$WORK/policies" "$WORK/out"
@@ -1178,7 +1178,7 @@ Use `--intent .../policy-intent.yaml` on `build-runtime-bundle` and `serve`.
 The manifest carries the generated canonical documents and their digests.
 
 ```bash
-cd /home/adrian/prj/ebpf-security/kernloom-forge
+cd /path/to/kernloom-forge
 
 ./bin/forge keygen \
   --private /tmp/kernloom-manual/forge/out/forge-runtime.key \
@@ -1216,7 +1216,7 @@ Pre-register the KLIQ node and copy the printed `enroll_token`:
 In a second terminal, start Forge as the control plane:
 
 ```bash
-cd /home/adrian/prj/ebpf-security/kernloom-forge
+cd /path/to/kernloom-forge
 
 ./bin/forge serve \
   --addr :18443 \
@@ -1247,7 +1247,7 @@ Start KLIQ in managed mode. Replace `PASTE_ENROLL_TOKEN_HERE` with the token
 printed by `forge enroll-token create`:
 
 ```bash
-cd /home/adrian/prj/ebpf-security/kernloom
+cd /path/to/kernloom
 
 timeout 30s ./bin/kliq run \
   --adapter=none \
@@ -1286,7 +1286,7 @@ The integration scripts can check the manual steps above.
 No-XDP/no-root path for RuntimePolicyPack:
 
 ```bash
-cd /home/adrian/prj/ebpf-security/kernloom
+cd /path/to/kernloom
 KLT_SCENARIOS=12 bash tests/integration/run-forge.sh
 ```
 
@@ -1325,7 +1325,7 @@ optional netfilter tools for scenario 11. Artifacts are written under
 These tests do not need a controller:
 
 ```bash
-cd /home/adrian/prj/ebpf-security/kernloom
+cd /path/to/kernloom
 
 go test -v ./pkg/adapters/openziti/decoder/...
 go test -v ./pkg/adapters/openziti/mapping/...
