@@ -165,6 +165,7 @@ func applyRuntimePolicyPackToCfg(pack contracts.RuntimePolicyPack, c *cfg) {
 	c.RuntimeDetectionRules = append([]contracts.RuntimeDetectionRule(nil), pack.Spec.DetectionRules...)
 	c.RuntimeResponseRules = append([]contracts.RuntimeResponseRule(nil), pack.Spec.ResponseRules...)
 	c.RuntimeAlertRoutes = append([]contracts.RuntimeAlertRoute(nil), pack.Spec.AlertRoutes...)
+	c.RuntimeAccessPolicies = append([]contracts.RuntimeAccessPolicy(nil), pack.Spec.AccessPolicies...)
 	c.RuntimeAutonomyLifecycle = pack.Spec.AutonomyLifecycle
 	caps := runtimePolicyCapabilities(pack)
 	if len(caps) > 0 {
@@ -214,6 +215,10 @@ func runtimePolicyCapabilities(pack contracts.RuntimePolicyPack) []string {
 				add(action.ID)
 			}
 		}
+	}
+	if len(pack.Spec.AccessPolicies) > 0 {
+		add("access.policy.apply")
+		add("access.policy.drift_check")
 	}
 	return out
 }

@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	contracts "github.com/kernloom/kernloom-contracts"
 	"github.com/kernloom/kernloom/pkg/core/fsm"
 	"github.com/kernloom/kernloom/pkg/core/observation"
 	"github.com/kernloom/kernloom/pkg/core/signal"
@@ -267,6 +268,55 @@ type RelationshipPEP interface {
 	SetRelationshipEnforcement(on bool) error
 	DenyRelationship(target RelationshipTarget) error
 	AllowRelationship(target RelationshipTarget) error
+}
+
+type IdentityGroupMembership struct {
+	Known       bool
+	Member      bool
+	SubjectType string
+	SubjectID   string
+	Group       string
+	Source      string
+}
+
+// IdentityResolver is the typed KLIQ contract for identity/group facts. It lets
+// runtime guardrails avoid interpreting free-form adapter attributes when an
+// identity-aware adapter can answer membership directly.
+type IdentityResolver interface {
+	SubjectGroupMembership(context.Context, SourceTarget, string) (IdentityGroupMembership, error)
+}
+
+type AccessPolicyApplyOptions struct {
+	DryRun bool
+	Now    time.Time
+}
+
+type AccessPolicyApplyResult struct {
+	PolicyID          string
+	AdapterID         string
+	Status            string
+	Applied           bool
+	NativeEnforcement bool
+	Message           string
+	Warnings          []string
+	AppliedAt         time.Time
+}
+
+type AccessPolicyDrift struct {
+	PolicyID          string
+	AdapterID         string
+	InSync            bool
+	NativeEnforcement bool
+	Reason            string
+	CheckedAt         time.Time
+}
+
+// AccessPolicyPEP is the generic KLIQ contract for durable access desired
+// state. Adapters may report audit-only placement when they cannot natively
+// enforce the subject/resource model but can still accept the desired state.
+type AccessPolicyPEP interface {
+	ApplyAccessPolicy(context.Context, contracts.RuntimeAccessPolicy, AccessPolicyApplyOptions) (AccessPolicyApplyResult, error)
+	CheckAccessPolicyDrift(context.Context, contracts.RuntimeAccessPolicy) (AccessPolicyDrift, error)
 }
 
 // AdapterStats reports the health and amount of work performed by an adapter

@@ -215,6 +215,37 @@ func TestDecideMatchesDetectionAndActionFacts(t *testing.T) {
 	}
 }
 
+func TestDecideTreatsMissingDetectionAndActionFactsAsInactive(t *testing.T) {
+	now := time.Date(2026, 6, 24, 10, 44, 49, 0, time.UTC)
+	pdp, err := runtimepdp.Compile(testPack("detections.sustained_pressure.active == true && actions.enforce_traffic_rate_limit.active == true"))
+	if err != nil {
+		t.Fatalf("compile: %v", err)
+	}
+
+	_, matched, traces, err := pdp.DecideWithTrace(runtimepdp.Input{
+		NodeID: "node-1",
+		Risk: contracts.LocalRiskAssessment{
+			Subject:    contracts.EntityRef{Kind: "ip", ID: "10.0.0.1"},
+			Level:      contracts.RiskMedium,
+			Score:      52,
+			ValidUntil: now.Add(time.Minute),
+		},
+		Now: now,
+	})
+	if err != nil {
+		t.Fatalf("decide: %v", err)
+	}
+	if matched {
+		t.Fatal("did not expect inactive facts to match")
+	}
+	if len(traces) != 1 {
+		t.Fatalf("trace count: %d", len(traces))
+	}
+	if traces[0].Skipped || traces[0].Error != "" {
+		t.Fatalf("missing facts should evaluate false, not skip: %#v", traces[0])
+	}
+}
+
 func TestDecideMatchesRiskQualityFacts(t *testing.T) {
 	now := time.Date(2026, 6, 23, 10, 0, 0, 0, time.UTC)
 	pdp, err := runtimepdp.Compile(testPack("risk.confidence >= 0.8 && risk.age_seconds <= 120 && risk.independent_signal_count >= 2"))

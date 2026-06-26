@@ -53,6 +53,8 @@ type cfg struct {
 	// "shadow" (default): evaluates and logs decisions only.
 	// "active": RuntimePDP is authoritative; analyzers/FSM supply facts/intent only.
 	RuntimePDPMode string
+	LogLevel       string // quiet | info | debug
+	LogColor       string // auto | always | never
 
 	// Adapters is the comma-separated list of PEP adapters to activate.
 	// Valid values are provided by the adapter catalog plus netfilter.
@@ -204,7 +206,11 @@ type cfg struct {
 	RuntimeDetectionRules    []contracts.RuntimeDetectionRule
 	RuntimeResponseRules     []contracts.RuntimeResponseRule
 	RuntimeAlertRoutes       []contracts.RuntimeAlertRoute
+	RuntimeAccessPolicies    []contracts.RuntimeAccessPolicy
 	RuntimeAutonomyLifecycle *contracts.RuntimeAutonomyLifecycleSpec
+
+	AlertFile           string
+	AccessDriftInterval time.Duration
 
 	// Per-level Forge capability IDs read from PolicyPack rules (then.capability).
 	// Used for logging and future capability-based adapter dispatch.
@@ -600,6 +606,8 @@ AGENT FLAGS
 	flag.StringVar(&c.PolicyVerifyKeyPath, "policy-verify-key", "", "path to Ed25519 public key for verifying LocalPolicyPack signatures; required in managed mode")
 	flag.StringVar(&c.ForgeURL, "forge-url", "", "forge serve base URL (e.g. https://forge.example.com:8443); enables enrollment and heartbeat when set")
 	flag.StringVar(&c.RuntimePDPMode, "runtime-pdp-mode", "shadow", "runtime PDP mode: shadow (log only) or active (authoritative decisions via action broker)")
+	flag.StringVar(&c.LogLevel, "log-level", "info", "runtime log level: quiet, info, or debug")
+	flag.StringVar(&c.LogColor, "log-color", "auto", "runtime log color/icons: auto, always, or never")
 	flag.StringVar(&c.ForgeEnrollToken, "forge-enroll-token", "", "one-time enrollment token issued by 'forge token create' (consumed on first enrollment)")
 	flag.StringVar(&c.ForgeCAPath, "forge-ca", "", "path to PEM CA certificate for TLS verification of forge serve; empty = system roots")
 	flag.DurationVar(&c.ForgeHeartbeat, "forge-heartbeat", 5*time.Minute, "heartbeat interval to forge serve")
@@ -748,6 +756,8 @@ AGENT FLAGS
 	// --state-db is an alias kept for backward compatibility.
 	flag.StringVar(&c.StateStorePath, "db", "/var/lib/kernloom/iq/kliq-state.db", "state store (relationships, baselines, exclusions, evidence)")
 	flag.StringVar(&c.StateStorePath, "state-db", "/var/lib/kernloom/iq/kliq-state.db", "alias for --db")
+	flag.StringVar(&c.AlertFile, "alert-file", "", "fallback JSONL path for file/jsonl alert routes (empty disables fallback)")
+	flag.DurationVar(&c.AccessDriftInterval, "access-drift-interval", 30*time.Second, "how often to re-apply/check runtime access policies (0 disables)")
 	// IMA-attested: written once by 'kliq graph freeze', then static until next freeze.
 	flag.StringVar(&c.GraphFrozenPath, "graph-frozen", "/opt/kernloom/attested/etc/frozen-graph.yaml", "frozen graph baseline written by 'kliq graph freeze' (IMA-attested if activated)")
 	flag.StringVar(&c.GraphMode, "graph-mode", "learn", "graph mode: learn or frozen-observe")

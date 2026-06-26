@@ -56,6 +56,8 @@ type Binding struct {
 	TelemetryHandle  any
 	SourcePEP        adapterruntime.SourcePEP
 	RelationshipPEP  adapterruntime.RelationshipPEP
+	AccessPolicyPEP  adapterruntime.AccessPolicyPEP
+	IdentityResolver adapterruntime.IdentityResolver
 	FlowTelemetry    adapterruntime.Adapter
 	RuntimeFactory   RuntimeFactory
 	Inventory        componentinventory.ComponentRuntimeInventory
@@ -135,6 +137,7 @@ func openKLShieldBinding(ctx context.Context, cfg BindingConfig) (*Binding, erro
 		TelemetryHandle:  maps,
 		SourcePEP:        pep,
 		RelationshipPEP:  pep,
+		AccessPolicyPEP:  pep,
 		FlowTelemetry: shieldtelemetry.NewFromMaps(shieldtelemetry.Config{
 			Interval: cfg.Interval,
 			NodeID:   cfg.NodeID,

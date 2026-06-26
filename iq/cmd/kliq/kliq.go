@@ -210,6 +210,7 @@ func main() {
 
 	// ── §2 Config + PDP setup ───────────────────────────────────────────────
 	c := parseFlags()
+	configureKLIQLogging(c)
 
 	// Mode handling.
 	switch c.Mode {
@@ -495,6 +496,8 @@ func main() {
 	var sourcePEPSidecars []sourcePEPBinding
 	var sourcePEP adapterruntime.SourcePEP
 	var relationshipPEP adapterruntime.RelationshipPEP
+	var accessPolicyPEP adapterruntime.AccessPolicyPEP
+	var identityResolver adapterruntime.IdentityResolver
 	relationshipPEPs := &relationshipPEPGroup{}
 	bindingAdapterNames := c.bindingAdapterNames()
 	if len(bindingAdapterNames) > 0 {
@@ -540,6 +543,12 @@ func main() {
 					binding.TryOpenRelations(c.BPFfsRoot)
 				}
 			})
+		}
+		if binding.AccessPolicyPEP != nil && accessPolicyPEP == nil {
+			accessPolicyPEP = binding.AccessPolicyPEP
+		}
+		if binding.IdentityResolver != nil && identityResolver == nil {
+			identityResolver = binding.IdentityResolver
 		}
 	}
 	if relationshipPEPs.Len() > 0 {
@@ -618,6 +627,9 @@ func main() {
 		kliqLog.Printf("Action broker superseded %d stale dry-run leases before real enforcement startup", n)
 	}
 	reactionEngine := newRuntimeReactionEngine()
+	c.AlertFile = resolveRuntimeAlertFile(c)
+	reactionEngine.SetAlertFile(c.AlertFile)
+	reactionEngine.SetIdentityResolver(identityResolver)
 	if err := reactionEngine.Load(context.Background(), stateStore, nodeID); err != nil {
 		kliqLog.Printf("WARNING: runtime reaction state load failed: %v", err)
 	}
@@ -975,6 +987,9 @@ func main() {
 
 	runtimeCtx, runtimeCancel := context.WithCancel(context.Background())
 	defer runtimeCancel()
+	startAccessPolicyReconciler(runtimeCtx, accessPolicyPEP, func() []contracts.RuntimeAccessPolicy {
+		return append([]contracts.RuntimeAccessPolicy(nil), c.RuntimeAccessPolicies...)
+	}, c.AccessDriftInterval, c.DryRun)
 	startRuntimeSourceBaselineFlush(runtimeCtx, sourceBaseline, stateStore, c.Interval)
 	shadowRunner, err := startRuntimePDPService(runtimeCtx, runtimePDPServiceConfig{
 		NodeID:      nodeID,
@@ -1414,7 +1429,7 @@ func main() {
 				topSummary = fmt.Sprintf("%s score=%.2f", top.sourceID(), top.score())
 			}
 			stateSummary := runtimeStateSummary(context.Background(), stateStore, nowWall, c, sources)
-			kliqLog.Printf("TICK#%d sources=%d cands=%d samples=%d clean=%v %s %s top: %s",
+			kliqDebugf("TICK#%d sources=%d cands=%d samples=%d clean=%v %s %s top: %s",
 				tickN, seenForLearn, len(cands), tuner.SampleCount(), clean, stateSummary,
 				tuner.CurrentThresholds().Summary(), topSummary)
 		}

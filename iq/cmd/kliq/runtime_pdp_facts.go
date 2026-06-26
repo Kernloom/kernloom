@@ -19,6 +19,11 @@ import (
 )
 
 type runtimePDPFactSnapshot struct {
+	Subject    map[string]any
+	Device     map[string]any
+	Session    map[string]any
+	Resource   map[string]any
+	Workload   map[string]any
 	Baseline   map[string]any
 	Graph      map[string]any
 	Detections map[string]any
@@ -62,6 +67,11 @@ func (p runtimePDPCompositeFactProvider) CandidateFacts(ctx context.Context, nod
 	var errs []error
 	for _, provider := range p.providers {
 		snapshot, err := provider.CandidateFacts(ctx, nodeID, m, now)
+		merged.Subject = mergeFactMaps(merged.Subject, snapshot.Subject)
+		merged.Device = mergeFactMaps(merged.Device, snapshot.Device)
+		merged.Session = mergeFactMaps(merged.Session, snapshot.Session)
+		merged.Resource = mergeFactMaps(merged.Resource, snapshot.Resource)
+		merged.Workload = mergeFactMaps(merged.Workload, snapshot.Workload)
 		merged.Baseline = mergeFactMaps(merged.Baseline, snapshot.Baseline)
 		merged.Graph = mergeFactMaps(merged.Graph, snapshot.Graph)
 		merged.Detections = mergeFactMaps(merged.Detections, snapshot.Detections)

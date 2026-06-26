@@ -631,8 +631,13 @@ func (e *brokeredActionExecutor) persistReceipt(r *decision.EnforcementReceipt) 
 }
 
 func logEnforcementReceipt(receipt *decision.EnforcementReceipt) {
+	if receipt == nil {
+		return
+	}
+	if strings.HasPrefix(receipt.Message, "lease renewed") && kliqCurrentLogLevel < kliqLogDebug {
+		return
+	}
 	parts := []string{
-		"ACTION-RECEIPT",
 		"status=" + string(receipt.Status),
 		"adapter=" + receipt.AdapterID,
 	}
@@ -648,5 +653,5 @@ func logEnforcementReceipt(receipt *decision.EnforcementReceipt) {
 	if receipt.Message != "" {
 		parts = append(parts, "message="+fmt.Sprintf("%q", receipt.Message))
 	}
-	kliqLog.Print(strings.Join(parts, " "))
+	kliqEventf(kliqLogInfo, "action", "receipt %s", strings.Join(parts, " "))
 }

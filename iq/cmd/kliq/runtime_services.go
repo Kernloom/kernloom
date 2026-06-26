@@ -45,10 +45,10 @@ func startRuntimePDPService(ctx context.Context, cfg runtimePDPServiceConfig) (*
 		proposals := make(chan actions.ActionProposal, cfg.ProposalDepth)
 		runner.SetMode(PDPModeActive, proposals)
 		go runRuntimePDPProposalApplier(ctx, proposals, cfg)
-		kliqLog.Printf("RuntimePDP mode: ACTIVE — RuntimePDP is authoritative; FSM/analyzers provide facts only")
+		kliqEventf(kliqLogInfo, "decision", "RuntimePDP mode: ACTIVE - RuntimePDP is authoritative; FSM/analyzers provide facts only")
 	} else {
 		runner.SetMode(PDPModeShadow, nil)
-		kliqLog.Printf("RuntimePDP mode: SHADOW — decisions logged only (--runtime-pdp-mode=active to enforce)")
+		kliqEventf(kliqLogInfo, "decision", "RuntimePDP mode: SHADOW - decisions logged only (--runtime-pdp-mode=active to enforce)")
 	}
 
 	if cfg.StartupPack != nil {
@@ -73,11 +73,11 @@ func runRuntimePDPProposalApplier(ctx context.Context, proposals <-chan actions.
 			}
 			res := cfg.Resolver.Resolve(prop)
 			if !res.Allowed {
-				kliqLog.Printf("[runtime-pdp:active] proposal denied: %s", res.DenyReason)
+				kliqEventf(kliqLogInfo, "warn", "[runtime-pdp:active] proposal denied: %s", res.DenyReason)
 				continue
 			}
 			if !applyResolvedAction(res, cfg.Executor, cfg.Params(), time.Now()) {
-				kliqLog.Printf("[runtime-pdp:active] proposal skipped: unsupported target %s:%q", res.Target.Granularity, res.Target.Value)
+				kliqEventf(kliqLogInfo, "warn", "[runtime-pdp:active] proposal skipped: unsupported target %s:%q", res.Target.Granularity, res.Target.Value)
 			}
 		}
 	}
@@ -141,7 +141,7 @@ func handleRuntimeSignal(ctx context.Context, sig signal.Signal, cfg runtimeSign
 
 	if cfg.DecisionEngine != nil {
 		if _, _, err := cfg.DecisionEngine.EvaluateSignal(ctx, sig); err != nil {
-			kliqLog.Printf("SIGNAL decision error: %v", err)
+			kliqEventf(kliqLogInfo, "warn", "SIGNAL decision error: %v", err)
 		}
 	}
 
@@ -160,7 +160,11 @@ func handleRuntimeSignal(ctx context.Context, sig signal.Signal, cfg runtimeSign
 }
 
 func logRuntimeSignal(sig signal.Signal) {
-	logLine := fmt.Sprintf("SIGNAL type=%s subject=%s score=%d confidence=%d ttl=%s reasons=%v",
+	now := time.Now().UTC()
+	if !shouldLogRuntimeSignal(sig, now) {
+		return
+	}
+	logLine := fmt.Sprintf("type=%s subject=%s score=%d confidence=%d ttl=%s reasons=%v",
 		sig.Type, formatSubject(sig.Subject), sig.Score, sig.Confidence, sig.TTL, sig.ReasonCodes)
 	if len(sig.Attributes) > 0 {
 		keys := make([]string, 0, len(sig.Attributes))
@@ -172,7 +176,7 @@ func logRuntimeSignal(sig signal.Signal) {
 			logLine += fmt.Sprintf(" %s=%s", k, sig.Attributes[k])
 		}
 	}
-	kliqLog.Print(logLine)
+	kliqEventf(kliqLogInfo, "signal", "%s", logLine)
 }
 
 func maybeApplyRuntimeGraphRelationship(sig signal.Signal, cfg runtimeSignalConsumerConfig) {
@@ -217,14 +221,14 @@ func maybeApplyRuntimeGraphRelationship(sig signal.Signal, cfg runtimeSignalCons
 	}
 	res := cfg.Resolver.Resolve(prop)
 	if res.DenyReason != "" {
-		kliqLog.Printf("ACTION-RESOLVER runtime-pdp relationship %s %s->%s reason=%q",
+		kliqEventf(kliqLogInfo, "action", "resolver runtime-pdp relationship %s %s->%s reason=%q",
 			relTarget.Label, prop.DesiredLevel, res.ExecutableLevel, res.DenyReason)
 	}
 	result := cfg.Executor.ApplyRelationship(relTarget.PEP, res, now)
 	switch result.Status {
 	case "applied":
-		kliqLog.Printf("RELATIONSHIP deny edge: %s (runtime-pdp graph decision)", relTarget.Label)
+		kliqEventf(kliqLogInfo, "action", "relationship deny edge: %s (runtime-pdp graph decision)", relTarget.Label)
 	case "failed":
-		kliqLog.Printf("RELATIONSHIP deny edge %s failed: %s", relTarget.Label, result.Reason)
+		kliqEventf(kliqLogInfo, "warn", "relationship deny edge %s failed: %s", relTarget.Label, result.Reason)
 	}
 }

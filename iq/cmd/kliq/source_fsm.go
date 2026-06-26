@@ -274,12 +274,12 @@ func processCandidateRuntimePDP(
 	next := processRuntimePDPDecisionForCandidate(m, reactionState, intent, now, c, resolver, executor, runner, nodeID, facts)
 
 	if next.Level != st.Level {
-		kliqLog.Printf("STATE %s %s->%s authority=runtime-pdp strikes=%d up=%d down=%d noncomp=%d score=%.2f %s",
+		kliqEventf(kliqLogInfo, "state", "%s %s->%s authority=runtime-pdp strikes=%d up=%d down=%d noncomp=%d score=%.2f %s",
 			sourceID, st.Level.String(), next.Level.String(),
 			next.Strikes, next.UpStreak, next.DownStreak, next.NonCompTicks,
 			m.score(), m.signalsSummary())
 	} else if intent.Transitioned && intent.ProposedLevel != st.Level {
-		kliqLog.Printf("STATE %s runtime-pdp held fsm_intent=%s current=%s strikes=%d score=%.2f %s",
+		kliqEventf(kliqLogDebug, "state", "%s runtime-pdp held fsm_intent=%s current=%s strikes=%d score=%.2f %s",
 			sourceID, actions.FsmLevelName(intent.ProposedLevel), st.Level.String(),
 			intent.SignalState.Strikes, m.score(), m.signalsSummary())
 	}
@@ -329,7 +329,7 @@ func processRuntimePDPDecisionForCandidate(
 		return mergeFSMRuntimeState(current, intent.SignalState)
 	}
 	if mode == PDPModeShadow {
-		kliqLog.Printf("%s DECISION %s effect=%s reasons=%v (observe-only)",
+		kliqEventf(kliqLogInfo, "decision", "%s candidate %s effect=%s reasons=%v observe_only=true",
 			prefix, describeRuntimeCandidate(m, intent), dec.Effect, dec.ReasonCodes)
 		return mergeFSMRuntimeState(current, intent.SignalState)
 	}
@@ -342,7 +342,7 @@ func processRuntimePDPDecisionForCandidate(
 	prop = runtimePDPActionProposalWithEvidence(prop, input)
 	res := resolver.Resolve(prop)
 	if res.DenyReason != "" {
-		kliqLog.Printf("ACTION-RESOLVER runtime-pdp %s %s->%s reason=%q",
+		kliqEventf(kliqLogInfo, "action", "resolver runtime-pdp %s %s->%s reason=%q",
 			m.sourceID(), prop.DesiredLevel, res.ExecutableLevel, res.DenyReason)
 	}
 
@@ -355,7 +355,7 @@ func processRuntimePDPDecisionForCandidate(
 		target.Attributes = copyStringMap(res.Target.Attributes)
 		newSt, result := executor.ApplySource(target, current, res, c.toPEPParams(), now)
 		if result.Status == "failed" {
-			kliqLog.Printf("[runtime-pdp:active] source action failed subject=%s reason=%s", m.sourceID(), result.Reason)
+			kliqEventf(kliqLogInfo, "warn", "[runtime-pdp:active] source action failed subject=%s reason=%s", m.sourceID(), result.Reason)
 			return mergeFSMRuntimeState(current, intent.SignalState)
 		}
 		return mergeFSMRuntimeState(newSt, intent.SignalState)
@@ -363,17 +363,17 @@ func processRuntimePDPDecisionForCandidate(
 	case actions.TargetGranularityRelationship:
 		target, ok := relationshipTargetFromActionTarget(res.Target)
 		if !ok {
-			kliqLog.Printf("[runtime-pdp:active] relationship target invalid: %#v", res.Target)
+			kliqEventf(kliqLogInfo, "warn", "[runtime-pdp:active] relationship target invalid: %#v", res.Target)
 			return mergeFSMRuntimeState(current, intent.SignalState)
 		}
 		result := executor.ApplyRelationship(target, res, now)
 		if result.Status == "failed" {
-			kliqLog.Printf("[runtime-pdp:active] relationship action failed subject=%s reason=%s", m.sourceID(), result.Reason)
+			kliqEventf(kliqLogInfo, "warn", "[runtime-pdp:active] relationship action failed subject=%s reason=%s", m.sourceID(), result.Reason)
 		}
 		return mergeFSMRuntimeState(current, intent.SignalState)
 
 	default:
-		kliqLog.Printf("[runtime-pdp:active] unsupported target %s:%q", res.Target.Granularity, res.Target.Value)
+		kliqEventf(kliqLogInfo, "warn", "[runtime-pdp:active] unsupported target %s:%q", res.Target.Granularity, res.Target.Value)
 		return mergeFSMRuntimeState(current, intent.SignalState)
 	}
 }

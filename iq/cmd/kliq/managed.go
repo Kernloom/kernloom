@@ -236,6 +236,8 @@ func runtimeCapabilitiesForBundle(rb contracts.RuntimeBundle, c *cfg) map[string
 				"enforce.traffic.rate_limit",
 				"enforce.traffic.drop",
 				"enforce.access.deny",
+				"access.policy.apply",
+				"access.policy.drift_check",
 			)
 		case "netfilter":
 			add(

@@ -178,6 +178,11 @@ func runtimePDPInputForCandidate(nodeID string, m metrics, current fsm.State, in
 	subject := runtimePDPSubjectForCandidate(m)
 	risk := localRiskForCandidate(nodeID, subject, m, current, c, now)
 	adapterFacts := adapterFactMap(m)
+	subjectFacts := runtimeSubjectFactMap(subject, m.Target.Attributes)
+	deviceFacts := scopedAttributeFactMap("device", m.Target.Attributes)
+	sessionFacts := scopedAttributeFactMap("session", m.Target.Attributes)
+	resourceFacts := scopedAttributeFactMap("resource", m.Target.Attributes)
+	workloadFacts := scopedAttributeFactMap("workload", m.Target.Attributes)
 	baselineFacts := thresholdFactsWithSnapshot(c.tuningThresholds())
 	graphFacts := graphFactMap(m.Signals)
 	detectionFacts := map[string]any{}
@@ -189,6 +194,11 @@ func runtimePDPInputForCandidate(nodeID string, m metrics, current fsm.State, in
 		graphFacts = mergeFactMaps(graphFacts, snapshot.Graph)
 		detectionFacts = mergeFactMaps(detectionFacts, snapshot.Detections)
 		actionFacts = mergeFactMaps(actionFacts, snapshot.Actions)
+		subjectFacts = mergeFactMaps(subjectFacts, snapshot.Subject)
+		deviceFacts = mergeFactMaps(deviceFacts, snapshot.Device)
+		sessionFacts = mergeFactMaps(sessionFacts, snapshot.Session)
+		resourceFacts = mergeFactMaps(resourceFacts, snapshot.Resource)
+		workloadFacts = mergeFactMaps(workloadFacts, snapshot.Workload)
 		if err != nil {
 			adapterFacts["fact_lookup_error"] = err.Error()
 		}
@@ -199,6 +209,11 @@ func runtimePDPInputForCandidate(nodeID string, m metrics, current fsm.State, in
 		Subject: subject,
 		Risk:    risk,
 		Context: runtimepdp.ContextSnapshot{
+			Subject:    subjectFacts,
+			Device:     deviceFacts,
+			Session:    sessionFacts,
+			Resource:   resourceFacts,
+			Workload:   workloadFacts,
 			Metrics:    metricFactMap(m.Signals),
 			Signals:    signalFactMap(m),
 			Baseline:   baselineFacts,
@@ -235,6 +250,16 @@ func runtimePDPInputForSignal(nodeID string, sig signal.Signal, facts runtimePDP
 		attrs[k] = v
 		insertNestedFact(attrs, k, v)
 	}
+	subjectAttrs := signalAttributeStringMap(sig.Attributes)
+	subjectFacts := runtimeSubjectFactMap(subject, subjectAttrs)
+	deviceFacts := scopedAttributeFactMap("device", subjectAttrs)
+	sessionFacts := scopedAttributeFactMap("session", subjectAttrs)
+	resourceFacts := scopedAttributeFactMap("resource", subjectAttrs)
+	workloadFacts := scopedAttributeFactMap("workload", subjectAttrs)
+	if sig.Object.ID != "" {
+		resourceFacts["id"] = sig.Object.ID
+		resourceFacts["kind"] = string(sig.Object.Kind)
+	}
 	score := clampInt(sig.Score, 0, 100)
 	graphFacts := graphSignalFactMap(sig)
 	baselineFacts := map[string]any{}
@@ -251,6 +276,11 @@ func runtimePDPInputForSignal(nodeID string, sig signal.Signal, facts runtimePDP
 		graphFacts = mergeFactMaps(graphFacts, snapshot.Graph)
 		detectionFacts = mergeFactMaps(detectionFacts, snapshot.Detections)
 		actionFacts = mergeFactMaps(actionFacts, snapshot.Actions)
+		subjectFacts = mergeFactMaps(subjectFacts, snapshot.Subject)
+		deviceFacts = mergeFactMaps(deviceFacts, snapshot.Device)
+		sessionFacts = mergeFactMaps(sessionFacts, snapshot.Session)
+		resourceFacts = mergeFactMaps(resourceFacts, snapshot.Resource)
+		workloadFacts = mergeFactMaps(workloadFacts, snapshot.Workload)
 		if err != nil {
 			adapterFacts["fact_lookup_error"] = err.Error()
 		}
@@ -267,6 +297,11 @@ func runtimePDPInputForSignal(nodeID string, sig signal.Signal, facts runtimePDP
 		Subject: subject,
 		Risk:    risk,
 		Context: runtimepdp.ContextSnapshot{
+			Subject:  subjectFacts,
+			Device:   deviceFacts,
+			Session:  sessionFacts,
+			Resource: resourceFacts,
+			Workload: workloadFacts,
 			Signals:  signalFacts,
 			Baseline: baselineFacts,
 			Graph:    graphFacts,
@@ -641,6 +676,54 @@ func adapterFactMap(m metrics) map[string]any {
 			attrs[k] = v
 		}
 		out["attributes"] = attrs
+	}
+	return out
+}
+
+func runtimeSubjectFactMap(subject contracts.EntityRef, attrs map[string]string) map[string]any {
+	out := scopedAttributeFactMap("subject", attrs)
+	if subject.ID != "" {
+		out["id"] = subject.ID
+	}
+	if subject.Kind != "" {
+		out["kind"] = subject.Kind
+	}
+	if subject.Namespace != "" {
+		out["namespace"] = subject.Namespace
+	}
+	for _, key := range []string{"groups", "group", "roles", "role"} {
+		for _, attrKey := range []string{"subject." + key, "subject_" + key, key} {
+			if value := strings.TrimSpace(attrs[attrKey]); value != "" {
+				out[key] = value
+				insertNestedFact(out, key, value)
+				break
+			}
+		}
+	}
+	return out
+}
+
+func scopedAttributeFactMap(scope string, attrs map[string]string) map[string]any {
+	out := map[string]any{}
+	prefix := scope + "."
+	for key, value := range attrs {
+		if !strings.HasPrefix(key, prefix) {
+			continue
+		}
+		short := strings.TrimPrefix(key, prefix)
+		if short == "" {
+			continue
+		}
+		out[short] = value
+		insertNestedFact(out, short, value)
+	}
+	return out
+}
+
+func signalAttributeStringMap(attrs map[string]string) map[string]string {
+	out := make(map[string]string, len(attrs))
+	for key, value := range attrs {
+		out[key] = value
 	}
 	return out
 }

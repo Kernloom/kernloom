@@ -25,10 +25,10 @@ requirements "public-edge-runtime-context":
 
 detection "public-edge-runtime-detections":
   detect "risk-elevated":
-    when risk at least medium
+    when "runtime.risk.level" at least medium
 
   detect "risk-high":
-    when risk at least high
+    when "runtime.risk.level" at least high
 
   detect "unknown-source-deny":
     when denied access to service "public-edge" by unknown source exceeds 5 within 15m
@@ -39,6 +39,7 @@ detection "public-edge-runtime-detections":
 response "public-edge-runtime-responses":
   on "risk-elevated" then rate_limit source at 100 pps for 1m
   on "risk-high" then alert route "security-ops" severity "high" dedupe 1m
+  on "unknown-source-deny" then rate_limit source at 100 pps for 1m
   on "unknown-source-deny" then alert route "security-ops" severity "medium" dedupe 5m
   on "sustained-pressure" then temporary_block source for 1m
     require previous action "enforce.traffic.rate_limit" active

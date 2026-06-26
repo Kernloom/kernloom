@@ -21,6 +21,23 @@ spec:
   default_effect: deny
   capabilities_required:
     - enforce.traffic.rate_limit
+  access_policies:
+    - id: ziti-controller-admin-access
+      subject:
+        type: group
+        ref: kernloom-admins
+      action: access
+      resource:
+        type: application
+        ref: ziti-controller
+      conditions:
+        - id: require-mfa
+          type: authentication_strength
+          signal: session.authentication.strength
+          operator: in
+          value: [mfa, phishing_resistant_mfa]
+      effect: allow
+      default_effect: deny
   autonomy_lifecycle:
     hold:
       - id: hold-enforcement-feedback
@@ -120,6 +137,12 @@ func TestLoadPolicyBytesRecognizesRuntimePolicyPack(t *testing.T) {
 	}
 	if len(c.RuntimeAlertRoutes) != 1 || c.RuntimeAlertRoutes[0].ID != "alert-route.security-ops" {
 		t.Fatalf("alert routes not applied: %#v", c.RuntimeAlertRoutes)
+	}
+	if len(c.RuntimeAccessPolicies) != 1 || c.RuntimeAccessPolicies[0].ID != "ziti-controller-admin-access" {
+		t.Fatalf("access policies not applied: %#v", c.RuntimeAccessPolicies)
+	}
+	if !c.CapabilitiesRequired["access.policy.apply"] {
+		t.Fatalf("access capability not applied: %#v", c.CapabilitiesRequired)
 	}
 	if c.RuntimeAutonomyLifecycle == nil || len(c.RuntimeAutonomyLifecycle.Hold) != 1 {
 		t.Fatalf("autonomy lifecycle not applied: %#v", c.RuntimeAutonomyLifecycle)

@@ -6,6 +6,8 @@ package main
 import (
 	"context"
 	"log"
+	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -403,6 +405,59 @@ func TestRuntimeReactionSignalInputEmitsPersistedAlert(t *testing.T) {
 	}
 }
 
+func TestRuntimeReactionAlertFileAppendsAlertAndEscalation(t *testing.T) {
+	now := time.Date(2026, 6, 21, 11, 5, 0, 0, time.UTC)
+	c := newReactionAlertTestCfg(1)
+	c.RuntimeAlertRoutes[0].Channels = []contracts.RuntimeAlertChannel{{
+		Type: "file",
+		Ref:  "file.security-ops",
+	}}
+	c.RuntimeAlertRoutes[0].Acknowledgement = contracts.RuntimeAlertAcknowledgement{
+		Required: true,
+		Timeout:  contracts.NewDuration(time.Second),
+		Escalation: []contracts.RuntimeAlertEscalation{{
+			To:  contracts.RuntimeAlertAudience{Type: "group", Ref: "security-leads"},
+			Via: []string{"file", "log"},
+		}},
+	}
+	alertFile := t.TempDir() + "/alerts.jsonl"
+	engine := newRuntimeReactionEngine()
+	engine.SetAlertFile(alertFile)
+
+	engine.EvaluateSignal(reactionDeniedAccessSignal(), now, c, nil, nil, "node-test")
+	engine.EvaluateSignal(reactionDeniedAccessSignal(), now.Add(2*time.Second), c, nil, nil, "node-test")
+
+	raw, err := os.ReadFile(alertFile)
+	if err != nil {
+		t.Fatalf("read alert file: %v", err)
+	}
+	text := string(raw)
+	if !strings.Contains(text, `"type":"alert"`) {
+		t.Fatalf("alert JSONL entry missing: %s", text)
+	}
+	if !strings.Contains(text, `"type":"alert_escalation"`) {
+		t.Fatalf("alert escalation JSONL entry missing: %s", text)
+	}
+}
+
+func TestRuntimeReactionAlertFileFallbackDoesNotWriteWithoutFileChannel(t *testing.T) {
+	now := time.Date(2026, 6, 21, 11, 5, 0, 0, time.UTC)
+	c := newReactionAlertTestCfg(1)
+	c.RuntimeAlertRoutes[0].Channels = []contracts.RuntimeAlertChannel{{
+		Type: "log",
+		Ref:  "log.security-ops",
+	}}
+	alertFile := t.TempDir() + "/alerts.jsonl"
+	engine := newRuntimeReactionEngine()
+	engine.SetAlertFile(alertFile)
+
+	engine.EvaluateSignal(reactionDeniedAccessSignal(), now, c, nil, nil, "node-test")
+
+	if _, err := os.Stat(alertFile); !os.IsNotExist(err) {
+		t.Fatalf("alert file created without file channel: err=%v", err)
+	}
+}
+
 func TestRuntimeReactionMetricThresholdComparesStringAttributes(t *testing.T) {
 	rule := contracts.RuntimeDetectionRule{
 		ID:        "risk-medium",
@@ -453,6 +508,27 @@ func TestRuntimeReactionMetricThresholdComparesStringLists(t *testing.T) {
 	}
 	if got := metricThresholdCount(rule, m); got != 1 {
 		t.Fatalf("metricThresholdCount = %d, want 1", got)
+	}
+}
+
+func TestRuntimeReactionMetricThresholdSupportsRuntimeRiskLevel(t *testing.T) {
+	rule := contracts.RuntimeDetectionRule{
+		ID:        "risk-high",
+		Type:      "metric.threshold",
+		Threshold: 1,
+		Params: map[string]any{
+			"key":      "runtime.risk.level",
+			"operator": "in",
+			"value":    []string{"high", "critical"},
+		},
+	}
+	m := metrics{Score: 85}
+	if got := metricThresholdCount(rule, m); got != 1 {
+		t.Fatalf("metricThresholdCount = %d, want 1", got)
+	}
+	m.Score = 20
+	if got := metricThresholdCount(rule, m); got != 0 {
+		t.Fatalf("metricThresholdCount = %d, want 0", got)
 	}
 }
 

@@ -38,6 +38,10 @@ const (
 	CapIDAdapterReportCapabilities = "adapter.report_capabilities"
 	CapIDAdapterReportHealth       = "adapter.report_health"
 	CapIDAdapterApplyPolicyPack    = "adapter.apply_policy_pack"
+
+	// Access desired state
+	CapIDAccessPolicyApply = "access.policy.apply"
+	CapIDAccessPolicyDrift = "access.policy.drift_check"
 )
 
 // The functions below are reference constructors for the well-known capabilities.
@@ -105,6 +109,26 @@ func WellKnownNetworkObserveScan() *capability.Capability {
 		capability.TypeTelemetry, capability.LayerL3L4, capability.DirectionOutput,
 		"Report increasing destination port diversity (scan pattern)",
 	).AddTag("network").AddTag("telemetry")
+}
+
+func WellKnownAccessPolicyApply() *capability.Capability {
+	return capability.NewCapability(
+		CapIDAccessPolicyApply, "v1",
+		capability.TypePolicy, capability.LayerPolicy, capability.DirectionInput,
+		"Accept adapter-neutral access policy desired state",
+	).
+		AddParam("policy", "RuntimeAccessPolicy", true, "Access policy desired state").
+		AddTag("access").AddTag("policy")
+}
+
+func WellKnownAccessPolicyDrift() *capability.Capability {
+	return capability.NewCapability(
+		CapIDAccessPolicyDrift, "v1",
+		capability.TypePolicy, capability.LayerPolicy, capability.DirectionOutput,
+		"Check whether access policy desired state is still in sync",
+	).
+		AddParam("policy", "RuntimeAccessPolicy", true, "Access policy desired state").
+		AddTag("access").AddTag("policy").AddTag("drift")
 }
 
 // Graph

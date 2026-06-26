@@ -7,6 +7,7 @@ package runtimepdp
 
 import (
 	"fmt"
+	"regexp"
 	"sort"
 	"strings"
 	"time"
@@ -17,9 +18,14 @@ import (
 
 const deciderName = "kliq.runtimepdp"
 
+var celFactRefRE = regexp.MustCompile(`\b([A-Za-z_][A-Za-z0-9_]*)\.([A-Za-z_][A-Za-z0-9_]*)\b`)
+
 type ContextSnapshot struct {
+	Subject  map[string]any
 	Device   map[string]any
 	Session  map[string]any
+	Resource map[string]any
+	Workload map[string]any
 	Features map[string]any
 
 	// Generic decision facts. Adapters/analyzers own the semantics of these
@@ -43,8 +49,10 @@ type Input struct {
 }
 
 type PDP struct {
-	pack  contracts.RuntimePolicyPack
-	rules []compiledRule
+	pack          contracts.RuntimePolicyPack
+	rules         []compiledRule
+	detectionKeys []string
+	actionKeys    []string
 }
 
 type compiledRule struct {
@@ -76,10 +84,14 @@ func Compile(pack contracts.RuntimePolicyPack) (*PDP, error) {
 	}
 	effectiveRules := EffectiveRules(pack)
 	rules := make([]compiledRule, 0, len(effectiveRules))
+	var detectionKeys []string
+	var actionKeys []string
 	for _, rule := range effectiveRules {
 		if rule.When == "" {
 			return nil, fmt.Errorf("runtimepdp: rule %q has empty when expression", rule.ID)
 		}
+		detectionKeys = append(detectionKeys, referencedFactKeys("detections", rule.When)...)
+		actionKeys = append(actionKeys, referencedFactKeys("actions", rule.When)...)
 		ast, iss := env.Parse(rule.When)
 		if iss.Err() != nil {
 			return nil, fmt.Errorf("runtimepdp: parse rule %q: %w", rule.ID, iss.Err())
@@ -90,7 +102,12 @@ func Compile(pack contracts.RuntimePolicyPack) (*PDP, error) {
 		}
 		rules = append(rules, compiledRule{rule: rule, program: program})
 	}
-	return &PDP{pack: pack, rules: rules}, nil
+	return &PDP{
+		pack:          pack,
+		rules:         rules,
+		detectionKeys: compactStrings(detectionKeys),
+		actionKeys:    compactStrings(actionKeys),
+	}, nil
 }
 
 // EffectiveRules returns the executable rules KLIQ evaluates for a policy pack.
@@ -172,6 +189,32 @@ func compactStrings(values []string) []string {
 	return out
 }
 
+func referencedFactKeys(root, expr string) []string {
+	var out []string
+	for _, match := range celFactRefRE.FindAllStringSubmatch(expr, -1) {
+		if len(match) != 3 || match[1] != root || match[2] == "" {
+			continue
+		}
+		out = append(out, match[2])
+	}
+	return out
+}
+
+func inactiveFactDefaults(keys []string) map[string]any {
+	if len(keys) == 0 {
+		return nil
+	}
+	out := make(map[string]any, len(keys))
+	for _, key := range keys {
+		key = strings.TrimSpace(key)
+		if key == "" {
+			continue
+		}
+		out[key] = map[string]any{"active": false}
+	}
+	return out
+}
+
 func sanitizeRuleID(value string) string {
 	value = strings.TrimSpace(value)
 	if value == "" {
@@ -220,8 +263,11 @@ func (p *PDP) decide(input Input, includeTrace bool) (contracts.RuntimeDecision,
 	}
 	vars := map[string]any{
 		"risk":       riskVars(input.Risk, now),
+		"subject":    factMapVars(input.Context.Subject, nil),
 		"device":     deviceVars(input.Context.Device),
 		"session":    sessionVars(input.Context.Session),
+		"resource":   factMapVars(input.Context.Resource, nil),
+		"workload":   factMapVars(input.Context.Workload, nil),
 		"features":   factMapVars(input.Context.Features, nil),
 		"metrics":    factMapVars(input.Context.Metrics, nil),
 		"signals":    factMapVars(input.Context.Signals, nil),
@@ -229,8 +275,8 @@ func (p *PDP) decide(input Input, includeTrace bool) (contracts.RuntimeDecision,
 		"graph":      factMapVars(input.Context.Graph, nil),
 		"adapter":    factMapVars(input.Context.Adapter, nil),
 		"fsm":        factMapVars(input.Context.FSM, nil),
-		"detections": factMapVars(input.Context.Detections, nil),
-		"actions":    factMapVars(input.Context.Actions, nil),
+		"detections": factMapVars(input.Context.Detections, inactiveFactDefaults(p.detectionKeys)),
+		"actions":    factMapVars(input.Context.Actions, inactiveFactDefaults(p.actionKeys)),
 	}
 	selected := -1
 	selectedRank := 0
@@ -369,8 +415,11 @@ func (p *PDP) defaultDecision(input Input, now time.Time) contracts.RuntimeDecis
 func celEnv() (*cel.Env, error) {
 	env, err := cel.NewEnv(
 		cel.Variable("risk", cel.MapType(cel.StringType, cel.DynType)),
+		cel.Variable("subject", cel.MapType(cel.StringType, cel.DynType)),
 		cel.Variable("device", cel.MapType(cel.StringType, cel.DynType)),
 		cel.Variable("session", cel.MapType(cel.StringType, cel.DynType)),
+		cel.Variable("resource", cel.MapType(cel.StringType, cel.DynType)),
+		cel.Variable("workload", cel.MapType(cel.StringType, cel.DynType)),
 		cel.Variable("features", cel.MapType(cel.StringType, cel.DynType)),
 		cel.Variable("metrics", cel.MapType(cel.StringType, cel.DynType)),
 		cel.Variable("signals", cel.MapType(cel.StringType, cel.DynType)),

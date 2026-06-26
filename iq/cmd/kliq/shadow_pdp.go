@@ -178,7 +178,7 @@ func startShadowPDP(ctx context.Context, bus adapterruntime.EventBus, runner *sh
 
 					switch mode {
 					case PDPModeShadow:
-						runner.logger.Printf("[runtime-pdp:shadow] DECISION source=signal-window subject=%s effect=%s action=%s level=%s risk=%s(%.2f) score=%d reasons=%v",
+						kliqEventf(kliqLogInfo, "decision", "[runtime-pdp:shadow] source=signal-window subject=%s effect=%s action=%s level=%s risk=%s(%.2f) score=%d reasons=%v",
 							subjectID, dec.Effect, dec.Action.Capability, dec.Action.Level, lra.Level, lra.Confidence, lra.Score, dec.ReasonCodes)
 
 					case PDPModeActive:
@@ -188,7 +188,7 @@ func startShadowPDP(ctx context.Context, bus adapterruntime.EventBus, runner *sh
 							continue
 						}
 						prop = runtimePDPActionProposalWithEvidence(prop, input)
-						runner.logger.Printf("[runtime-pdp:active] DECISION source=signal-window apply=queued subject=%s effect=%s action=%s level=%s risk=%s(%.2f) score=%d reasons=%v",
+						kliqEventf(kliqLogInfo, "decision", "[runtime-pdp:active] source=signal-window apply=queued subject=%s effect=%s action=%s level=%s risk=%s(%.2f) score=%d reasons=%v",
 							subjectID, dec.Effect, dec.Action.Capability, dec.Action.Level, lra.Level, lra.Confidence, lra.Score, dec.ReasonCodes)
 						if proposals == nil {
 							runner.logger.Printf("[runtime-pdp:active] proposal queue unavailable source=signal-window subject=%s", subjectID)

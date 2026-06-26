@@ -13,11 +13,15 @@ import (
 	"log"
 	"net"
 	"os"
+	"reflect"
 	"strconv"
+	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
 	"github.com/cilium/ebpf"
+	contracts "github.com/kernloom/kernloom-contracts"
 	"github.com/kernloom/kernloom/pkg/adapterruntime"
 	"github.com/kernloom/kernloom/pkg/adapters/klshield/client"
 	"github.com/kernloom/kernloom/pkg/core/capability"
@@ -36,6 +40,9 @@ type EnforcementParams = adapterruntime.EnforcementParams
 type Adapter struct {
 	maps   *shieldclient.Maps
 	dryRun bool
+
+	accessMu       sync.Mutex
+	accessPolicies map[string]contracts.RuntimeAccessPolicy
 
 	healthy uint32 // 1 = healthy, 0 = unhealthy (atomic)
 }
@@ -60,6 +67,8 @@ func (a *Adapter) Capabilities() []*capability.Capability {
 		adapterruntime.WellKnownNetworkRateLimitSource(),
 		adapterruntime.WellKnownNetworkAllowSource(),
 		adapterruntime.WellKnownNetworkEnforceAllowlist(),
+		adapterruntime.WellKnownAccessPolicyApply(),
+		adapterruntime.WellKnownAccessPolicyDrift(),
 	}
 }
 
@@ -390,6 +399,74 @@ func (a *Adapter) AllowRelationship(target adapterruntime.RelationshipTarget) er
 		return fmt.Errorf("invalid klshield relationship target %s", target.Canonical())
 	}
 	return a.AllowEdge4(key)
+}
+
+func (a *Adapter) ApplyAccessPolicy(ctx context.Context, policy contracts.RuntimeAccessPolicy, opts adapterruntime.AccessPolicyApplyOptions) (adapterruntime.AccessPolicyApplyResult, error) {
+	if err := ctx.Err(); err != nil {
+		return adapterruntime.AccessPolicyApplyResult{}, err
+	}
+	now := opts.Now.UTC()
+	if now.IsZero() {
+		now = time.Now().UTC()
+	}
+	id := strings.TrimSpace(policy.ID)
+	if id == "" {
+		return adapterruntime.AccessPolicyApplyResult{}, fmt.Errorf("runtime access policy has empty id")
+	}
+	a.accessMu.Lock()
+	if a.accessPolicies == nil {
+		a.accessPolicies = map[string]contracts.RuntimeAccessPolicy{}
+	}
+	a.accessPolicies[id] = policy
+	a.accessMu.Unlock()
+
+	mode := "recorded"
+	if opts.DryRun || a.dryRun {
+		mode = "dry_run"
+	}
+	msg := "klshield records access desired state for audit/drift; native group/resource access enforcement is not available"
+	logger.Printf("ACCESS-POLICY apply id=%s subject=%s:%s resource=%s:%s effect=%s mode=%s native=false",
+		id, policy.Subject.Type, policy.Subject.Ref, policy.Resource.Type, policy.Resource.Ref, policy.Effect, mode)
+	return adapterruntime.AccessPolicyApplyResult{
+		PolicyID:          id,
+		AdapterID:         a.ID(),
+		Status:            mode,
+		Applied:           true,
+		NativeEnforcement: false,
+		Message:           msg,
+		Warnings:          []string{"klshield_access_policy_audit_only"},
+		AppliedAt:         now,
+	}, nil
+}
+
+func (a *Adapter) CheckAccessPolicyDrift(ctx context.Context, policy contracts.RuntimeAccessPolicy) (adapterruntime.AccessPolicyDrift, error) {
+	if err := ctx.Err(); err != nil {
+		return adapterruntime.AccessPolicyDrift{}, err
+	}
+	id := strings.TrimSpace(policy.ID)
+	if id == "" {
+		return adapterruntime.AccessPolicyDrift{}, fmt.Errorf("runtime access policy has empty id")
+	}
+	a.accessMu.Lock()
+	applied, ok := a.accessPolicies[id]
+	a.accessMu.Unlock()
+	drift := adapterruntime.AccessPolicyDrift{
+		PolicyID:          id,
+		AdapterID:         a.ID(),
+		InSync:            true,
+		NativeEnforcement: false,
+		Reason:            "audit_only_native_enforcement_unavailable",
+		CheckedAt:         time.Now().UTC(),
+	}
+	switch {
+	case !ok:
+		drift.InSync = false
+		drift.Reason = "not_applied"
+	case !reflect.DeepEqual(applied, policy):
+		drift.InSync = false
+		drift.Reason = "desired_state_changed"
+	}
+	return drift, nil
 }
 
 func klshieldRelationshipDimension(target adapterruntime.RelationshipTarget) (uint16, string, bool) {

@@ -10,6 +10,7 @@ import (
 	"math"
 	"net/smtp"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -33,8 +34,11 @@ type runtimeReactionEngine struct {
 	lastResponse     map[string]time.Time
 	activeDetections map[string]reactionActiveDetection
 	activeActions    map[string]reactionActiveAction
+	activeAlerts     map[string]reactionActiveAlert
 	store            *sqlite.Store
 	nodeID           string
+	alertFile        string
+	identityResolver adapterruntime.IdentityResolver
 }
 
 type reactionSample struct {
@@ -43,13 +47,14 @@ type reactionSample struct {
 }
 
 type reactionDetectionEvent struct {
-	Rule        contracts.RuntimeDetectionRule
-	Key         string
-	SourceID    string
-	Count       int
-	Window      time.Duration
-	ObservedAt  time.Time
-	SourceAttrs map[string]string
+	Rule         contracts.RuntimeDetectionRule
+	Key          string
+	SourceID     string
+	Count        int
+	Window       time.Duration
+	ObservedAt   time.Time
+	SourceAttrs  map[string]string
+	SourceTarget adapterruntime.SourceTarget
 }
 
 type reactionActiveAction struct {
@@ -74,6 +79,18 @@ type reactionActiveDetection struct {
 	ExpiresAt       time.Time `json:"expires_at"`
 }
 
+type reactionActiveAlert struct {
+	AlertID         string    `json:"alert_id"`
+	RouteID         string    `json:"route_id,omitempty"`
+	ResponseRuleID  string    `json:"response_rule_id,omitempty"`
+	DetectionRuleID string    `json:"detection_rule_id,omitempty"`
+	SourceID        string    `json:"source_id,omitempty"`
+	Severity        string    `json:"severity,omitempty"`
+	ObservedAt      time.Time `json:"observed_at"`
+	AckDeadline     time.Time `json:"ack_deadline,omitempty"`
+	Escalated       bool      `json:"escalated,omitempty"`
+}
+
 type runtimeReactionSnapshot struct {
 	Version          int                                `json:"version"`
 	Windows          map[string][]reactionSample        `json:"windows,omitempty"`
@@ -81,6 +98,7 @@ type runtimeReactionSnapshot struct {
 	LastResponse     map[string]time.Time               `json:"last_response,omitempty"`
 	ActiveDetections map[string]reactionActiveDetection `json:"active_detections,omitempty"`
 	ActiveActions    map[string]reactionActiveAction    `json:"active_actions,omitempty"`
+	ActiveAlerts     map[string]reactionActiveAlert     `json:"active_alerts,omitempty"`
 }
 
 func newRuntimeReactionEngine() *runtimeReactionEngine {
@@ -90,7 +108,29 @@ func newRuntimeReactionEngine() *runtimeReactionEngine {
 		lastResponse:     map[string]time.Time{},
 		activeDetections: map[string]reactionActiveDetection{},
 		activeActions:    map[string]reactionActiveAction{},
+		activeAlerts:     map[string]reactionActiveAlert{},
 	}
+}
+
+func (e *runtimeReactionEngine) SetAlertFile(path string) {
+	if e == nil {
+		return
+	}
+	e.mu.Lock()
+	e.alertFile = strings.TrimSpace(path)
+	e.mu.Unlock()
+	if strings.TrimSpace(path) != "" {
+		kliqLog.Printf("ALERT file fallback path=%s (used only by file/jsonl alert routes)", path)
+	}
+}
+
+func (e *runtimeReactionEngine) SetIdentityResolver(resolver adapterruntime.IdentityResolver) {
+	if e == nil {
+		return
+	}
+	e.mu.Lock()
+	e.identityResolver = resolver
+	e.mu.Unlock()
 }
 
 func (e *runtimeReactionEngine) Load(ctx context.Context, store *sqlite.Store, nodeID string) error {
@@ -129,6 +169,9 @@ func (e *runtimeReactionEngine) Load(ctx context.Context, store *sqlite.Store, n
 	}
 	if snap.ActiveActions != nil {
 		e.activeActions = snap.ActiveActions
+	}
+	if snap.ActiveAlerts != nil {
+		e.activeAlerts = snap.ActiveAlerts
 	}
 	return nil
 }
@@ -190,7 +233,11 @@ func (e *runtimeReactionEngine) EvaluateCandidate(
 	executor *brokeredActionExecutor,
 	nodeID string,
 ) fsm.State {
-	if e == nil || len(c.RuntimeDetectionRules) == 0 || len(c.RuntimeResponseRules) == 0 {
+	if e == nil {
+		return st
+	}
+	e.sweepAlertEscalations(c, now)
+	if len(c.RuntimeDetectionRules) == 0 || len(c.RuntimeResponseRules) == 0 {
 		return st
 	}
 	var out = st
@@ -212,7 +259,11 @@ func (e *runtimeReactionEngine) EvaluateSignal(
 	executor *brokeredActionExecutor,
 	nodeID string,
 ) {
-	if e == nil || len(c.RuntimeDetectionRules) == 0 || len(c.RuntimeResponseRules) == 0 {
+	if e == nil {
+		return
+	}
+	e.sweepAlertEscalations(c, now)
+	if len(c.RuntimeDetectionRules) == 0 || len(c.RuntimeResponseRules) == 0 {
 		return
 	}
 	m := reactionMetricsFromSignal(sig)
@@ -296,13 +347,14 @@ func (e *runtimeReactionEngine) observeDetection(rule contracts.RuntimeDetection
 	e.persistSnapshot(snap)
 	kliqLog.Printf("[reaction] detection=%s source=%s active count=%d window=%s", rule.ID, m.sourceID(), total, window)
 	return reactionDetectionEvent{
-		Rule:        rule,
-		Key:         key,
-		SourceID:    m.sourceID(),
-		Count:       total,
-		Window:      window,
-		ObservedAt:  now,
-		SourceAttrs: copyStringMap(m.Target.Attributes),
+		Rule:         rule,
+		Key:          key,
+		SourceID:     m.sourceID(),
+		Count:        total,
+		Window:       window,
+		ObservedAt:   now,
+		SourceAttrs:  copyStringMap(m.Target.Attributes),
+		SourceTarget: m.Target,
 	}, true
 }
 
@@ -351,19 +403,57 @@ func (e *runtimeReactionEngine) emitAlert(rule contracts.RuntimeResponseRule, ac
 		severity = "medium"
 	}
 	key := "alert|" + rule.ID + "|" + action.Route + "|" + event.Key
+	alertID := reactionAlertID(key, now)
 	e.mu.Lock()
 	if last := e.lastResponse[key]; !last.IsZero() && now.Sub(last) < dedupe {
 		e.mu.Unlock()
 		return
 	}
 	e.lastResponse[key] = now
+	if route != nil && route.Acknowledgement.Required {
+		timeout := route.Acknowledgement.Timeout.Duration
+		if timeout <= 0 {
+			timeout = 15 * time.Minute
+		}
+		if e.activeAlerts == nil {
+			e.activeAlerts = map[string]reactionActiveAlert{}
+		}
+		e.activeAlerts[alertID] = reactionActiveAlert{
+			AlertID:         alertID,
+			RouteID:         action.Route,
+			ResponseRuleID:  rule.ID,
+			DetectionRuleID: event.Rule.ID,
+			SourceID:        event.SourceID,
+			Severity:        severity,
+			ObservedAt:      now.UTC(),
+			AckDeadline:     now.Add(timeout).UTC(),
+		}
+	}
 	snap := e.snapshotLocked()
 	e.mu.Unlock()
 	e.persistSnapshot(snap)
+	alertPayload := map[string]any{
+		"alert_id":          alertID,
+		"route":             action.Route,
+		"severity":          severity,
+		"detection_rule_id": event.Rule.ID,
+		"response_rule_id":  rule.ID,
+		"source":            event.SourceID,
+		"resource_ref":      event.Rule.ResourceRef,
+		"count":             event.Count,
+		"window":            event.Window.String(),
+		"observed_at":       event.ObservedAt.UTC().Format(time.RFC3339Nano),
+		"emitted_at":        now.UTC().Format(time.RFC3339Nano),
+	}
 	e.persistAlertSignal(rule, action, event, severity, now)
-	e.dispatchAlertNotifications(route, rule, action, event, severity, now)
-	kliqLog.Printf("REACTION alert detection=%s response=%s route=%s severity=%s source=%s count=%d window=%s",
+	e.dispatchAlertNotifications(route, rule, action, event, severity, now, alertPayload)
+	kliqEventf(kliqLogInfo, "alert", "reaction detection=%s response=%s route=%s severity=%s source=%s count=%d window=%s",
 		event.Rule.ID, rule.ID, action.Route, severity, event.SourceID, event.Count, event.Window)
+}
+
+func reactionAlertID(key string, now time.Time) string {
+	clean := strings.NewReplacer("|", "-", " ", "-").Replace(key)
+	return clean + "-" + now.UTC().Format("20060102T150405.000000000Z")
 }
 
 func (e *runtimeReactionEngine) dispatchAlertNotifications(
@@ -373,6 +463,7 @@ func (e *runtimeReactionEngine) dispatchAlertNotifications(
 	event reactionDetectionEvent,
 	severity string,
 	now time.Time,
+	alertPayload map[string]any,
 ) {
 	if route == nil || len(route.Channels) == 0 {
 		logReactionNotification("log.default", rule, action, event, severity, now)
@@ -384,11 +475,169 @@ func (e *runtimeReactionEngine) dispatchAlertNotifications(
 			logReactionNotification(channel.Ref, rule, action, event, severity, now)
 		case "email":
 			if err := sendReactionEmail(channel.Ref, route, rule, action, event, severity, now); err != nil {
-				kliqLog.Printf("WARN: reaction email notification route=%s ref=%s: %v", action.Route, channel.Ref, err)
+				kliqEventf(kliqLogInfo, "warn", "reaction email notification route=%s ref=%s: %v", action.Route, channel.Ref, err)
 			}
+		case "file", "jsonl", "file_jsonl", "jsonl_file":
+			path := e.alertFilePathForChannel(channel)
+			if path == "" {
+				kliqEventf(kliqLogInfo, "warn", "reaction file notification route=%s ref=%s has no path; set --alert-file or use file:///path", action.Route, channel.Ref)
+				continue
+			}
+			e.appendAlertFile(path, "alert", alertPayload)
 		default:
-			kliqLog.Printf("WARN: reaction notification channel %q is not supported locally", channel.Type)
+			kliqEventf(kliqLogInfo, "warn", "reaction notification channel %q is not supported locally", channel.Type)
 		}
+	}
+}
+
+func (e *runtimeReactionEngine) sweepAlertEscalations(c cfg, now time.Time) {
+	if e == nil {
+		return
+	}
+	var due []reactionActiveAlert
+	e.mu.Lock()
+	for id, alert := range e.activeAlerts {
+		if alert.Escalated || alert.AckDeadline.IsZero() || now.Before(alert.AckDeadline) {
+			continue
+		}
+		alert.Escalated = true
+		e.activeAlerts[id] = alert
+		due = append(due, alert)
+	}
+	snap := e.snapshotLocked()
+	e.mu.Unlock()
+	if len(due) == 0 {
+		return
+	}
+	e.persistSnapshot(snap)
+	for _, alert := range due {
+		route := runtimeAlertRouteByID(c.RuntimeAlertRoutes, alert.RouteID)
+		escalationPayload := map[string]any{
+			"alert_id":          alert.AlertID,
+			"route":             alert.RouteID,
+			"severity":          alert.Severity,
+			"detection_rule_id": alert.DetectionRuleID,
+			"response_rule_id":  alert.ResponseRuleID,
+			"source":            alert.SourceID,
+			"ack_deadline":      alert.AckDeadline.UTC().Format(time.RFC3339Nano),
+			"escalated_at":      now.UTC().Format(time.RFC3339Nano),
+		}
+		e.dispatchAlertEscalation(route, alert, now, escalationPayload)
+	}
+}
+
+func (e *runtimeReactionEngine) dispatchAlertEscalation(route *contracts.RuntimeAlertRoute, alert reactionActiveAlert, now time.Time, escalationPayload map[string]any) {
+	if route == nil || route.Acknowledgement.NoEscalation || len(route.Acknowledgement.Escalation) == 0 {
+		kliqEventf(kliqLogInfo, "alert", "escalation alert=%s route=%s source=%s severity=%s reason=ack_timeout",
+			alert.AlertID, alert.RouteID, alert.SourceID, alert.Severity)
+		return
+	}
+	for _, escalation := range route.Acknowledgement.Escalation {
+		via := strings.Join(escalation.Via, ",")
+		if via == "" {
+			via = "log"
+		}
+		kliqEventf(kliqLogInfo, "alert", "escalation alert=%s route=%s to=%s:%s via=%s source=%s severity=%s at=%s",
+			alert.AlertID, alert.RouteID, escalation.To.Type, escalation.To.Ref, via,
+			alert.SourceID, alert.Severity, now.UTC().Format(time.RFC3339))
+		for _, channelType := range escalation.Via {
+			switch normalizeRuntimeBehavior(channelType) {
+			case "file", "jsonl", "file_jsonl", "jsonl_file":
+				path := e.alertFilePathForEscalation(route)
+				if path == "" {
+					kliqEventf(kliqLogInfo, "warn", "reaction escalation file notification route=%s has no path; set --alert-file or use file:///path", alert.RouteID)
+					continue
+				}
+				e.appendAlertFile(path, "alert_escalation", escalationPayload)
+			}
+		}
+	}
+}
+
+func (e *runtimeReactionEngine) alertFilePathForChannel(channel contracts.RuntimeAlertChannel) string {
+	if e == nil {
+		return ""
+	}
+	e.mu.Lock()
+	fallback := e.alertFile
+	e.mu.Unlock()
+	return runtimeAlertFilePathForChannel(channel, fallback)
+}
+
+func (e *runtimeReactionEngine) alertFilePathForEscalation(route *contracts.RuntimeAlertRoute) string {
+	if e == nil {
+		return ""
+	}
+	var channel contracts.RuntimeAlertChannel
+	if route != nil {
+		for _, candidate := range route.Channels {
+			switch normalizeRuntimeBehavior(candidate.Type) {
+			case "file", "jsonl", "file_jsonl", "jsonl_file":
+				channel = candidate
+				break
+			}
+			if channel.Type != "" {
+				break
+			}
+		}
+	}
+	return e.alertFilePathForChannel(channel)
+}
+
+func runtimeAlertFilePathForChannel(channel contracts.RuntimeAlertChannel, fallback string) string {
+	fallback = strings.TrimSpace(fallback)
+	ref := strings.TrimSpace(channel.Ref)
+	if ref == "" {
+		return fallback
+	}
+	lower := strings.ToLower(ref)
+	if strings.HasPrefix(lower, "file://") {
+		return strings.TrimSpace(ref[len("file://"):])
+	}
+	if strings.HasPrefix(ref, "/") || strings.HasPrefix(ref, "./") || strings.HasPrefix(ref, "../") || strings.Contains(ref, string(os.PathSeparator)) {
+		return ref
+	}
+	return fallback
+}
+
+func (e *runtimeReactionEngine) appendAlertFile(path, eventType string, payload map[string]any) {
+	if e == nil {
+		return
+	}
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return
+	}
+	e.mu.Lock()
+	nodeID := e.nodeID
+	e.mu.Unlock()
+	entry := map[string]any{}
+	if payload == nil {
+		payload = map[string]any{}
+	}
+	for key, value := range payload {
+		entry[key] = value
+	}
+	entry["type"] = eventType
+	entry["node_id"] = nodeID
+	if _, ok := entry["written_at"]; !ok {
+		entry["written_at"] = time.Now().UTC().Format(time.RFC3339Nano)
+	}
+	if dir := filepath.Dir(path); dir != "" && dir != "." {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			kliqEventf(kliqLogInfo, "warn", "create alert file dir %s: %v", dir, err)
+			return
+		}
+	}
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
+	if err != nil {
+		kliqEventf(kliqLogInfo, "warn", "open alert file %s: %v", path, err)
+		return
+	}
+	defer f.Close()
+	enc := json.NewEncoder(f)
+	if err := enc.Encode(entry); err != nil {
+		kliqEventf(kliqLogInfo, "warn", "append alert file %s: %v", path, err)
 	}
 }
 
@@ -396,7 +645,7 @@ func logReactionNotification(ref string, rule contracts.RuntimeResponseRule, act
 	if strings.TrimSpace(ref) == "" {
 		ref = "log.default"
 	}
-	kliqLog.Printf("NOTIFY log ref=%s route=%s severity=%s detection=%s response=%s source=%s count=%d observed=%s",
+	kliqEventf(kliqLogInfo, "notify", "log ref=%s route=%s severity=%s detection=%s response=%s source=%s count=%d observed=%s",
 		ref, action.Route, severity, event.Rule.ID, rule.ID, event.SourceID, event.Count, now.UTC().Format(time.RFC3339))
 }
 
@@ -504,6 +753,7 @@ func (e *runtimeReactionEngine) snapshotLocked() runtimeReactionSnapshot {
 		LastResponse:     copyTimeMap(e.lastResponse),
 		ActiveDetections: copyReactionActiveDetections(e.activeDetections),
 		ActiveActions:    copyReactionActiveActions(e.activeActions),
+		ActiveAlerts:     copyReactionActiveAlerts(e.activeAlerts),
 	}
 }
 
@@ -564,7 +814,7 @@ func (e *runtimeReactionEngine) applyRuntimeAction(
 	if c.RuntimePDPMode == string(PDPModeActive) {
 		mode = "active"
 	}
-	kliqLog.Printf("[reaction:%s] response=%s detection=%s action=%s source=%s deferred-to-runtime-pdp",
+	kliqEventf(kliqLogDebug, "action", "[reaction:%s] response=%s detection=%s action=%s source=%s deferred-to-runtime-pdp",
 		mode, rule.ID, event.Rule.ID, action.ID, event.SourceID)
 	return st, false
 }
@@ -575,7 +825,7 @@ func (e *runtimeReactionEngine) responseRequirementDenyReason(
 	st fsm.State,
 	now time.Time,
 ) string {
-	if reason := responseBlastRadiusDenyReason(action, event); reason != "" {
+	if reason := e.responseBlastRadiusDenyReason(action, event); reason != "" {
 		return reason
 	}
 	previousID := strings.TrimSpace(stringAnyParam(action.Params, "previous_action_id"))
@@ -595,7 +845,7 @@ func (e *runtimeReactionEngine) responseRequirementDenyReason(
 	return "previous_action_not_active"
 }
 
-func responseBlastRadiusDenyReason(action contracts.RuntimeResponseAction, event reactionDetectionEvent) string {
+func (e *runtimeReactionEngine) responseBlastRadiusDenyReason(action contracts.RuntimeResponseAction, event reactionDetectionEvent) string {
 	subjects, unknownBehavior := reactionBlastRadiusRequirement(action.Params)
 	if len(subjects) == 0 {
 		return ""
@@ -605,7 +855,7 @@ func responseBlastRadiusDenyReason(action contracts.RuntimeResponseAction, event
 		if subject.Type != "group" || subject.Ref == "" {
 			continue
 		}
-		known, contains := reactionSubjectGroupMembership(event.SourceAttrs, subject.Ref)
+		known, contains := e.reactionSubjectGroupMembership(event, subject.Ref)
 		if known && contains {
 			return "blast_radius_protected_group"
 		}
@@ -614,6 +864,25 @@ func responseBlastRadiusDenyReason(action contracts.RuntimeResponseAction, event
 		}
 	}
 	return ""
+}
+
+func (e *runtimeReactionEngine) reactionSubjectGroupMembership(event reactionDetectionEvent, group string) (known bool, contains bool) {
+	if e != nil {
+		e.mu.Lock()
+		resolver := e.identityResolver
+		e.mu.Unlock()
+		if resolver != nil {
+			ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+			defer cancel()
+			membership, err := resolver.SubjectGroupMembership(ctx, event.SourceTarget, group)
+			if err != nil {
+				kliqLog.Printf("WARN: identity resolver group membership group=%s source=%s: %v", group, event.SourceID, err)
+			} else if membership.Known {
+				return true, membership.Member
+			}
+		}
+	}
+	return reactionSubjectGroupMembership(event.SourceAttrs, group)
 }
 
 type reactionProtectedSubject struct {
@@ -1074,6 +1343,9 @@ func metricThresholdCount(rule contracts.RuntimeDetectionRule, m metrics) int {
 		return 0
 	}
 	value := m.signalValue(metricID)
+	if normalizeRuntimeReactionMetricKey(metricID) == "runtime.risk.score" {
+		value = float64(runtimeReactionRiskScore(m))
+	}
 	threshold := floatAnyParam(rule.Params, "value", "threshold")
 	if compareFloat(value, op, threshold) {
 		return 1
@@ -1082,6 +1354,12 @@ func metricThresholdCount(rule contracts.RuntimeDetectionRule, m metrics) int {
 }
 
 func metricStringValue(m metrics, metricID string) string {
+	switch normalizeRuntimeReactionMetricKey(metricID) {
+	case "runtime.risk.level":
+		return string(riskLevelForScore(runtimeReactionRiskScore(m)))
+	case "runtime.risk.score":
+		return strconv.Itoa(runtimeReactionRiskScore(m))
+	}
 	if attrs := m.Target.Attributes; attrs != nil {
 		if value := strings.TrimSpace(attrs[metricID]); value != "" {
 			return value
@@ -1094,6 +1372,31 @@ func metricStringValue(m metrics, metricID string) string {
 		return strconv.FormatFloat(value, 'f', -1, 64)
 	}
 	return ""
+}
+
+func normalizeRuntimeReactionMetricKey(key string) string {
+	key = strings.TrimSpace(key)
+	switch key {
+	case "risk", "risk.level", "runtime.risk.level":
+		return "runtime.risk.level"
+	case "risk.score", "runtime.risk.score":
+		return "runtime.risk.score"
+	default:
+		return key
+	}
+}
+
+func runtimeReactionRiskScore(m metrics) int {
+	if value := m.signalValue("runtime.risk.score"); value > 0 {
+		return clampInt(int(math.Round(value)), 0, 100)
+	}
+	if value := m.signalValue("risk.score"); value > 0 {
+		return clampInt(int(math.Round(value)), 0, 100)
+	}
+	if value := m.signalValue("signal.score"); value > 0 {
+		return clampInt(int(math.Round(value)), 0, 100)
+	}
+	return clampInt(int(math.Round(m.score())), 0, 100)
 }
 
 func isStringComparisonValue(value any, op string) bool {
@@ -1505,6 +1808,17 @@ func copyReactionActiveActions(in map[string]reactionActiveAction) map[string]re
 		return nil
 	}
 	out := make(map[string]reactionActiveAction, len(in))
+	for key, value := range in {
+		out[key] = value
+	}
+	return out
+}
+
+func copyReactionActiveAlerts(in map[string]reactionActiveAlert) map[string]reactionActiveAlert {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make(map[string]reactionActiveAlert, len(in))
 	for key, value := range in {
 		out[key] = value
 	}
